@@ -1,0 +1,147 @@
+package com.penpacanvas.overlay
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.graphics.Color
+import android.util.Log
+import android.view.View
+import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebView
+import androidx.webkit.WebResourceErrorCompat
+import androidx.webkit.WebViewAssetLoader
+import androidx.webkit.WebViewClientCompat
+
+object OverlayWebViewFactory {
+    private const val TAG = "PenpaCanvasWeb"
+    const val ENTRY_URL = "https://appassets.androidplatform.net/assets/www/index.html"
+
+    class JsBridge(
+        private val overlayMode: Boolean,
+        private val onClickThrough: (Boolean) -> Unit,
+        private val onFocusable: (Boolean) -> Unit,
+        private val onUpdateHitRegions: (String) -> Unit = {},
+        private val onClose: () -> Unit,
+        private val onPickImage: () -> Unit,
+    ) {
+        @JavascriptInterface
+        fun isOverlayMode(): Boolean = overlayMode
+
+        @JavascriptInterface
+        fun setClickThrough(enabled: Boolean) {
+            onClickThrough(enabled)
+        }
+
+        @JavascriptInterface
+        fun setFocusable(focusable: Boolean) {
+            onFocusable(focusable)
+        }
+
+        @JavascriptInterface
+        fun updateHitRegions(payloadJson: String) {
+            onUpdateHitRegions(payloadJson)
+        }
+
+        @JavascriptInterface
+        fun closeOverlay() {
+            onClose()
+        }
+
+        @JavascriptInterface
+        fun pickImage() {
+            onPickImage()
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    fun create(context: Context, bridge: JsBridge): WebView {
+        WebView.setWebContentsDebuggingEnabled(true)
+
+        val assetLoader = WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
+            .build()
+
+        return WebView(context).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            isVerticalScrollBarEnabled = false
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                allowFileAccess = false
+                allowContentAccess = true
+                mediaPlaybackRequiresUserGesture = false
+                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                useWideViewPort = true
+                loadWithOverviewMode = true
+                builtInZoomControls = false
+                displayZoomControls = false
+            }
+
+            webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(cm: ConsoleMessage): Boolean {
+                    Log.d(TAG, "[JS ${cm.messageLevel()}] ${cm.message()} (${cm.sourceId()}:${cm.lineNumber()})")
+                    return true
+                }
+
+                // Prevent native Activity-bound AlertDialog crashes in TYPE_APPLICATION_OVERLAY Service
+                override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
+                    Log.w(TAG, "Suppressed native jsAlert in overlay: $message")
+                    result?.confirm()
+                    return true
+                }
+
+                override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
+                    Log.w(TAG, "Auto-confirmed native jsConfirm in overlay: $message")
+                    result?.confirm()
+                    return true
+                }
+
+                override fun onJsPrompt(
+                    view: WebView?,
+                    url: String?,
+                    message: String?,
+                    defaultValue: String?,
+                    result: JsPromptResult?,
+                ): Boolean {
+                    Log.w(TAG, "Suppressed native jsPrompt in overlay: $message")
+                    result?.confirm(defaultValue ?: "")
+                    return true
+                }
+            }
+
+            webViewClient = object : WebViewClientCompat() {
+                override fun shouldInterceptRequest(
+                    view: WebView,
+                    request: WebResourceRequest,
+                ): WebResourceResponse? {
+                    return assetLoader.shouldInterceptRequest(request.url)
+                }
+
+                override fun onPageFinished(view: WebView, url: String) {
+                    Log.i(TAG, "onPageFinished: $url")
+                    view.setBackgroundColor(Color.TRANSPARENT)
+                    view.invalidate()
+                }
+
+                override fun onReceivedError(
+                    view: WebView,
+                    request: WebResourceRequest,
+                    error: WebResourceErrorCompat,
+                ) {
+                    Log.e(TAG, "onReceivedError: ${request.url} -> ${error.description}")
+                }
+            }
+
+            addJavascriptInterface(bridge, "AndroidOverlay")
+        }
+    }
+}
