@@ -1,0 +1,54 @@
+/* PenpaCanvas Dock Mode: keep Penpa+ UI 100% identical while projecting canvas externally */
+html,
+body {
+  margin: 0 !important;
+  padding: 0 !important;
+  background: var(--bgPage, #f2f2f2) !important;
+  overflow-x: auto;
+  overflow-y: auto;
+}
+
+/* Keep #header in DOM for Penpa drag boundary checks, but collapse visual height */
+#header {
+  height: 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  box-shadow: none !important;
+}
+
+#app-container {
+  margin-top: 4px !important;
+  padding: 4px 6px 10px 6px !important;
+}
+
+/* Keep the real Penpa canvas rendered at full native size off-screen so WebGL2 can sample it */
+#dvique {
+  position: fixed !important;
+  left: -20000px !important;
+  top: -20000px !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* Keep #bottom_button, #stop_watch, #puzzleinfo, #contestinfo visible below tool controls */
+#puzzle-container {
+  margin-top: 2px !important;
+}
+
+#bottom_button {
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+}
+
+/* Ensure modals and float-key fit inside the floating tool window */
+.modal {
+  z-index: 9999 !important;
+}
+
+#float-key {
+  z-index: 5000 !important;
+}
