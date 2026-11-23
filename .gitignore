@@ -1,0 +1,10 @@
+node_modules/
+dist/
+public/penpa-edit/
+src-tauri/target/
+src-tauri/gen/schemas/
+android/.gradle/
+android/local.properties
+android/app/build/
+android/app/src/main/assets/www/
+*.log
