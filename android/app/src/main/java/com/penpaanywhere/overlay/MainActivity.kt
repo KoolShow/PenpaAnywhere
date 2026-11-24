@@ -1,11 +1,14 @@
 package com.penpaanywhere.overlay
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.Settings
 import android.util.Base64
 import android.util.TypedValue
@@ -19,6 +22,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -35,6 +39,8 @@ class MainActivity : AppCompatActivity() {
     private var inAppWebView: WebView? = null
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var overlayToggleBtn: MaterialButton? = null
+    @Volatile
+    private var lastSafeInsetsJson: String = "{\"top\":0,\"right\":0,\"bottom\":0,\"left\":0}"
 
     private val fileChooserLauncher =
         registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -64,10 +70,15 @@ class MainActivity : AppCompatActivity() {
     private val overlayPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
             if (Settings.canDrawOverlays(this)) {
-                startOverlayAndMinimize()
+                ensureMediaReadThenStartOverlay()
             } else {
                 Toast.makeText(this, "需要悬浮窗权限", Toast.LENGTH_SHORT).show()
             }
+        }
+
+    private val mediaReadPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            startOverlayAndMinimize()
         }
 
     private fun dp(v: Int): Int =
@@ -77,6 +88,20 @@ class MainActivity : AppCompatActivity() {
         DynamicColors.applyToActivityIfAvailable(this)
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    if (inAppWebView != null) {
+                        closeInAppWebView()
+                    } else {
+                        isEnabled = false
+                        onBackPressedDispatcher.onBackPressed()
+                        isEnabled = true
+                    }
+                }
+            },
+        )
         showLauncherUi()
     }
 
@@ -195,6 +220,25 @@ class MainActivity : AppCompatActivity() {
             overlayPermissionLauncher.launch(intent)
             return
         }
+        ensureMediaReadThenStartOverlay()
+    }
+
+    private fun ensureMediaReadThenStartOverlay() {
+        val hasAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()
+        val readPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        val hasRead = hasAllFiles ||
+            ContextCompat.checkSelfPermission(this, readPerm) == PackageManager.PERMISSION_GRANTED
+        val prefs = getSharedPreferences("penpaanywhere_prefs", MODE_PRIVATE)
+        val askedOnce = prefs.getBoolean("asked_media_read_once", false)
+        if (!hasRead && !askedOnce) {
+            prefs.edit().putBoolean("asked_media_read_once", true).apply()
+            mediaReadPermissionLauncher.launch(readPerm)
+            return
+        }
         startOverlayAndMinimize()
     }
 
@@ -218,7 +262,8 @@ class MainActivity : AppCompatActivity() {
             onClickThrough = {},
             onFocusable = {},
             onGetDynamicColorTokens = { Md3DynamicColorProvider.exportCssTokensJson(this) },
-            onClose = { runOnUiThread { showLauncherUi() } },
+            onGetSafeAreaInsets = { lastSafeInsetsJson },
+            onClose = { runOnUiThread { closeInAppWebView() } },
             onPickImage = { runOnUiThread { directImageLauncher.launch("image/*") } },
         )
         val wv = OverlayWebViewFactory.create(this, bridge).apply {
@@ -243,8 +288,64 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
             ),
         )
+        ViewCompat.setOnApplyWindowInsetsListener(container) { _, insets ->
+            val sys = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+            )
+            val density = resources.displayMetrics.density.takeIf { it > 0f } ?: 1f
+            val topCss = Math.round(sys.top / density).coerceAtLeast(0)
+            val rightCss = Math.round(sys.right / density).coerceAtLeast(0)
+            val bottomCss = Math.round(sys.bottom / density).coerceAtLeast(0)
+            val leftCss = Math.round(sys.left / density).coerceAtLeast(0)
+            val json = "{\"top\":$topCss,\"right\":$rightCss,\"bottom\":$bottomCss,\"left\":$leftCss}"
+            if (json != lastSafeInsetsJson) {
+                lastSafeInsetsJson = json
+                wv.post {
+                    inAppWebView?.evaluateJavascript(
+                        "window.__PENPAANYWHERE_APPLY_SAFE_INSETS__ && window.__PENPAANYWHERE_APPLY_SAFE_INSETS__($json);",
+                        null,
+                    )
+                }
+            }
+            insets
+        }
         setContentView(container)
+        ViewCompat.requestApplyInsets(container)
         wv.loadUrl(OverlayWebViewFactory.ENTRY_URL)
+    }
+
+    private fun closeInAppWebView() {
+        val wv = inAppWebView
+        if (wv == null) {
+            showLauncherUi()
+            return
+        }
+        inAppWebView = null
+        var closed = false
+        val finishClose = Runnable {
+            if (!closed) {
+                closed = true
+                try {
+                    CookieManager.getInstance().flush()
+                } catch (_: Exception) {
+                }
+                wv.onPause()
+                wv.destroy()
+                showLauncherUi()
+            }
+        }
+        wv.postDelayed(finishClose, 150)
+        try {
+            wv.evaluateJavascript(
+                "window.__PENPAANYWHERE_FLUSH_STORAGE__ && window.__PENPAANYWHERE_FLUSH_STORAGE__();",
+            ) {
+                wv.removeCallbacks(finishClose)
+                finishClose.run()
+            }
+        } catch (_: Exception) {
+            wv.removeCallbacks(finishClose)
+            finishClose.run()
+        }
     }
 
     override fun onPause() {

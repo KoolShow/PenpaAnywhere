@@ -9,6 +9,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
@@ -21,6 +23,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.Display
 import android.view.Gravity
@@ -31,7 +34,10 @@ import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
@@ -173,6 +179,7 @@ class OverlayService : Service() {
     private lateinit var webLayoutParams: WindowManager.LayoutParams
     private var rootContainer: FrameLayout? = null
     private var webView: WebView? = null
+    private var screenshotManager: ScreenshotCompositeManager? = null
 
     // Legacy proxies only used on Android < 13 (API < 33)
     private var boardProxy: TouchProxyWindow? = null
@@ -191,6 +198,8 @@ class OverlayService : Service() {
     private var lastCornerPts: List<PointF> = emptyList()
     private var lastScaleX = 1f
     private var lastPayloadJson: String? = null
+    @Volatile
+    private var lastSafeInsetsJson: String = "{\"top\":0,\"right\":0,\"bottom\":0,\"left\":0}"
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -198,11 +207,18 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        createNotificationChannel()
+        startForeground(NOTIFICATION_ID, buildNotification())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            Log.w("PenpaAnywhereWeb", "OverlayService started without SYSTEM_ALERT_WINDOW permission; stopping safely")
+            Toast.makeText(this, "缺少悬浮窗权限，请先授权", Toast.LENGTH_SHORT).show()
+            isRunning = false
+            stopSelf()
+            return
+        }
         isRunning = true
         overlayContext = createOverlayUiContext()
         windowManager = overlayContext.getSystemService(WINDOW_SERVICE) as WindowManager
-        createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification())
         attachOverlayWindows()
     }
 
@@ -311,8 +327,23 @@ class OverlayService : Service() {
             onGetDynamicColorTokens = {
                 Md3DynamicColorProvider.exportCssTokensJson(overlayContext)
             },
+            onGetSafeAreaInsets = {
+                lastSafeInsetsJson
+            },
+            onGetScreenshotCompositeStatus = {
+                screenshotManager?.getStatusJson() ?: "{}"
+            },
+            onSetScreenshotCompositeEnabled = { enabled ->
+                mainHandler.post { screenshotManager?.setEnabled(enabled) }
+            },
+            onRespondScreenshotPrompt = { choice ->
+                mainHandler.post { screenshotManager?.respondToFirstTimePrompt(choice) }
+            },
+            onRequestAllFilesPermission = {
+                mainHandler.post { screenshotManager?.requestWritePermissionFromUi() }
+            },
             onClose = {
-                mainHandler.post { stopSelf() }
+                mainHandler.post { flushWebStorageAndStop() }
             },
             onPickImage = {
                 mainHandler.post { launchImagePicker() }
@@ -342,6 +373,12 @@ class OverlayService : Service() {
 
         windowManager.addView(container, webLayoutParams)
 
+        ViewCompat.setOnApplyWindowInsetsListener(container) { v, insets ->
+            updateSafeAreaInsetsFromView(v, insets)
+            insets
+        }
+        ViewCompat.requestApplyInsets(container)
+
         if (!useNativeTouchMask) {
             boardProxy = TouchProxyWindow("board").also { it.attach() }
             dockProxy = TouchProxyWindow("dock").also { it.attach() }
@@ -350,6 +387,7 @@ class OverlayService : Service() {
 
         wv.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
             if ((right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop)) {
+                rootContainer?.let { ViewCompat.requestApplyInsets(it) }
                 lastPayloadJson?.let { payload ->
                     mainHandler.post { handleUpdateHitRegions(payload) }
                 }
@@ -359,6 +397,63 @@ class OverlayService : Service() {
         wv.resumeTimers()
         wv.loadUrl(OverlayWebViewFactory.ENTRY_URL)
 
+        screenshotManager = ScreenshotCompositeManager(
+            context = this,
+            captureOverlayAsync = { cb ->
+                val activeWv = webView
+                if (activeWv == null) {
+                    cb(false, null)
+                    return@ScreenshotCompositeManager
+                }
+                // Capture the full overlay WebView (control bar, Penpa+ dock, SVG handles, DOM)
+                // along with its exact on-screen pixel rect so compositing aligns 1:1 with the display.
+                val fullBmp = captureFullWebViewBitmap(activeWv)
+                val loc = IntArray(2)
+                activeWv.getLocationOnScreen(loc)
+                val screenRect = if (activeWv.width > 0 && activeWv.height > 0) {
+                    Rect(loc[0], loc[1], loc[0] + activeWv.width, loc[1] + activeWv.height)
+                } else {
+                    null
+                }
+                activeWv.evaluateJavascript(
+                    "window.__PENPAANYWHERE_CAPTURE_OVERLAY__ ? window.__PENPAANYWHERE_CAPTURE_OVERLAY__() : null;",
+                ) { raw ->
+                    if (raw == null || raw == "null") {
+                        fullBmp?.recycle()
+                        cb(false, null)
+                        return@evaluateJavascript
+                    }
+                    try {
+                        val obj = JSONObject(raw)
+                        val active = obj.optBoolean("active", false)
+                        val dataUrl = obj.optString("dataUrl", "").ifBlank { null }
+                        if (!active) {
+                            fullBmp?.recycle()
+                            cb(false, null)
+                        } else {
+                            cb(true, ScreenshotCompositeManager.OverlaySnapshot(fullBmp, dataUrl, screenRect))
+                        }
+                    } catch (_: Exception) {
+                        fullBmp?.recycle()
+                        cb(false, null)
+                    }
+                }
+            },
+            onShowFirstTimePrompt = { fileName ->
+                val quoted = JSONObject.quote(fileName)
+                webView?.evaluateJavascript(
+                    "window.__PENPAANYWHERE_ON_SCREENSHOT_PROMPT__ && window.__PENPAANYWHERE_ON_SCREENSHOT_PROMPT__($quoted);",
+                    null,
+                )
+            },
+            onStatusChanged = { statusJson ->
+                webView?.evaluateJavascript(
+                    "window.__PENPAANYWHERE_ON_SCREENSHOT_STATUS__ && window.__PENPAANYWHERE_ON_SCREENSHOT_STATUS__($statusJson);",
+                    null,
+                )
+            },
+        ).also { it.start() }
+
         mainHandler.postDelayed({
             Log.i(
                 "PenpaAnywhereWeb",
@@ -367,6 +462,44 @@ class OverlayService : Service() {
             lastPayloadJson?.let { handleUpdateHitRegions(it) }
             wv.invalidate()
         }, 1000)
+    }
+
+    private fun updateSafeAreaInsetsFromView(view: View, insets: WindowInsetsCompat) {
+        val sys = insets.getInsets(
+            WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+        )
+        val density = resources.displayMetrics.density.takeIf { it > 0f } ?: 1f
+        val topCss = (sys.top / density).roundToInt().coerceAtLeast(0)
+        val rightCss = (sys.right / density).roundToInt().coerceAtLeast(0)
+        val bottomCss = (sys.bottom / density).roundToInt().coerceAtLeast(0)
+        val leftCss = (sys.left / density).roundToInt().coerceAtLeast(0)
+        val json = "{\"top\":$topCss,\"right\":$rightCss,\"bottom\":$bottomCss,\"left\":$leftCss}"
+        if (json == lastSafeInsetsJson) return
+        lastSafeInsetsJson = json
+        Log.i("PenpaAnywhereWeb", "Overlay safe-area insets (CSS px): $json (raw px=${sys.top},${sys.right},${sys.bottom},${sys.left}, view=${view.width}x${view.height})")
+        mainHandler.post {
+            webView?.evaluateJavascript(
+                "window.__PENPAANYWHERE_APPLY_SAFE_INSETS__ && window.__PENPAANYWHERE_APPLY_SAFE_INSETS__($json);",
+                null,
+            )
+        }
+    }
+
+    private fun captureFullWebViewBitmap(wv: WebView): Bitmap? {
+        val w = wv.width
+        val h = wv.height
+        if (w <= 0 || h <= 0) return null
+        return try {
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            bmp.eraseColor(Color.TRANSPARENT)
+            val canvas = Canvas(bmp)
+            canvas.translate(-wv.scrollX.toFloat(), -wv.scrollY.toFloat())
+            wv.draw(canvas)
+            bmp
+        } catch (e: Exception) {
+            Log.w("PenpaAnywhereWeb", "captureFullWebViewBitmap failed: ${e.message}")
+            null
+        }
     }
 
     private fun parseCssRect(obj: JSONObject?, scaleX: Float, scaleY: Float, padPx: Int): Rect? {
@@ -638,6 +771,8 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        screenshotManager?.stop()
+        screenshotManager = null
         ImagePickerActivity.onImagePicked = null
         barProxy?.detach()
         dockProxy?.detach()

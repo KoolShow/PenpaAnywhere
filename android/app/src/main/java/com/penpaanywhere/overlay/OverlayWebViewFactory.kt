@@ -29,6 +29,11 @@ object OverlayWebViewFactory {
         private val onFocusable: (Boolean) -> Unit,
         private val onUpdateHitRegions: (String) -> Unit = {},
         private val onGetDynamicColorTokens: () -> String = { "{}" },
+        private val onGetSafeAreaInsets: () -> String = { "{\"top\":0,\"right\":0,\"bottom\":0,\"left\":0}" },
+        private val onGetScreenshotCompositeStatus: () -> String = { "{}" },
+        private val onSetScreenshotCompositeEnabled: (Boolean) -> Unit = {},
+        private val onRespondScreenshotPrompt: (String) -> Unit = {},
+        private val onRequestAllFilesPermission: () -> Unit = {},
         private val onClose: () -> Unit,
         private val onPickImage: () -> Unit,
     ) {
@@ -52,6 +57,27 @@ object OverlayWebViewFactory {
 
         @JavascriptInterface
         fun getDynamicColorTokens(): String = onGetDynamicColorTokens()
+
+        @JavascriptInterface
+        fun getSafeAreaInsets(): String = onGetSafeAreaInsets()
+
+        @JavascriptInterface
+        fun getScreenshotCompositeStatus(): String = onGetScreenshotCompositeStatus()
+
+        @JavascriptInterface
+        fun setScreenshotCompositeEnabled(enabled: Boolean) {
+            onSetScreenshotCompositeEnabled(enabled)
+        }
+
+        @JavascriptInterface
+        fun respondScreenshotPrompt(choice: String) {
+            onRespondScreenshotPrompt(choice)
+        }
+
+        @JavascriptInterface
+        fun requestAllFilesPermission() {
+            onRequestAllFilesPermission()
+        }
 
         @JavascriptInterface
         fun closeOverlay() {
@@ -139,8 +165,10 @@ object OverlayWebViewFactory {
                     Log.i(TAG, "onPageFinished: $url")
                     view.setBackgroundColor(Color.TRANSPARENT)
                     val tokensJson = bridge.getDynamicColorTokens()
+                    val safeInsetsJson = bridge.getSafeAreaInsets()
                     view.evaluateJavascript(
-                        "window.__PENPAANYWHERE_APPLY_MD3_TOKENS__ && window.__PENPAANYWHERE_APPLY_MD3_TOKENS__($tokensJson);",
+                        "window.__PENPAANYWHERE_APPLY_MD3_TOKENS__ && window.__PENPAANYWHERE_APPLY_MD3_TOKENS__($tokensJson);" +
+                            "window.__PENPAANYWHERE_APPLY_SAFE_INSETS__ && window.__PENPAANYWHERE_APPLY_SAFE_INSETS__($safeInsetsJson);",
                         null,
                     )
                     view.invalidate()
