@@ -145,11 +145,14 @@ async function syncOverlayHitRegions() {
     const payload = {
       passthroughEnabled: backdropMode.value === 'overlay',
       forceClickThrough: backdropMode.value === 'overlay' && clickThrough.value,
+      calibrating: calibrating.value,
       viewportW: window.innerWidth || 1,
       viewportH: window.innerHeight || 1,
       barRect: barRect.value,
       dockRect: dockVisible.value ? dockRect.value : { x: 0, y: 0, w: 0, h: 0 },
       boardRect,
+      quad: outerQuad.value,
+      corners: corners.value,
     };
     try {
       window.AndroidOverlay.updateHitRegions(JSON.stringify(payload));

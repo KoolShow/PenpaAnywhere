@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { getPenpaBridge, type PenpaIframeBridge } from '../core/penpaBridge';
-import { setAndroidKeyboardFocusable } from '../core/platform';
 
 const props = defineProps<{
   visible: boolean;
@@ -129,14 +128,6 @@ function onIframeLoad() {
   }, 100);
 }
 
-function onDockPointerEnter() {
-  setAndroidKeyboardFocusable(true);
-}
-
-function onDockPointerLeave() {
-  setAndroidKeyboardFocusable(false);
-}
-
 const iframeStyle = computed(() => {
   const s = scale.value;
   return {
@@ -177,8 +168,6 @@ onBeforeUnmount(() => {
       height: collapsed ? '36px' : `${size.h}px`,
       opacity: dockOpacity,
     }"
-    @pointerenter="onDockPointerEnter"
-    @pointerleave="onDockPointerLeave"
   >
     <header
       class="ac-dock-header"

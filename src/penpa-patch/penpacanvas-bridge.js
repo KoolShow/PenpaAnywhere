@@ -379,6 +379,40 @@
     origAddEventListener('mousedown', interceptNativeSelect, true);
     origAddEventListener('touchstart', interceptNativeSelect, true);
     origAddEventListener('click', interceptNativeSelect, true);
+
+    // Request keyboard focus on Android overlay ONLY while an actual text/number input is focused
+    function isTextInput(el) {
+      if (!el || !el.tagName) return false;
+      var tag = el.tagName.toUpperCase();
+      if (tag === 'TEXTAREA') return true;
+      if (tag === 'INPUT') {
+        var t = (el.type || 'text').toLowerCase();
+        return t === 'text' || t === 'number' || t === 'search' || t === 'url' || t === 'password';
+      }
+      return false;
+    }
+    origAddEventListener(
+      'focusin',
+      function (e) {
+        if (isTextInput(e.target)) {
+          try {
+            window.parent.AndroidOverlay.setFocusable(true);
+          } catch (_) {}
+        }
+      },
+      true
+    );
+    origAddEventListener(
+      'focusout',
+      function (e) {
+        if (isTextInput(e.target)) {
+          try {
+            window.parent.AndroidOverlay.setFocusable(false);
+          } catch (_) {}
+        }
+      },
+      true
+    );
   }
 
   window.__PENPACANVAS_BRIDGE__ = {

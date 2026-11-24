@@ -27,6 +27,7 @@ object OverlayWebViewFactory {
         private val onClickThrough: (Boolean) -> Unit,
         private val onFocusable: (Boolean) -> Unit,
         private val onUpdateHitRegions: (String) -> Unit = {},
+        private val onGetDynamicColorTokens: () -> String = { "{}" },
         private val onClose: () -> Unit,
         private val onPickImage: () -> Unit,
     ) {
@@ -47,6 +48,9 @@ object OverlayWebViewFactory {
         fun updateHitRegions(payloadJson: String) {
             onUpdateHitRegions(payloadJson)
         }
+
+        @JavascriptInterface
+        fun getDynamicColorTokens(): String = onGetDynamicColorTokens()
 
         @JavascriptInterface
         fun closeOverlay() {
@@ -129,6 +133,11 @@ object OverlayWebViewFactory {
                 override fun onPageFinished(view: WebView, url: String) {
                     Log.i(TAG, "onPageFinished: $url")
                     view.setBackgroundColor(Color.TRANSPARENT)
+                    val tokensJson = bridge.getDynamicColorTokens()
+                    view.evaluateJavascript(
+                        "window.__PENPACANVAS_APPLY_MD3_TOKENS__ && window.__PENPACANVAS_APPLY_MD3_TOKENS__($tokensJson);",
+                        null,
+                    )
                     view.invalidate()
                 }
 

@@ -1,11 +1,34 @@
 <resources>
-    <style name="Theme.PenpaCanvas" parent="Theme.AppCompat.DayNight.NoActionBar">
-        <item name="android:windowBackground">#111318</item>
-        <item name="android:statusBarColor">#111318</item>
-        <item name="android:navigationBarColor">#111318</item>
+    <style name="Theme.PenpaCanvas" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#A8C7FA</item>
+        <item name="colorOnPrimary">#062E6F</item>
+        <item name="colorPrimaryContainer">#0842A0</item>
+        <item name="colorOnPrimaryContainer">#D3E3FD</item>
+        <item name="colorSecondary">#C2E7FF</item>
+        <item name="colorOnSecondary">#003355</item>
+        <item name="colorSecondaryContainer">#004A77</item>
+        <item name="colorOnSecondaryContainer">#C2E7FF</item>
+        <item name="colorTertiary">#C4EED0</item>
+        <item name="colorOnTertiary">#072711</item>
+        <item name="colorTertiaryContainer">#0F5223</item>
+        <item name="colorOnTertiaryContainer">#C4EED0</item>
+        <item name="colorError">#F2B8B5</item>
+        <item name="colorOnError">#601410</item>
+        <item name="colorErrorContainer">#8C1D18</item>
+        <item name="colorOnErrorContainer">#F9DEDC</item>
+        <item name="android:colorBackground">#111318</item>
+        <item name="colorSurface">#111318</item>
+        <item name="colorOnSurface">#E2E2E9</item>
+        <item name="colorSurfaceVariant">#44474F</item>
+        <item name="colorOnSurfaceVariant">#C4C6D0</item>
+        <item name="colorOutline">#8E9099</item>
+        <item name="colorOutlineVariant">#44474F</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 
-    <style name="Theme.PenpaCanvas.Translucent" parent="Theme.AppCompat.NoActionBar">
+    <style name="Theme.PenpaCanvas.Translucent" parent="Theme.Material3.Dark.NoActionBar">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowNoTitle">true</item>

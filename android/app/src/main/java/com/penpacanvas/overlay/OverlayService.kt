@@ -8,16 +8,20 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.PointF
 import android.graphics.Rect
+import android.graphics.Region
 import android.hardware.display.DisplayManager
+import android.hardware.input.InputManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
-import android.view.ContextThemeWrapper
 import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
@@ -27,6 +31,7 @@ import android.view.WindowManager
 import android.webkit.WebView
 import android.widget.FrameLayout
 import androidx.core.app.NotificationCompat
+import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
 
@@ -43,10 +48,8 @@ class OverlayService : Service() {
     }
 
     /**
-     * Transparent touch-proxy window placed strictly over an interactive web UI region
-     * (control bar, Penpa dock, or perspective board). It forwards local MotionEvents to
-     * the full-screen non-touchable WebView using exact coordinate offset, leaving every
-     * transparent area outside those regions 100% click-through to underlying Android apps.
+     * Fallback proxy window for Android < 13 (API < 33) where AttachedSurfaceControl.setTouchableRegion
+     * is not available. On Android 13+, a single WebView window uses exact Region touch masks instead.
      */
     private inner class TouchProxyWindow(val tag: String) {
         val params = WindowManager.LayoutParams(
@@ -70,7 +73,6 @@ class OverlayService : Service() {
         private var activeGesture = false
         private var pendingRect: Rect? = null
         private var attached = false
-
         private val proxyLoc = IntArray(2)
         private val webLoc = IntArray(2)
 
@@ -82,7 +84,6 @@ class OverlayService : Service() {
                     MotionEvent.ACTION_DOWN -> activeGesture = true
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         activeGesture = false
-                        // Apply any deferred geometry update right after finger lifts
                         pendingRect?.let { r ->
                             pendingRect = null
                             mainHandler.post { applyRectImmediate(r) }
@@ -114,7 +115,6 @@ class OverlayService : Service() {
         fun updateRect(rect: Rect?) {
             if (!attached) return
             if (activeGesture) {
-                // Keep proxy alive and untouched mid-drag so gesture stream is never dropped
                 pendingRect = rect
                 return
             }
@@ -165,13 +165,15 @@ class OverlayService : Service() {
         }
     }
 
+    private val useNativeTouchMask: Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+
     private lateinit var overlayContext: Context
     private lateinit var windowManager: WindowManager
     private lateinit var webLayoutParams: WindowManager.LayoutParams
     private var rootContainer: FrameLayout? = null
     private var webView: WebView? = null
 
-    // Z-order matches CSS: board (bottom) < dock (middle) < bar (top)
+    // Legacy proxies only used on Android < 13 (API < 33)
     private var boardProxy: TouchProxyWindow? = null
     private var dockProxy: TouchProxyWindow? = null
     private var barProxy: TouchProxyWindow? = null
@@ -179,9 +181,14 @@ class OverlayService : Service() {
     private var regionPassthroughEnabled = true
     private var forceClickThrough = false
     private var focusable = false
+    private var calibrating = true
+
     private var lastBarRect: Rect? = null
     private var lastDockRect: Rect? = null
     private var lastBoardRect: Rect? = null
+    private var lastQuadPts: List<PointF> = emptyList()
+    private var lastCornerPts: List<PointF> = emptyList()
+    private var lastScaleX = 1f
     private var lastPayloadJson: String? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -216,7 +223,20 @@ class OverlayService : Service() {
         } else {
             this
         }
-        return ContextThemeWrapper(base, R.style.Theme_PenpaCanvas)
+        return Md3DynamicColorProvider.wrapWithDynamicTheme(base)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        overlayContext = createOverlayUiContext()
+        val tokensJson = Md3DynamicColorProvider.exportCssTokensJson(overlayContext)
+        mainHandler.post {
+            webView?.evaluateJavascript(
+                "window.__PENPACANVAS_APPLY_MD3_TOKENS__ && window.__PENPACANVAS_APPLY_MD3_TOKENS__($tokensJson);",
+                null,
+            )
+            lastPayloadJson?.let { handleUpdateHitRegions(it) }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -231,14 +251,24 @@ class OverlayService : Service() {
         return START_STICKY
     }
 
+    private fun safePassthroughAlpha(): Float {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val im = getSystemService(InputManager::class.java)
+            val maxOpacity = im?.maximumObscuringOpacityForTouch ?: 0.8f
+            (maxOpacity - 0.02f).coerceIn(0.5f, 0.78f)
+        } else {
+            1.0f
+        }
+    }
+
     private fun computeWebWindowFlags(): Int {
         var f = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
 
-        // When region passthrough is active, the full-screen WebView is purely visual (NOT_TOUCHABLE);
-        // only the dynamic TouchProxyWindows over actual UI/board rects capture touch!
-        if (regionPassthroughEnabled) {
+        // On API 33+, the WebView itself receives touches strictly inside rootSurfaceControl.setTouchableRegion(mask),
+        // so it must NOT have FLAG_NOT_TOUCHABLE. On API < 33, legacy TouchProxyWindows forward touches instead.
+        if (!useNativeTouchMask && regionPassthroughEnabled) {
             f = f or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         }
         if (!focusable || forceClickThrough) {
@@ -256,10 +286,8 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            // On Android 12+ (API 31+), keep non-touchable overlay within system untrusted-touch
-            // opacity ceiling (0.8) so touches outside proxies pass straight through to underlying apps.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                alpha = 0.8f
+                alpha = safePassthroughAlpha()
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 layoutInDisplayCutoutMode =
@@ -278,6 +306,9 @@ class OverlayService : Service() {
             },
             onUpdateHitRegions = { payloadJson ->
                 mainHandler.post { handleUpdateHitRegions(payloadJson) }
+            },
+            onGetDynamicColorTokens = {
+                Md3DynamicColorProvider.exportCssTokensJson(overlayContext)
             },
             onClose = {
                 mainHandler.post { stopSelf() }
@@ -308,13 +339,13 @@ class OverlayService : Service() {
         rootContainer = container
         webView = wv
 
-        // 1. Bottom-most: full-screen transparent WebView renderer
         windowManager.addView(container, webLayoutParams)
 
-        // 2. Touch proxies stacked in exact CSS z-order above WebView
-        boardProxy = TouchProxyWindow("board").also { it.attach() }
-        dockProxy = TouchProxyWindow("dock").also { it.attach() }
-        barProxy = TouchProxyWindow("bar").also { it.attach() }
+        if (!useNativeTouchMask) {
+            boardProxy = TouchProxyWindow("board").also { it.attach() }
+            dockProxy = TouchProxyWindow("dock").also { it.attach() }
+            barProxy = TouchProxyWindow("bar").also { it.attach() }
+        }
 
         wv.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
             if ((right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop)) {
@@ -330,8 +361,9 @@ class OverlayService : Service() {
         mainHandler.postDelayed({
             Log.i(
                 "PenpaCanvasWeb",
-                "Overlay attached (multi-proxy passthrough): hwAccel=${wv.isHardwareAccelerated}, size=${wv.width}x${wv.height}",
+                "Overlay attached (nativeTouchMask=$useNativeTouchMask): hwAccel=${wv.isHardwareAccelerated}, size=${wv.width}x${wv.height}",
             )
+            lastPayloadJson?.let { handleUpdateHitRegions(it) }
             wv.invalidate()
         }, 1000)
     }
@@ -343,18 +375,25 @@ class OverlayService : Service() {
         if (w <= 1.0 || h <= 1.0) return null
         val x = obj.optDouble("x", 0.0)
         val y = obj.optDouble("y", 0.0)
-        val left = (x * scaleX).roundToInt() - padPx
-        val top = (y * scaleY).roundToInt() - padPx
-        val right = ((x + w) * scaleX).roundToInt() + padPx
-        val bottom = ((y + h) * scaleY).roundToInt() + padPx
         val maxW = webView?.width?.takeIf { it > 0 } ?: 10000
         val maxH = webView?.height?.takeIf { it > 0 } ?: 10000
-        return Rect(
-            left.coerceIn(0, maxW),
-            top.coerceIn(0, maxH),
-            right.coerceIn(0, maxW),
-            bottom.coerceIn(0, maxH),
-        )
+        val left = ((x * scaleX).roundToInt() - padPx).coerceIn(0, maxW)
+        val top = ((y * scaleY).roundToInt() - padPx).coerceIn(0, maxH)
+        val right = (((x + w) * scaleX).roundToInt() + padPx).coerceIn(0, maxW)
+        val bottom = (((y + h) * scaleY).roundToInt() + padPx).coerceIn(0, maxH)
+        return if (right > left && bottom > top) Rect(left, top, right, bottom) else null
+    }
+
+    private fun parseCssPoints(arr: JSONArray?, scaleX: Float, scaleY: Float): List<PointF> {
+        if (arr == null || arr.length() == 0) return emptyList()
+        val list = ArrayList<PointF>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val x = (o.optDouble("x", 0.0) * scaleX).toFloat()
+            val y = (o.optDouble("y", 0.0) * scaleY).toFloat()
+            list.add(PointF(x, y))
+        }
+        return list
     }
 
     private fun handleUpdateHitRegions(payloadJson: String) {
@@ -364,15 +403,22 @@ class OverlayService : Service() {
             val json = JSONObject(payloadJson)
             val nextPassthrough = json.optBoolean("passthroughEnabled", true)
             val nextForce = json.optBoolean("forceClickThrough", false)
+            calibrating = json.optBoolean("calibrating", true)
+
             val vw = json.optDouble("viewportW", 0.0).takeIf { it > 0 } ?: 1.0
             val vh = json.optDouble("viewportH", 0.0).takeIf { it > 0 } ?: 1.0
 
             val scaleX = if (wv.width > 0) (wv.width.toDouble() / vw).toFloat() else resources.displayMetrics.density
             val scaleY = if (wv.height > 0) (wv.height.toDouble() / vh).toFloat() else resources.displayMetrics.density
+            lastScaleX = scaleX
 
-            lastBarRect = parseCssRect(json.optJSONObject("barRect"), scaleX, scaleY, 6)
-            lastDockRect = parseCssRect(json.optJSONObject("dockRect"), scaleX, scaleY, 4)
+            val barPad = if (useNativeTouchMask) 2 else 6
+            val dockPad = if (useNativeTouchMask) 2 else 4
+            lastBarRect = parseCssRect(json.optJSONObject("barRect"), scaleX, scaleY, barPad)
+            lastDockRect = parseCssRect(json.optJSONObject("dockRect"), scaleX, scaleY, dockPad)
             lastBoardRect = parseCssRect(json.optJSONObject("boardRect"), scaleX, scaleY, 4)
+            lastQuadPts = parseCssPoints(json.optJSONArray("quad"), scaleX, scaleY)
+            lastCornerPts = parseCssPoints(json.optJSONArray("corners"), scaleX, scaleY)
 
             val flagsChanged = (nextPassthrough != regionPassthroughEnabled) || (nextForce != forceClickThrough)
             regionPassthroughEnabled = nextPassthrough
@@ -380,31 +426,92 @@ class OverlayService : Service() {
             if (flagsChanged) {
                 updateWebWindowFlags()
             }
-            applyProxyRegions()
+            applyTouchRegions()
         } catch (e: Exception) {
             Log.e("PenpaCanvasWeb", "updateHitRegions parse failed: ${e.message}")
         }
     }
 
-    private fun applyProxyRegions() {
+    private fun applyTouchRegions() {
+        if (useNativeTouchMask) {
+            applyNativeSurfaceTouchableRegion()
+            return
+        }
         if (!regionPassthroughEnabled) {
-            // Non-overlay mode (e.g. uploaded image mode): WebView handles full-screen touches directly
             boardProxy?.updateRect(null)
             dockProxy?.updateRect(null)
             barProxy?.updateRect(null)
             return
         }
         if (forceClickThrough) {
-            // Locked pass-through: board & dock pass straight through, keep top control bar tappable to unlock!
             boardProxy?.updateRect(null)
             dockProxy?.updateRect(null)
             barProxy?.updateRect(lastBarRect)
             return
         }
-        // Smart region passthrough: only board, dock, and bar intercept touch; all other transparent space passes through!
         boardProxy?.updateRect(lastBoardRect)
         dockProxy?.updateRect(lastDockRect)
         barProxy?.updateRect(lastBarRect)
+    }
+
+    /**
+     * Android 13+ (API 33+): directly supply an exact pixel-aligned Region touch mask to the
+     * window's AttachedSurfaceControl. Supports arbitrary perspective quadrilaterals + circular
+     * corner handles + toolbar + Penpa dock in surface-local coordinates with zero offset error.
+     */
+    private fun applyNativeSurfaceTouchableRegion() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val root = rootContainer ?: return
+        val sc = root.rootSurfaceControl ?: return
+
+        if (!regionPassthroughEnabled) {
+            // Non-overlay (uploaded image) mode: whole window is touchable
+            sc.setTouchableRegion(null)
+            return
+        }
+
+        val w = root.width.takeIf { it > 0 } ?: return
+        val h = root.height.takeIf { it > 0 } ?: return
+        val clip = Region(0, 0, w, h)
+        val mask = Region()
+
+        // Always keep top control bar interactive so user can unlock passthrough / switch modes
+        lastBarRect?.let { mask.op(it, Region.Op.UNION) }
+
+        if (!forceClickThrough) {
+            lastDockRect?.let { mask.op(it, Region.Op.UNION) }
+
+            // Exact arbitrary perspective quad mask (matches distorted trapezoid/quadrilateral!)
+            val polyPts = if (lastQuadPts.size == 4) lastQuadPts else lastCornerPts
+            if (polyPts.size == 4) {
+                val polyPath = Path().apply {
+                    moveTo(polyPts[0].x, polyPts[0].y)
+                    lineTo(polyPts[1].x, polyPts[1].y)
+                    lineTo(polyPts[2].x, polyPts[2].y)
+                    lineTo(polyPts[3].x, polyPts[3].y)
+                    close()
+                }
+                val polyRegion = Region()
+                polyRegion.setPath(polyPath, clip)
+                mask.op(polyRegion, Region.Op.UNION)
+            } else {
+                lastBoardRect?.let { mask.op(it, Region.Op.UNION) }
+            }
+
+            // Include circular touch targets around the 4 perspective corner handles during calibration
+            if (calibrating && lastCornerPts.isNotEmpty()) {
+                val handleRadiusPx = (22f * lastScaleX).coerceAtLeast(32f)
+                val handlePath = Path()
+                for (pt in lastCornerPts) {
+                    handlePath.addCircle(pt.x, pt.y, handleRadiusPx, Path.Direction.CW)
+                }
+                val handleRegion = Region()
+                handleRegion.setPath(handlePath, clip)
+                mask.op(handleRegion, Region.Op.UNION)
+            }
+        }
+
+        sc.setTouchableRegion(mask)
     }
 
     private fun launchImagePicker() {
@@ -427,7 +534,7 @@ class OverlayService : Service() {
         mainHandler.post {
             forceClickThrough = enabled
             updateWebWindowFlags()
-            applyProxyRegions()
+            applyTouchRegions()
             webView?.evaluateJavascript(
                 "window.__PENPACANVAS_ON_CLICK_THROUGH__ && window.__PENPACANVAS_ON_CLICK_THROUGH__($enabled);",
                 null,
@@ -441,7 +548,7 @@ class OverlayService : Service() {
         val root = rootContainer ?: return
         webLayoutParams.flags = computeWebWindowFlags()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            webLayoutParams.alpha = if (regionPassthroughEnabled) 0.8f else 1.0f
+            webLayoutParams.alpha = if (regionPassthroughEnabled) safePassthroughAlpha() else 1.0f
         }
         try {
             windowManager.updateViewLayout(root, webLayoutParams)
@@ -482,7 +589,7 @@ class OverlayService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        val status = if (forceClickThrough) "当前：题板已穿透（点顶栏或此通知恢复）" else "当前：空白区自动穿透 / 元素区可交互"
+        val status = if (forceClickThrough) "当前：题板已穿透（点顶栏或此通知恢复）" else "当前：精确蒙版穿透 / 元素区可交互"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_edit)
             .setContentTitle("PenpaCanvas 叠加层运行中")

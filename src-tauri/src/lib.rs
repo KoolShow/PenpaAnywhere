@@ -154,6 +154,80 @@ fn close_app(window: WebviewWindow) -> Result<(), String> {
     window.close().map_err(|e| e.to_string())
 }
 
+#[cfg(windows)]
+fn read_windows_accent_hex() -> Option<String> {
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
+    };
+
+    let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\DWM\0"
+        .encode_utf16()
+        .collect();
+    let val_name: Vec<u16> = "AccentColor\0".encode_utf16().collect();
+    let mut raw: u32 = 0;
+    let mut size: u32 = std::mem::size_of::<u32>() as u32;
+
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            val_name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut raw as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    if status == 0 {
+        // DWM AccentColor DWORD is 0xAABBGGRR
+        let r = raw & 0xFF;
+        let g = (raw >> 8) & 0xFF;
+        let b = (raw >> 16) & 0xFF;
+        return Some(format!("#{:02X}{:02X}{:02X}", r, g, b));
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_accent_hex() -> Option<String> {
+    let out = std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleAccentColor"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let hex = match code.as_str() {
+        "-1" => "#8E8E93", // Graphite
+        "0" => "#FF3B30",  // Red
+        "1" => "#FF9500",  // Orange
+        "2" => "#FFCC00",  // Yellow
+        "3" => "#34C759",  // Green
+        "4" => "#007AFF",  // Blue
+        "5" => "#AF52DE",  // Purple
+        "6" => "#FF2D55",  // Pink
+        _ => return None,
+    };
+    Some(hex.to_string())
+}
+
+#[tauri::command]
+fn get_system_accent_color() -> Option<String> {
+    #[cfg(windows)]
+    {
+        return read_windows_accent_hex();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return read_macos_accent_hex();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        None
+    }
+}
+
 fn fit_overlay_window_to_monitor(window: &WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor().or_else(|_| window.primary_monitor()) {
         let pos = monitor.position();
@@ -179,8 +253,22 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
 
     thread::spawn(move || {
         let mut prev_hotkey_down = false;
+        let mut prev_accent = read_windows_accent_hex();
+        let mut accent_tick: u32 = 0;
         loop {
             thread::sleep(Duration::from_millis(25));
+
+            // Poll Windows system accent color every ~2s so theme changes apply live
+            accent_tick = accent_tick.wrapping_add(1);
+            if accent_tick % 80 == 0 {
+                let current = read_windows_accent_hex();
+                if current != prev_accent {
+                    prev_accent = current.clone();
+                    if let Some(hex) = current {
+                        let _ = window.emit("system-accent-changed", hex);
+                    }
+                }
+            }
 
             let hotkey_down = unsafe {
                 (GetAsyncKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0
@@ -297,8 +385,22 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
 
     thread::spawn(move || {
         let mut prev_hotkey_down = false;
+        let mut prev_accent = read_macos_accent_hex();
+        let mut accent_tick: u32 = 0;
         loop {
             thread::sleep(Duration::from_millis(25));
+
+            // Poll macOS system accent color every ~2s so theme changes apply live
+            accent_tick = accent_tick.wrapping_add(1);
+            if accent_tick % 80 == 0 {
+                let current = read_macos_accent_hex();
+                if current != prev_accent {
+                    prev_accent = current.clone();
+                    if let Some(hex) = current {
+                        let _ = window.emit("system-accent-changed", hex);
+                    }
+                }
+            }
 
             // Global Cmd+Shift+T or Ctrl+Shift+T toggles forced click-through
             let hotkey_down = unsafe {
@@ -409,6 +511,7 @@ pub fn run() {
             set_always_on_top,
             set_overlay_window_mode,
             update_hit_regions,
+            get_system_accent_color,
             close_app
         ])
         .setup(move |app| {

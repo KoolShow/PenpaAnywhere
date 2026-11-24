@@ -5,6 +5,7 @@ interface AndroidOverlayInterface {
   setClickThrough?: (enabled: boolean) => void;
   setFocusable?: (focusable: boolean) => void;
   updateHitRegions?: (payloadJson: string) => void;
+  getDynamicColorTokens?: () => string;
   closeOverlay?: () => void;
   pickImage?: () => void;
 }
@@ -15,6 +16,7 @@ declare global {
     AndroidOverlay?: AndroidOverlayInterface;
     __PENPACANVAS_ON_ANDROID_IMAGE__?: (dataUrl: string) => void;
     __PENPACANVAS_ON_CLICK_THROUGH__?: (enabled: boolean) => void;
+    __PENPACANVAS_APPLY_MD3_TOKENS__?: (tokens: Record<string, string> | string) => void;
   }
 }
 
