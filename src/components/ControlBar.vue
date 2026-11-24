@@ -4,6 +4,7 @@ import type { BlendRenderMode } from '../core/webglOverlay';
 import type { AlignTarget, QuadMode } from './PerspectiveOverlay.vue';
 import type { RuntimePlatform } from '../core/platform';
 import { loadPersistedState, patchPersistedState } from '../core/storage';
+import { safeAreaInsets } from '../core/safeArea';
 
 export type BackdropMode = 'overlay' | 'image' | 'screen';
 
@@ -44,17 +45,28 @@ const emit = defineEmits<{
 const barEl = ref<HTMLElement | null>(null);
 const savedBar = loadPersistedState().bar;
 const compact = ref(savedBar?.compact ?? false);
+const initSafe = safeAreaInsets.value;
 const pos = ref({
   x:
     typeof savedBar?.xRatio === 'number'
-      ? Math.max(4, Math.min(Math.max(4, window.innerWidth - 100), savedBar.xRatio * window.innerWidth))
-      : 8,
+      ? Math.max(
+          initSafe.left + 4,
+          Math.min(
+            Math.max(initSafe.left + 4, window.innerWidth - initSafe.right - 100),
+            savedBar.xRatio * window.innerWidth,
+          ),
+        )
+      : initSafe.left + 8,
   y:
     typeof savedBar?.yRatio === 'number'
-      ? Math.max(4, Math.min(Math.max(4, window.innerHeight - 44), savedBar.yRatio * window.innerHeight))
-      : window.innerHeight > window.innerWidth
-        ? 36
-        : 10,
+      ? Math.max(
+          initSafe.top + 4,
+          Math.min(
+            Math.max(initSafe.top + 4, window.innerHeight - initSafe.bottom - 44),
+            savedBar.yRatio * window.innerHeight,
+          ),
+        )
+      : initSafe.top + 8,
 });
 const openMenu = ref<'align' | 'blend' | null>(null);
 
@@ -70,13 +82,21 @@ function persistBarState() {
   });
 }
 
-function clampBarToViewport() {
+function getSafeDragLimits() {
+  const safe = safeAreaInsets.value;
   const bw = barEl.value?.offsetWidth || 160;
   const bh = barEl.value?.offsetHeight || 40;
-  const maxX = Math.max(4, window.innerWidth - Math.min(bw, 100));
-  const maxY = Math.max(4, window.innerHeight - Math.min(bh, 44));
-  pos.value.x = Math.max(4, Math.min(maxX, pos.value.x));
-  pos.value.y = Math.max(4, Math.min(maxY, pos.value.y));
+  const minX = safe.left + 4;
+  const minY = safe.top + 4;
+  const maxX = Math.max(minX, window.innerWidth - safe.right - Math.min(bw, Math.max(100, window.innerWidth - safe.left - safe.right - 8)));
+  const maxY = Math.max(minY, window.innerHeight - safe.bottom - Math.min(bh, 44) - 4);
+  return { minX, minY, maxX, maxY };
+}
+
+function clampBarToViewport() {
+  const { minX, minY, maxX, maxY } = getSafeDragLimits();
+  pos.value.x = Math.max(minX, Math.min(maxX, pos.value.x));
+  pos.value.y = Math.max(minY, Math.min(maxY, pos.value.y));
   reportBounds();
 }
 
@@ -165,12 +185,9 @@ function onBarPointerMove(e: PointerEvent) {
   }
 
   e.preventDefault();
-  const bw = barEl.value?.offsetWidth || 160;
-  const bh = barEl.value?.offsetHeight || 40;
-  const maxX = Math.max(4, window.innerWidth - Math.min(bw, 100));
-  const maxY = Math.max(4, window.innerHeight - Math.min(bh, 44));
-  pos.value.x = Math.max(4, Math.min(maxX, dragStart.ox + dx));
-  pos.value.y = Math.max(4, Math.min(maxY, dragStart.oy + dy));
+  const { minX, minY, maxX, maxY } = getSafeDragLimits();
+  pos.value.x = Math.max(minX, Math.min(maxX, dragStart.ox + dx));
+  pos.value.y = Math.max(minY, Math.min(maxY, dragStart.oy + dy));
   reportBounds();
 }
 
@@ -202,6 +219,14 @@ function toggleCompact() {
   persistBarState();
   requestAnimationFrame(reportBounds);
 }
+
+watch(
+  safeAreaInsets,
+  () => {
+    requestAnimationFrame(clampBarToViewport);
+  },
+  { deep: true },
+);
 
 watch(
   () => props.calibrating,
@@ -425,9 +450,9 @@ onBeforeUnmount(() => {
           </button>
 
           <button
-            v-if="platform === 'tauri' || platform === 'android-overlay'"
+            v-if="platform === 'tauri' || platform === 'android-overlay' || platform === 'android-app'"
             class="ac-btn danger ac-gap-left"
-            title="退出叠加层"
+            :title="platform === 'android-app' ? '返回主界面' : '退出叠加层'"
             @click="emit('close-overlay')"
           >
             退出
@@ -484,7 +509,7 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: 0;
-  max-width: calc(100vw - 16px);
+  max-width: calc(100vw - var(--ac-safe-left, 0px) - var(--ac-safe-right, 0px) - 16px);
   padding: 6px 10px;
   border-radius: 18px;
   background: color-mix(in srgb, var(--md-sys-color-surface-container) 92%, transparent);
@@ -599,9 +624,11 @@ onBeforeUnmount(() => {
   border-right: none;
 }
 
-.ac-seg-btn:hover {
-  background: var(--md-sys-color-surface-container-highest);
-  color: var(--md-sys-color-on-surface);
+@media (hover: hover) {
+  .ac-seg-btn:hover {
+    background: var(--md-sys-color-surface-container-highest);
+    color: var(--md-sys-color-on-surface);
+  }
 }
 
 .ac-seg-btn.active {
@@ -661,7 +688,7 @@ onBeforeUnmount(() => {
     flex-wrap: wrap;
     align-items: center;
     width: auto;
-    max-width: calc(100vw - 12px);
+    max-width: calc(100vw - var(--ac-safe-left, 0px) - var(--ac-safe-right, 0px) - 12px);
     padding: 5px 7px;
     row-gap: 5px;
     border-radius: 14px;

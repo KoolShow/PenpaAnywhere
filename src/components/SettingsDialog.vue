@@ -7,7 +7,11 @@ import {
   type HotkeyBinding,
 } from '../core/hotkey';
 import { DEFAULT_PENPA_MD3_CSS } from '../core/defaultPenpaCss';
-import { setAndroidKeyboardFocusable, type RuntimePlatform } from '../core/platform';
+import {
+  setAndroidKeyboardFocusable,
+  type AndroidScreenshotCompositeStatus,
+  type RuntimePlatform,
+} from '../core/platform';
 
 const props = defineProps<{
   open: boolean;
@@ -15,6 +19,7 @@ const props = defineProps<{
   customCssEnabled: boolean;
   customCss: string;
   toggleHotkey: HotkeyBinding | null;
+  androidScreenshotStatus?: AndroidScreenshotCompositeStatus | null;
 }>();
 
 const emit = defineEmits<{
@@ -22,6 +27,8 @@ const emit = defineEmits<{
   (e: 'update:customCssEnabled', v: boolean): void;
   (e: 'update:customCss', v: string): void;
   (e: 'update:toggleHotkey', v: HotkeyBinding | null): void;
+  (e: 'toggle-android-screenshot-composite', enabled: boolean): void;
+  (e: 'request-android-all-files'): void;
   (e: 'recording-change', recording: boolean): void;
 }>();
 
@@ -196,6 +203,52 @@ onBeforeUnmount(() => {
           <div v-if="recordHint" class="ac-setting-hint">{{ recordHint }}</div>
         </div>
 
+        <!-- Android Compatibility Section: Auto-Composite Overlay onto System Screenshots -->
+        <template v-if="platform === 'android-overlay'">
+          <div class="ac-divider" />
+          <div class="ac-setting-section">
+            <div class="ac-setting-row">
+              <div>
+                <div class="ac-setting-label">截图自动合成叠加层（Android 兼容）</div>
+                <div class="ac-setting-desc">
+                  针对系统截屏不包含悬浮窗的设备：检测到新截屏时自动将 Penpa+ 叠加层原地合成写入该截图文件
+                </div>
+              </div>
+              <button
+                class="ac-btn"
+                :class="{ active: !!androidScreenshotStatus?.enabled }"
+                @click="emit('toggle-android-screenshot-composite', !androidScreenshotStatus?.enabled)"
+              >
+                {{ androidScreenshotStatus?.enabled ? '已开启' : '已关闭' }}
+              </button>
+            </div>
+            <div v-if="androidScreenshotStatus" class="ac-setting-actions">
+              <span class="ac-setting-desc">
+                <template v-if="androidScreenshotStatus.enabled">
+                  文件写入权限：{{
+                    androidScreenshotStatus.hasWritePermission
+                      ? '已授权（所有文件访问权限）'
+                      : '未授权（需所有文件访问权限）'
+                  }}
+                </template>
+                <template v-else-if="!androidScreenshotStatus.hasReadPermission">
+                  尚未授予图片读取权限，无法自动检测首次截屏；开启后将引导授权
+                </template>
+                <template v-else>
+                  已具备截屏检测权限，开启后将自动合成完整叠加层到截图
+                </template>
+              </span>
+              <button
+                v-if="androidScreenshotStatus.enabled && !androidScreenshotStatus.hasWritePermission"
+                class="ac-btn tonal"
+                @click="emit('request-android-all-files')"
+              >
+                去授权
+              </button>
+            </div>
+          </div>
+        </template>
+
         <div class="ac-divider" />
 
         <!-- Section 2: Custom CSS Injection into Penpa+ -->
@@ -247,7 +300,8 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding: calc(16px + var(--ac-safe-top, 0px)) calc(16px + var(--ac-safe-right, 0px))
+    calc(16px + var(--ac-safe-bottom, 0px)) calc(16px + var(--ac-safe-left, 0px));
   background: color-mix(in srgb, var(--md-sys-color-scrim) 52%, transparent);
   backdrop-filter: blur(4px);
   pointer-events: auto;

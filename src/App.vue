@@ -15,6 +15,7 @@ import {
   type HotkeyBinding,
 } from './core/hotkey';
 import { getCurrentMd3Tokens } from './core/theme';
+import { safeAreaInsets } from './core/safeArea';
 import {
   closeOverlayApp,
   detectPlatform,
@@ -22,6 +23,7 @@ import {
   setOsFullscreenOverlay,
   supportsNativeTransparentOverlay,
   supportsScreenCapture,
+  type AndroidScreenshotCompositeStatus,
 } from './core/platform';
 import {
   flushPersistedStateNow,
@@ -64,6 +66,9 @@ const dockVisible = ref(savedState.dockVisible ?? true);
 const clickThrough = ref(false);
 const settingsOpen = ref(false);
 const hotkeyRecording = ref(false);
+const screenshotPromptOpen = ref(false);
+const screenshotPromptFile = ref('');
+const androidScreenshotStatus = ref<AndroidScreenshotCompositeStatus | null>(null);
 
 const customCssEnabled = ref(savedState.customCssEnabled ?? true);
 const customCss = ref(
@@ -74,6 +79,7 @@ const toggleHotkey = ref<HotkeyBinding | null>(
 );
 const hotkeyLabel = computed(() => formatHotkeyLabel(toggleHotkey.value));
 
+const overlayRef = ref<InstanceType<typeof PerspectiveOverlay> | null>(null);
 const bridge = ref<PenpaIframeBridge | null>(null);
 const fileInputEl = ref<HTMLInputElement | null>(null);
 const screenVideoEl = ref<HTMLVideoElement | null>(null);
@@ -82,18 +88,23 @@ const imageUrl = ref<string | null>(null);
 const screenStream = ref<MediaStream | null>(null);
 const screenError = ref<string | null>(null);
 
-// Default centered/right-shifted square quad so it doesn't collide with the Penpa tool dock
+// Default centered/right-shifted square quad inside safe area so it doesn't collide with system bars or Penpa dock
 function makeDefaultCorners(): [Point2D, Point2D, Point2D, Point2D] {
+  const safe = safeAreaInsets.value;
   const w = window.innerWidth || 1280;
   const h = window.innerHeight || 800;
-  const isPortrait = h > w;
-  const side = isPortrait ? Math.min(w, h) * 0.72 : Math.min(w, h) * 0.52;
+  const safeW = Math.max(120, w - safe.left - safe.right);
+  const safeH = Math.max(120, h - safe.top - safe.bottom);
+  const isPortrait = safeH > safeW;
+  const side = isPortrait ? Math.min(safeW, safeH) * 0.72 : Math.min(safeW, safeH) * 0.52;
   const cx = isPortrait
-    ? w * 0.5
-    : w >= 1150
-      ? Math.min(w - side * 0.56, w * 0.68)
-      : w * 0.5;
-  const cy = isPortrait ? Math.max(side * 0.5 + 122, h * 0.39) : h * 0.53;
+    ? safe.left + safeW * 0.5
+    : safeW >= 1150
+      ? Math.min(w - safe.right - side * 0.56, safe.left + safeW * 0.68)
+      : safe.left + safeW * 0.5;
+  const cy = isPortrait
+    ? Math.max(safe.top + side * 0.5 + 96, safe.top + safeH * 0.39)
+    : safe.top + safeH * 0.53;
   const half = side * 0.5;
   return [
     { x: cx - half, y: cy - half },
@@ -110,13 +121,18 @@ function loadInitialCorners(): [Point2D, Point2D, Point2D, Point2D] {
       (p) => p && typeof p.x === 'number' && typeof p.y === 'number' && Number.isFinite(p.x) && Number.isFinite(p.y),
     );
     if (valid) {
+      const safe = safeAreaInsets.value;
       const w = window.innerWidth || 1280;
       const h = window.innerHeight || 800;
+      const minX = safe.left + 8;
+      const maxX = Math.max(minX + 48, w - safe.right - 8);
+      const minY = safe.top + 8;
+      const maxY = Math.max(minY + 48, h - safe.bottom - 8);
       const pts: [Point2D, Point2D, Point2D, Point2D] = [
-        { x: Math.max(8, Math.min(w - 8, norm[0].x * w)), y: Math.max(8, Math.min(h - 8, norm[0].y * h)) },
-        { x: Math.max(8, Math.min(w - 8, norm[1].x * w)), y: Math.max(8, Math.min(h - 8, norm[1].y * h)) },
-        { x: Math.max(8, Math.min(w - 8, norm[2].x * w)), y: Math.max(8, Math.min(h - 8, norm[2].y * h)) },
-        { x: Math.max(8, Math.min(w - 8, norm[3].x * w)), y: Math.max(8, Math.min(h - 8, norm[3].y * h)) },
+        { x: Math.max(minX, Math.min(maxX, norm[0].x * w)), y: Math.max(minY, Math.min(maxY, norm[0].y * h)) },
+        { x: Math.max(minX, Math.min(maxX, norm[1].x * w)), y: Math.max(minY, Math.min(maxY, norm[1].y * h)) },
+        { x: Math.max(minX, Math.min(maxX, norm[2].x * w)), y: Math.max(minY, Math.min(maxY, norm[2].y * h)) },
+        { x: Math.max(minX, Math.min(maxX, norm[3].x * w)), y: Math.max(minY, Math.min(maxY, norm[3].y * h)) },
       ];
       if (isConvexQuad(pts)) {
         return pts;
@@ -298,8 +314,13 @@ async function syncOverlayHitRegions() {
     ];
 
     const payload = {
-      passthroughEnabled: backdropMode.value === 'overlay' && !settingsOpen.value,
-      forceClickThrough: backdropMode.value === 'overlay' && clickThrough.value && !settingsOpen.value,
+      passthroughEnabled:
+        backdropMode.value === 'overlay' && !settingsOpen.value && !screenshotPromptOpen.value,
+      forceClickThrough:
+        backdropMode.value === 'overlay' &&
+        clickThrough.value &&
+        !settingsOpen.value &&
+        !screenshotPromptOpen.value,
       calibrating: calibrating.value,
       viewportW: window.innerWidth || 1,
       viewportH: window.innerHeight || 1,
@@ -317,13 +338,57 @@ async function syncOverlayHitRegions() {
   }
 }
 
+watch(settingsOpen, (open) => {
+  if (open) {
+    refreshAndroidScreenshotStatus();
+  }
+});
+
 watch(
-  [backdropMode, clickThrough, settingsOpen, calibrating, dockVisible, barRect, dockRect, corners, outerQuad],
+  [
+    backdropMode,
+    clickThrough,
+    settingsOpen,
+    screenshotPromptOpen,
+    calibrating,
+    dockVisible,
+    barRect,
+    dockRect,
+    corners,
+    outerQuad,
+  ],
   () => {
     syncOverlayHitRegions();
   },
   { deep: true },
 );
+
+function refreshAndroidScreenshotStatus() {
+  if (platform !== 'android-overlay') return;
+  try {
+    const raw = window.AndroidOverlay?.getScreenshotCompositeStatus?.();
+    if (raw) {
+      androidScreenshotStatus.value = JSON.parse(raw) as AndroidScreenshotCompositeStatus;
+    }
+  } catch {
+    // ignore parse errors
+  }
+}
+
+function handleToggleAndroidScreenshotComposite(enabled: boolean) {
+  window.AndroidOverlay?.setScreenshotCompositeEnabled?.(enabled);
+  refreshAndroidScreenshotStatus();
+}
+
+function handleRequestAndroidAllFiles() {
+  window.AndroidOverlay?.requestAllFilesPermission?.();
+}
+
+function handleRespondScreenshotPrompt(choice: 'enable' | 'dismiss' | 'later') {
+  screenshotPromptOpen.value = false;
+  window.AndroidOverlay?.respondScreenshotPrompt?.(choice);
+  refreshAndroidScreenshotStatus();
+}
 
 function handleQuadModeChange(next: QuadMode) {
   if (next === quadMode.value) return;
@@ -487,6 +552,17 @@ onMounted(async () => {
     clickThrough.value = enabled;
   };
   window.__PENPAANYWHERE_FLUSH_STORAGE__ = flushAllStateNow;
+  window.__PENPAANYWHERE_CAPTURE_OVERLAY__ = () => ({
+    active: backdropMode.value === 'overlay',
+    dataUrl: overlayRef.value?.captureOverlayPng() ?? '',
+  });
+  window.__PENPAANYWHERE_ON_SCREENSHOT_PROMPT__ = (fileName: string) => {
+    screenshotPromptFile.value = fileName || '';
+    screenshotPromptOpen.value = true;
+  };
+  window.__PENPAANYWHERE_ON_SCREENSHOT_STATUS__ = (status: AndroidScreenshotCompositeStatus) => {
+    androidScreenshotStatus.value = status;
+  };
 
   // Listen to Tauri global shortcut event even when window is click-through
   if (platform === 'tauri') {
@@ -502,6 +578,7 @@ onMounted(async () => {
     syncOverlayHitRegions();
   }
   if (platform === 'android-overlay') {
+    refreshAndroidScreenshotStatus();
     requestAnimationFrame(() => syncOverlayHitRegions());
   }
 });
@@ -583,6 +660,7 @@ onBeforeUnmount(() => {
 
     <!-- WebGL2 4-point Perspective Overlay Canvas (Multiply / Alpha=1-Luma) -->
     <PerspectiveOverlay
+      ref="overlayRef"
       v-model:corners="corners"
       :bridge="bridge"
       :blend-mode="blendMode"
@@ -626,14 +704,102 @@ onBeforeUnmount(() => {
       @bounds-change="(r) => (barRect = r)"
     />
 
-    <!-- Settings Modal (Hotkey + Custom CSS Injection) -->
+    <!-- Settings Modal (Hotkey + Custom CSS Injection + Android Screenshot Compatibility) -->
     <SettingsDialog
       v-model:open="settingsOpen"
       v-model:custom-css-enabled="customCssEnabled"
       v-model:custom-css="customCss"
       v-model:toggle-hotkey="toggleHotkey"
       :platform="platform"
+      :android-screenshot-status="androidScreenshotStatus"
+      @toggle-android-screenshot-composite="handleToggleAndroidScreenshotComposite"
+      @request-android-all-files="handleRequestAndroidAllFiles"
       @recording-change="(r) => (hotkeyRecording = r)"
     />
+
+    <!-- First-time Android Screenshot Auto-Composite Prompt -->
+    <div
+      v-if="screenshotPromptOpen"
+      class="ac-prompt-backdrop"
+      @pointerdown.self="handleRespondScreenshotPrompt('later')"
+    >
+      <section class="ac-prompt-card" role="dialog" aria-modal="true" aria-label="截图合成提示">
+        <div class="ac-prompt-title">检测到系统截屏</div>
+        <p class="ac-prompt-body">
+          部分 Android 系统截屏不会包含悬浮叠加层。是否开启「截图自动合成叠加层」？开启后每次系统截屏都会自动将当前
+          Penpa+ 题板合成写入原截图文件（需授予「所有文件访问权限」）。
+        </p>
+        <div v-if="screenshotPromptFile" class="ac-prompt-file">{{ screenshotPromptFile }}</div>
+        <div class="ac-prompt-actions">
+          <button class="ac-btn" @click="handleRespondScreenshotPrompt('dismiss')">不再提示</button>
+          <button class="ac-btn" @click="handleRespondScreenshotPrompt('later')">暂不</button>
+          <button class="ac-btn active" @click="handleRespondScreenshotPrompt('enable')">
+            开启并合成此截图
+          </button>
+        </div>
+      </section>
+    </div>
   </main>
 </template>
+
+<style scoped>
+.ac-prompt-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(16px + var(--ac-safe-top, 0px)) calc(16px + var(--ac-safe-right, 0px))
+    calc(16px + var(--ac-safe-bottom, 0px)) calc(16px + var(--ac-safe-left, 0px));
+  background: color-mix(in srgb, var(--md-sys-color-scrim) 52%, transparent);
+  backdrop-filter: blur(4px);
+  pointer-events: auto;
+}
+
+.ac-prompt-card {
+  width: min(380px, 100%);
+  padding: 16px 18px;
+  border-radius: 20px;
+  background: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.56);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ac-prompt-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface);
+}
+
+.ac-prompt-body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.ac-prompt-file {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--md-sys-color-primary);
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: 8px;
+  padding: 5px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ac-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+</style>

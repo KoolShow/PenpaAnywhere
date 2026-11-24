@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { getPenpaBridge, type PenpaIframeBridge } from '../core/penpaBridge';
 import { loadPersistedState, patchPersistedState } from '../core/storage';
+import { safeAreaInsets } from '../core/safeArea';
 
 const props = defineProps<{
   visible: boolean;
@@ -83,19 +84,27 @@ function emitBounds() {
 function clampPosition(isInitial = false) {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
+  const safe = safeAreaInsets.value;
+  const safeW = Math.max(240, vw - safe.left - safe.right);
+  const safeH = Math.max(160, vh - safe.top - safe.bottom);
+  const minX = safe.left + 4;
+  const minY = safe.top + 4;
+
   if (vw < 700 && isInitial && !hasSavedDock) {
-    size.value.w = vw - 16;
-    size.value.h = Math.min(300, Math.round(vh * 0.36));
+    size.value.w = Math.max(260, safeW - 12);
+    size.value.h = Math.min(300, Math.round(safeH * 0.36));
     scale.value = Math.max(0.52, Math.min(1, (size.value.w - 14) / 640));
-    pos.value.x = 8;
-    pos.value.y = Math.max(64, vh - size.value.h - 24);
+    pos.value.x = safe.left + 6;
+    pos.value.y = Math.max(minY + 56, vh - safe.bottom - size.value.h - 12);
   } else {
-    const effectiveW = Math.min(size.value.w, Math.max(280, vw - 16));
-    const effectiveH = Math.min(size.value.h, Math.max(180, vh - 64));
+    const effectiveW = Math.min(size.value.w, Math.max(260, safeW - 12));
+    const effectiveH = Math.min(size.value.h, Math.max(160, safeH - 48));
     size.value.w = effectiveW;
     size.value.h = effectiveH;
-    pos.value.x = Math.max(4, Math.min(Math.max(4, vw - 100), pos.value.x));
-    pos.value.y = Math.max(4, Math.min(Math.max(4, vh - 40), pos.value.y));
+    const maxX = Math.max(minX, vw - safe.right - Math.min(collapsed.value ? 156 : effectiveW, 100));
+    const maxY = Math.max(minY, vh - safe.bottom - 40);
+    pos.value.x = Math.max(minX, Math.min(maxX, pos.value.x));
+    pos.value.y = Math.max(minY, Math.min(maxY, pos.value.y));
   }
   emitBounds();
 }
@@ -135,14 +144,22 @@ function startResize(e: PointerEvent) {
 function onDragMove(e: PointerEvent) {
   if (!dragMode) return;
   e.preventDefault();
+  const safe = safeAreaInsets.value;
+  const minX = safe.left + 4;
+  const minY = safe.top + 4;
   const dx = e.clientX - dragStart.x;
   const dy = e.clientY - dragStart.y;
   if (dragMode === 'move') {
-    pos.value.x = Math.max(0, Math.min(window.innerWidth - 100, dragStart.origX + dx));
-    pos.value.y = Math.max(0, Math.min(window.innerHeight - 36, dragStart.origY + dy));
+    const curW = collapsed.value ? 156 : size.value.w;
+    const maxX = Math.max(minX, window.innerWidth - safe.right - Math.min(curW, 100));
+    const maxY = Math.max(minY, window.innerHeight - safe.bottom - 40);
+    pos.value.x = Math.max(minX, Math.min(maxX, dragStart.origX + dx));
+    pos.value.y = Math.max(minY, Math.min(maxY, dragStart.origY + dy));
   } else {
-    size.value.w = Math.max(320, Math.min(window.innerWidth - pos.value.x, dragStart.origW + dx));
-    size.value.h = Math.max(200, Math.min(window.innerHeight - pos.value.y, dragStart.origH + dy));
+    const maxW = Math.max(260, window.innerWidth - safe.right - pos.value.x - 4);
+    const maxH = Math.max(160, window.innerHeight - safe.bottom - pos.value.y - 4);
+    size.value.w = Math.max(260, Math.min(maxW, dragStart.origW + dx));
+    size.value.h = Math.max(160, Math.min(maxH, dragStart.origH + dy));
   }
   emitBounds();
 }
@@ -192,6 +209,14 @@ onMounted(() => {
   clampPosition(true);
   window.addEventListener('resize', onWindowResize);
 });
+
+watch(
+  safeAreaInsets,
+  () => {
+    clampPosition(false);
+  },
+  { deep: true },
+);
 
 watch([scale, dockOpacity], () => {
   persistDockState();
@@ -430,8 +455,10 @@ onBeforeUnmount(() => {
   justify-content: center;
 }
 
-.ac-icon-btn:hover {
-  background: var(--md-sys-color-surface-container-highest);
+@media (hover: hover) {
+  .ac-icon-btn:hover {
+    background: var(--md-sys-color-surface-container-highest);
+  }
 }
 
 .ac-dock-body {

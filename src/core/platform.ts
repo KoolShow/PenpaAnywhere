@@ -1,11 +1,23 @@
 export type RuntimePlatform = 'tauri' | 'android-overlay' | 'android-app' | 'web';
 
+export interface AndroidScreenshotCompositeStatus {
+  state: 'unset' | 'enabled' | 'disabled';
+  enabled: boolean;
+  hasReadPermission: boolean;
+  hasWritePermission: boolean;
+}
+
 interface AndroidOverlayInterface {
   isOverlayMode?: () => boolean;
   setClickThrough?: (enabled: boolean) => void;
   setFocusable?: (focusable: boolean) => void;
   updateHitRegions?: (payloadJson: string) => void;
   getDynamicColorTokens?: () => string;
+  getSafeAreaInsets?: () => string;
+  getScreenshotCompositeStatus?: () => string;
+  setScreenshotCompositeEnabled?: (enabled: boolean) => void;
+  respondScreenshotPrompt?: (choice: 'enable' | 'dismiss' | 'later') => void;
+  requestAllFilesPermission?: () => void;
   closeOverlay?: () => void;
   pickImage?: () => void;
 }
@@ -17,7 +29,13 @@ declare global {
     __PENPAANYWHERE_ON_ANDROID_IMAGE__?: (dataUrl: string) => void;
     __PENPAANYWHERE_ON_CLICK_THROUGH__?: (enabled: boolean) => void;
     __PENPAANYWHERE_APPLY_MD3_TOKENS__?: (tokens: Record<string, string> | string) => void;
+    __PENPAANYWHERE_APPLY_SAFE_INSETS__?: (
+      insets: { top: number; right: number; bottom: number; left: number } | string,
+    ) => void;
     __PENPAANYWHERE_FLUSH_STORAGE__?: () => void;
+    __PENPAANYWHERE_CAPTURE_OVERLAY__?: () => { active: boolean; dataUrl: string };
+    __PENPAANYWHERE_ON_SCREENSHOT_PROMPT__?: (fileName: string) => void;
+    __PENPAANYWHERE_ON_SCREENSHOT_STATUS__?: (status: AndroidScreenshotCompositeStatus) => void;
   }
 }
 
@@ -110,7 +128,7 @@ export async function closeOverlayApp(): Promise<void> {
     } catch (err) {
       console.warn('[PenpaAnywhere] Tauri close_app failed:', err);
     }
-  } else if (platform === 'android-overlay') {
+  } else if (platform === 'android-overlay' || platform === 'android-app') {
     window.AndroidOverlay?.closeOverlay?.();
   }
 }

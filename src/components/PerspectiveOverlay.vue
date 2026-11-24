@@ -11,6 +11,7 @@ import {
 } from '../core/homography';
 import { WebGLPerspectiveRenderer, type BlendRenderMode } from '../core/webglOverlay';
 import type { GridBoundsNormalized, PenpaIframeBridge } from '../core/penpaBridge';
+import { safeAreaInsets } from '../core/safeArea';
 
 export type AlignTarget = 'grid' | 'canvas';
 export type QuadMode = 'rect' | 'free';
@@ -305,13 +306,23 @@ function startHandleDrag(index: number, e: PointerEvent) {
   (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 }
 
+function getSafeHostBounds(rect: DOMRect) {
+  const safe = safeAreaInsets.value;
+  const minX = safe.left + 8;
+  const minY = safe.top + 8;
+  const maxX = Math.max(minX + MIN_RECT_SIZE, rect.width - safe.right - 8);
+  const maxY = Math.max(minY + MIN_RECT_SIZE, rect.height - safe.bottom - 8);
+  return { minX, minY, maxX, maxY };
+}
+
 function moveHandleDrag(e: PointerEvent) {
   const idx = draggingHandleIndex.value;
   if (idx === null || !hostEl.value) return;
   e.preventDefault();
   const rect = hostEl.value.getBoundingClientRect();
-  const nx = Math.max(8, Math.min(rect.width - 8, e.clientX - rect.left));
-  const ny = Math.max(8, Math.min(rect.height - 8, e.clientY - rect.top));
+  const bounds = getSafeHostBounds(rect);
+  const nx = Math.max(bounds.minX, Math.min(bounds.maxX, e.clientX - rect.left));
+  const ny = Math.max(bounds.minY, Math.min(bounds.maxY, e.clientY - rect.top));
 
   if (props.quadMode === 'rect') {
     let left = Math.min(props.corners[0].x, props.corners[3].x);
@@ -387,8 +398,9 @@ function moveEdgeDrag(e: PointerEvent) {
   if (!drag || !hostEl.value) return;
   e.preventDefault();
   const rect = hostEl.value.getBoundingClientRect();
-  const nx = Math.max(8, Math.min(rect.width - 8, e.clientX - rect.left));
-  const ny = Math.max(8, Math.min(rect.height - 8, e.clientY - rect.top));
+  const bounds = getSafeHostBounds(rect);
+  const nx = Math.max(bounds.minX, Math.min(bounds.maxX, e.clientX - rect.left));
+  const ny = Math.max(bounds.minY, Math.min(bounds.maxY, e.clientY - rect.top));
 
   if (props.quadMode === 'rect') {
     let left = Math.min(props.corners[0].x, props.corners[3].x);
@@ -427,12 +439,12 @@ function moveEdgeDrag(e: PointerEvent) {
     { ...drag.initialCorners[3] },
   ];
   next[i0] = {
-    x: Math.max(8, Math.min(rect.width - 8, drag.initialCorners[i0].x + dx)),
-    y: Math.max(8, Math.min(rect.height - 8, drag.initialCorners[i0].y + dy)),
+    x: Math.max(bounds.minX, Math.min(bounds.maxX, drag.initialCorners[i0].x + dx)),
+    y: Math.max(bounds.minY, Math.min(bounds.maxY, drag.initialCorners[i0].y + dy)),
   };
   next[i1] = {
-    x: Math.max(8, Math.min(rect.width - 8, drag.initialCorners[i1].x + dx)),
-    y: Math.max(8, Math.min(rect.height - 8, drag.initialCorners[i1].y + dy)),
+    x: Math.max(bounds.minX, Math.min(bounds.maxX, drag.initialCorners[i1].x + dx)),
+    y: Math.max(bounds.minY, Math.min(bounds.maxY, drag.initialCorners[i1].y + dy)),
   };
   if (isConvexQuad(next)) {
     emit('update:corners', next);
@@ -525,14 +537,15 @@ function moveWholeQuadDrag(e: PointerEvent) {
   if (!drag || !hostEl.value) return;
   e.preventDefault();
   const rect = hostEl.value.getBoundingClientRect();
+  const bounds = getSafeHostBounds(rect);
   let dx = e.clientX - rect.left - drag.start.x;
   let dy = e.clientY - rect.top - drag.start.y;
   const xs = drag.initialCorners.map((p) => p.x);
   const ys = drag.initialCorners.map((p) => p.y);
-  const minDx = 8 - Math.min(...xs);
-  const maxDx = rect.width - 8 - Math.max(...xs);
-  const minDy = 8 - Math.min(...ys);
-  const maxDy = rect.height - 8 - Math.max(...ys);
+  const minDx = bounds.minX - Math.min(...xs);
+  const maxDx = bounds.maxX - Math.max(...xs);
+  const minDy = bounds.minY - Math.min(...ys);
+  const maxDy = bounds.maxY - Math.max(...ys);
   dx = Math.max(minDx, Math.min(maxDx, dx));
   dy = Math.max(minDy, Math.min(maxDy, dy));
   const next: [Point2D, Point2D, Point2D, Point2D] = [
@@ -595,6 +608,24 @@ onBeforeUnmount(() => {
   if (unsubscribeBridge) unsubscribeBridge();
   renderer?.destroy();
   renderer = null;
+});
+
+function captureOverlayPng(): string | null {
+  if (!glCanvasEl.value || !renderer) return null;
+  const invH = homographyState.value.invH;
+  if (invH) {
+    const dpr = window.devicePixelRatio || 1;
+    renderer.render(invH, dpr, effectiveShaderMode.value, props.opacity);
+  }
+  try {
+    return glCanvasEl.value.toDataURL('image/png');
+  } catch {
+    return null;
+  }
+}
+
+defineExpose({
+  captureOverlayPng,
 });
 </script>
 
