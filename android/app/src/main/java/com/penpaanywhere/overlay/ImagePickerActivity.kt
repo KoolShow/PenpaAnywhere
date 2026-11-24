@@ -1,4 +1,4 @@
-package com.penpacanvas.overlay
+package com.penpaanywhere.overlay
 
 import android.net.Uri
 import android.os.Bundle

@@ -57,8 +57,8 @@ export interface PenpaIframeBridge {
 export function getPenpaBridge(iframe: HTMLIFrameElement | null): PenpaIframeBridge | null {
   if (!iframe) return null;
   try {
-    const win = iframe.contentWindow as (Window & { __PENPACANVAS_BRIDGE__?: PenpaIframeBridge }) | null;
-    return win?.__PENPACANVAS_BRIDGE__ ?? null;
+    const win = iframe.contentWindow as (Window & { __PENPAANYWHERE_BRIDGE__?: PenpaIframeBridge }) | null;
+    return win?.__PENPAANYWHERE_BRIDGE__ ?? null;
   } catch {
     return null;
   }

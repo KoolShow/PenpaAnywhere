@@ -1,4 +1,4 @@
-package com.penpacanvas.overlay
+package com.penpaanywhere.overlay
 
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -51,7 +51,7 @@ class MainActivity : AppCompatActivity() {
                         val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
                         val quoted = JSONObject.quote("data:$mime;base64,$b64")
                         inAppWebView?.evaluateJavascript(
-                            "window.__PENPACANVAS_ON_ANDROID_IMAGE__ && window.__PENPACANVAS_ON_ANDROID_IMAGE__($quoted);",
+                            "window.__PENPAANYWHERE_ON_ANDROID_IMAGE__ && window.__PENPAANYWHERE_ON_ANDROID_IMAGE__($quoted);",
                             null,
                         )
                     }
@@ -122,7 +122,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val title = TextView(this).apply {
-            text = "PenpaCanvas"
+            text = "PenpaAnywhere"
             textSize = 28f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             setTextColor(onSurface)

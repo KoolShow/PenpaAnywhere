@@ -415,7 +415,7 @@
     );
   }
 
-  window.__PENPACANVAS_BRIDGE__ = {
+  window.__PENPAANYWHERE_BRIDGE__ = {
     isReady: isReady,
     getCanvas: getCanvas,
     getFrameVersion: function () {

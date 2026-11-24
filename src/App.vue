@@ -305,11 +305,11 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
 
-  window.__PENPACANVAS_ON_ANDROID_IMAGE__ = (dataUrl: string) => {
+  window.__PENPAANYWHERE_ON_ANDROID_IMAGE__ = (dataUrl: string) => {
     imageUrl.value = dataUrl;
     backdropMode.value = 'image';
   };
-  window.__PENPACANVAS_ON_CLICK_THROUGH__ = (enabled: boolean) => {
+  window.__PENPAANYWHERE_ON_CLICK_THROUGH__ = (enabled: boolean) => {
     clickThrough.value = enabled;
   };
 

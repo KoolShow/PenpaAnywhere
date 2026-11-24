@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PenpaCanvasAndroid"
+rootProject.name = "PenpaAnywhereAndroid"
 include(":app")

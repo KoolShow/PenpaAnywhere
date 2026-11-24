@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.penpacanvas.overlay"
+    namespace = "com.penpaanywhere.overlay"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.penpacanvas.overlay"
+        applicationId = "com.penpaanywhere.overlay"
         minSdk = 24
         targetSdk = 35
         versionCode = 1

@@ -14,9 +14,9 @@ declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
     AndroidOverlay?: AndroidOverlayInterface;
-    __PENPACANVAS_ON_ANDROID_IMAGE__?: (dataUrl: string) => void;
-    __PENPACANVAS_ON_CLICK_THROUGH__?: (enabled: boolean) => void;
-    __PENPACANVAS_APPLY_MD3_TOKENS__?: (tokens: Record<string, string> | string) => void;
+    __PENPAANYWHERE_ON_ANDROID_IMAGE__?: (dataUrl: string) => void;
+    __PENPAANYWHERE_ON_CLICK_THROUGH__?: (enabled: boolean) => void;
+    __PENPAANYWHERE_APPLY_MD3_TOKENS__?: (tokens: Record<string, string> | string) => void;
   }
 }
 
@@ -60,13 +60,13 @@ export async function setOsClickThrough(ignore: boolean): Promise<void> {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('set_click_through', { ignore });
     } catch (err) {
-      console.warn('[PenpaCanvas] Tauri set_click_through failed:', err);
+      console.warn('[PenpaAnywhere] Tauri set_click_through failed:', err);
     }
   } else if (platform === 'android-overlay') {
     try {
       window.AndroidOverlay?.setClickThrough?.(ignore);
     } catch (err) {
-      console.warn('[PenpaCanvas] Android setClickThrough failed:', err);
+      console.warn('[PenpaAnywhere] Android setClickThrough failed:', err);
     }
   }
 }
@@ -77,7 +77,7 @@ export async function setOsAlwaysOnTop(alwaysOnTop: boolean): Promise<void> {
     const { invoke } = await import('@tauri-apps/api/core');
     await invoke('set_always_on_top', { alwaysOnTop });
   } catch (err) {
-    console.warn('[PenpaCanvas] Tauri set_always_on_top failed:', err);
+    console.warn('[PenpaAnywhere] Tauri set_always_on_top failed:', err);
   }
 }
 
@@ -87,7 +87,7 @@ export async function setOsFullscreenOverlay(overlay: boolean): Promise<void> {
     const { invoke } = await import('@tauri-apps/api/core');
     await invoke('set_overlay_window_mode', { overlay });
   } catch (err) {
-    console.warn('[PenpaCanvas] Tauri set_overlay_window_mode failed:', err);
+    console.warn('[PenpaAnywhere] Tauri set_overlay_window_mode failed:', err);
   }
 }
 
@@ -96,7 +96,7 @@ export async function setAndroidKeyboardFocusable(focusable: boolean): Promise<v
   try {
     window.AndroidOverlay?.setFocusable?.(focusable);
   } catch (err) {
-    console.warn('[PenpaCanvas] Android setFocusable failed:', err);
+    console.warn('[PenpaAnywhere] Android setFocusable failed:', err);
   }
 }
 
@@ -107,7 +107,7 @@ export async function closeOverlayApp(): Promise<void> {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('close_app');
     } catch (err) {
-      console.warn('[PenpaCanvas] Tauri close_app failed:', err);
+      console.warn('[PenpaAnywhere] Tauri close_app failed:', err);
     }
   } else if (platform === 'android-overlay') {
     window.AndroidOverlay?.closeOverlay?.();

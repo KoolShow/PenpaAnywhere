@@ -1,4 +1,4 @@
-# PenpaCanvas
+# PenpaAnywhere
 
 基于 Vite + Vue 3 + TypeScript + WebGL2 的透明透视叠加层，直接复用 `opt-pan/penpa-edit` 原版产物。
 

@@ -1,12 +1,12 @@
 [package]
-name = "penpacanvas"
+name = "penpaanywhere"
 version = "0.1.0"
-description = "PenpaCanvas - Transparent Penpa+ Perspective Overlay"
-authors = ["PenpaCanvas"]
+description = "PenpaAnywhere - Transparent Penpa+ Perspective Overlay"
+authors = ["PenpaAnywhere"]
 edition = "2021"
 
 [lib]
-name = "penpacanvas_lib"
+name = "penpaanywhere_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

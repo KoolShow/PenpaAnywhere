@@ -1,4 +1,4 @@
-package com.penpacanvas.overlay
+package com.penpaanywhere.overlay
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -19,7 +19,7 @@ import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewClientCompat
 
 object OverlayWebViewFactory {
-    private const val TAG = "PenpaCanvasWeb"
+    private const val TAG = "PenpaAnywhereWeb"
     const val ENTRY_URL = "https://appassets.androidplatform.net/assets/www/index.html"
 
     class JsBridge(
@@ -135,7 +135,7 @@ object OverlayWebViewFactory {
                     view.setBackgroundColor(Color.TRANSPARENT)
                     val tokensJson = bridge.getDynamicColorTokens()
                     view.evaluateJavascript(
-                        "window.__PENPACANVAS_APPLY_MD3_TOKENS__ && window.__PENPACANVAS_APPLY_MD3_TOKENS__($tokensJson);",
+                        "window.__PENPAANYWHERE_APPLY_MD3_TOKENS__ && window.__PENPAANYWHERE_APPLY_MD3_TOKENS__($tokensJson);",
                         null,
                     )
                     view.invalidate()

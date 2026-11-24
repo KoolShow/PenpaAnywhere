@@ -287,4 +287,4 @@ fs.writeFileSync(path.join(publicDir, 'favicon.ico'), icoAll);
 fs.writeFileSync(path.join(androidMipmapDir, 'ic_launcher.png'), createPng(192, false));
 fs.writeFileSync(path.join(androidMipmapDir, 'ic_launcher_round.png'), createPng(192, true));
 
-console.log('Generated unified Android-style PenpaCanvas icons for Web, Windows, macOS, and Android.');
+console.log('Generated unified Android-style PenpaAnywhere icons for Web, Windows, macOS, and Android.');

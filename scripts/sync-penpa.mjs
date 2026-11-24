@@ -98,13 +98,13 @@ async function run() {
   }
 
   // Inject our dock stylesheet and bridge script without modifying any penpa core JS
-  const dockTag = '    <link rel="stylesheet" type="text/css" href="./penpacanvas-dock.css" />\n';
-  const bridgeTag = '    <script type="text/javascript" src="./penpacanvas-bridge.js"></script>\n';
+  const dockTag = '    <link rel="stylesheet" type="text/css" href="./penpaanywhere-dock.css" />\n';
+  const bridgeTag = '    <script type="text/javascript" src="./penpaanywhere-bridge.js"></script>\n';
 
-  if (!html.includes('penpacanvas-dock.css')) {
+  if (!html.includes('penpaanywhere-dock.css')) {
     html = html.replace('</head>', `${dockTag}</head>`);
   }
-  if (!html.includes('penpacanvas-bridge.js')) {
+  if (!html.includes('penpaanywhere-bridge.js')) {
     html = html.replace('</body>', `${bridgeTag}</body>`);
   }
 

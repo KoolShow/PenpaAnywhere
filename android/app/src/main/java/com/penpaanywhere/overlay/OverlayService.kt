@@ -1,4 +1,4 @@
-package com.penpacanvas.overlay
+package com.penpaanywhere.overlay
 
 import android.annotation.SuppressLint
 import android.app.Notification
@@ -38,10 +38,10 @@ import kotlin.math.roundToInt
 class OverlayService : Service() {
 
     companion object {
-        const val CHANNEL_ID = "penpacanvas_overlay_channel"
+        const val CHANNEL_ID = "penpaanywhere_overlay_channel"
         const val NOTIFICATION_ID = 1001
-        const val ACTION_TOGGLE_PASSTHROUGH = "com.penpacanvas.overlay.ACTION_TOGGLE_PASSTHROUGH"
-        const val ACTION_STOP = "com.penpacanvas.overlay.ACTION_STOP"
+        const val ACTION_TOGGLE_PASSTHROUGH = "com.penpaanywhere.overlay.ACTION_TOGGLE_PASSTHROUGH"
+        const val ACTION_STOP = "com.penpaanywhere.overlay.ACTION_STOP"
 
         @Volatile
         var isRunning = false
@@ -232,7 +232,7 @@ class OverlayService : Service() {
         val tokensJson = Md3DynamicColorProvider.exportCssTokensJson(overlayContext)
         mainHandler.post {
             webView?.evaluateJavascript(
-                "window.__PENPACANVAS_APPLY_MD3_TOKENS__ && window.__PENPACANVAS_APPLY_MD3_TOKENS__($tokensJson);",
+                "window.__PENPAANYWHERE_APPLY_MD3_TOKENS__ && window.__PENPAANYWHERE_APPLY_MD3_TOKENS__($tokensJson);",
                 null,
             )
             lastPayloadJson?.let { handleUpdateHitRegions(it) }
@@ -360,7 +360,7 @@ class OverlayService : Service() {
 
         mainHandler.postDelayed({
             Log.i(
-                "PenpaCanvasWeb",
+                "PenpaAnywhereWeb",
                 "Overlay attached (nativeTouchMask=$useNativeTouchMask): hwAccel=${wv.isHardwareAccelerated}, size=${wv.width}x${wv.height}",
             )
             lastPayloadJson?.let { handleUpdateHitRegions(it) }
@@ -428,7 +428,7 @@ class OverlayService : Service() {
             }
             applyTouchRegions()
         } catch (e: Exception) {
-            Log.e("PenpaCanvasWeb", "updateHitRegions parse failed: ${e.message}")
+            Log.e("PenpaAnywhereWeb", "updateHitRegions parse failed: ${e.message}")
         }
     }
 
@@ -519,7 +519,7 @@ class OverlayService : Service() {
             mainHandler.post {
                 val quoted = JSONObject.quote(dataUrl)
                 webView?.evaluateJavascript(
-                    "window.__PENPACANVAS_ON_ANDROID_IMAGE__ && window.__PENPACANVAS_ON_ANDROID_IMAGE__($quoted);",
+                    "window.__PENPAANYWHERE_ON_ANDROID_IMAGE__ && window.__PENPAANYWHERE_ON_ANDROID_IMAGE__($quoted);",
                     null,
                 )
             }
@@ -536,7 +536,7 @@ class OverlayService : Service() {
             updateWebWindowFlags()
             applyTouchRegions()
             webView?.evaluateJavascript(
-                "window.__PENPACANVAS_ON_CLICK_THROUGH__ && window.__PENPACANVAS_ON_CLICK_THROUGH__($enabled);",
+                "window.__PENPAANYWHERE_ON_CLICK_THROUGH__ && window.__PENPAANYWHERE_ON_CLICK_THROUGH__($enabled);",
                 null,
             )
             val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
@@ -560,7 +560,7 @@ class OverlayService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "PenpaCanvas 透明叠加层",
+                "PenpaAnywhere 透明叠加层",
                 NotificationManager.IMPORTANCE_LOW,
             )
             val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
@@ -592,7 +592,7 @@ class OverlayService : Service() {
         val status = if (forceClickThrough) "当前：题板已穿透（点顶栏或此通知恢复）" else "当前：精确蒙版穿透 / 元素区可交互"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_edit)
-            .setContentTitle("PenpaCanvas 叠加层运行中")
+            .setContentTitle("PenpaAnywhere 叠加层运行中")
             .setContentText(status)
             .setOngoing(true)
             .addAction(

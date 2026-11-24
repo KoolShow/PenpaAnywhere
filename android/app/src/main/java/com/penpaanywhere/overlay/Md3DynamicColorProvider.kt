@@ -1,4 +1,4 @@
-package com.penpacanvas.overlay
+package com.penpaanywhere.overlay
 
 import android.content.Context
 import android.graphics.Color
@@ -17,7 +17,7 @@ import org.json.JSONObject
 object Md3DynamicColorProvider {
 
     fun wrapWithDynamicTheme(base: Context): Context {
-        val themed = ContextThemeWrapper(base, R.style.Theme_PenpaCanvas)
+        val themed = ContextThemeWrapper(base, R.style.Theme_PenpaAnywhere)
         return DynamicColors.wrapContextIfAvailable(themed)
     }
 

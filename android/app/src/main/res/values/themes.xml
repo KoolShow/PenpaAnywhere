@@ -1,5 +1,5 @@
 <resources>
-    <style name="Theme.PenpaCanvas" parent="Theme.Material3.Dark.NoActionBar">
+    <style name="Theme.PenpaAnywhere" parent="Theme.Material3.Dark.NoActionBar">
         <item name="colorPrimary">#A8C7FA</item>
         <item name="colorOnPrimary">#062E6F</item>
         <item name="colorPrimaryContainer">#0842A0</item>
@@ -28,7 +28,7 @@
         <item name="android:windowLightStatusBar">false</item>
     </style>
 
-    <style name="Theme.PenpaCanvas.Translucent" parent="Theme.Material3.Dark.NoActionBar">
+    <style name="Theme.PenpaAnywhere.Translucent" parent="Theme.Material3.Dark.NoActionBar">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowNoTitle">true</item>

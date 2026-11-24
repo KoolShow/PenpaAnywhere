@@ -530,5 +530,5 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running PenpaCanvas Tauri application");
+        .expect("error while running PenpaAnywhere Tauri application");
 }

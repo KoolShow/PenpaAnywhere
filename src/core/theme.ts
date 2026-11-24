@@ -154,7 +154,7 @@ export function applyAccentSeed(seedHex: string | null | undefined): boolean {
 export function initDynamicThemeBridge(): void {
   if (typeof window === 'undefined') return;
 
-  window.__PENPACANVAS_APPLY_MD3_TOKENS__ = (tokens) => {
+  window.__PENPAANYWHERE_APPLY_MD3_TOKENS__ = (tokens) => {
     applyMd3Tokens(tokens);
   };
 
@@ -166,7 +166,7 @@ export function initDynamicThemeBridge(): void {
       return;
     }
   } catch (err) {
-    console.warn('[PenpaCanvas] Failed to load Android dynamic colors:', err);
+    console.warn('[PenpaAnywhere] Failed to load Android dynamic colors:', err);
   }
 
   // 2. Windows / macOS (Tauri 2): read OS accent color & listen for live changes
@@ -183,7 +183,7 @@ export function initDynamicThemeBridge(): void {
           applyAccentSeed(ev.payload);
         });
       } catch (err) {
-        console.warn('[PenpaCanvas] Failed to load Tauri system accent color:', err);
+        console.warn('[PenpaAnywhere] Failed to load Tauri system accent color:', err);
       }
     })();
   }
