@@ -4,7 +4,7 @@
 
 ## 功能
 
-- **零重写复用 Penpa+**：通过 git submodule `penpa-edit/` 引用 [KoolShow/penpa-edit](https://github.com/KoolShow/penpa-edit)（fork 自 `opt-pan/penpa-edit`），由 `scripts/sync-penpa.mjs` 从 `penpa-edit/docs` 生成 `public/penpa-edit/`，原版顶部按钮、Mode / Sub / Style 选项、底部控制栏、`#float-key` 与 Modal 全部运行在独立可拖动/缩放/折叠的悬浮窗中，UI 布局完全一致。
+- **零重写复用 Penpa+**：通过 git submodule `penpa-edit/` 引用 [KoolShow/penpa-edit](https://github.com/KoolShow/penpa-edit)（fork 自 `swaroopg92/penpa-edit`），由 `scripts/sync-penpa.mjs` 从 `penpa-edit/docs` 生成 `public/penpa-edit/`，原版顶部按钮、Mode / Sub / Style 选项、底部控制栏、`#float-key` 与 Modal 全部运行在独立可拖动/缩放/折叠的悬浮窗中，UI 布局完全一致。
 - **四点透视 + 混合绘制**：WebGL2 按 4 个透视控制点（2D Homography）将 Penpa+ 题板画布映射到透明叠加层，支持：
   - `正片叠底 (Multiply)`（截图 / 屏幕捕获模式）
   - `Alpha = 1 - 亮度`（透明系统叠加层，白底全透）
