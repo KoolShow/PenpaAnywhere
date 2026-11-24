@@ -54,16 +54,23 @@ const currentBounds = ref<GridBoundsNormalized>({
   canvasCssH: 1,
 });
 
-// Effective WebGL blend mode: CSS multiply only works when a DOM backdrop exists in the same page.
+// Effective WebGL blend mode: CSS multiply/screen only work when a DOM backdrop exists in the same page.
 const effectiveShaderMode = computed<BlendRenderMode>(() => {
   if (props.blendMode === 'multiply' && !props.hasDomBackdrop) {
     return 'alpha-luma';
+  }
+  if (props.blendMode === 'multiply-inv' && !props.hasDomBackdrop) {
+    return 'alpha-luma-inv';
   }
   return props.blendMode;
 });
 
 const useCssMultiply = computed(
   () => props.blendMode === 'multiply' && props.hasDomBackdrop,
+);
+
+const useCssScreen = computed(
+  () => props.blendMode === 'multiply-inv' && props.hasDomBackdrop,
 );
 
 const homographyState = computed<{ H: Mat3 | null; invH: Mat3 | null }>(() => {
@@ -392,7 +399,7 @@ onBeforeUnmount(() => {
     <canvas
       ref="glCanvasEl"
       class="ac-gl-canvas"
-      :class="{ 'css-multiply': useCssMultiply }"
+      :class="{ 'css-multiply': useCssMultiply, 'css-screen': useCssScreen }"
     />
 
     <!-- Calibration Quad Guides & 4 Perspective Control Points -->
@@ -454,6 +461,10 @@ onBeforeUnmount(() => {
 
 .ac-gl-canvas.css-multiply {
   mix-blend-mode: multiply;
+}
+
+.ac-gl-canvas.css-screen {
+  mix-blend-mode: screen;
 }
 
 .ac-quad-svg {

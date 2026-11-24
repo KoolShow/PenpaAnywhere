@@ -49,8 +49,11 @@ const alignOptions: Array<{ value: AlignTarget; label: string }> = [
 
 const blendOptions: Array<{ value: BlendRenderMode; label: string }> = [
   { value: 'multiply', label: '正片叠底' },
+  { value: 'multiply-inv', label: '正片叠底(反转)' },
   { value: 'alpha-luma', label: 'Alpha=1-亮度' },
+  { value: 'alpha-luma-inv', label: 'Alpha=1-亮度(反转)' },
   { value: 'alpha-minrgb', label: '去白保色' },
+  { value: 'alpha-minrgb-inv', label: '去白保色(反转)' },
 ];
 
 const currentAlignLabel = computed(

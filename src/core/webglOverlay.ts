@@ -1,6 +1,12 @@
 import { mat3ToColumnMajorFloat32, type Mat3 } from './homography';
 
-export type BlendRenderMode = 'multiply' | 'alpha-luma' | 'alpha-minrgb';
+export type BlendRenderMode =
+  | 'multiply'
+  | 'multiply-inv'
+  | 'alpha-luma'
+  | 'alpha-luma-inv'
+  | 'alpha-minrgb'
+  | 'alpha-minrgb-inv';
 
 const VERT_SRC = `#version 300 es
 precision highp float;
@@ -27,6 +33,16 @@ uniform float u_whiteThreshold;
 
 out vec4 outColor;
 
+// Bi-cone HSL lightness inversion: preserves Hue (H) and HSL Saturation (S), maps L -> 1 - L.
+// Because chroma C = (1 - |2L - 1|) * S is symmetric around L = 0.5, C is invariant and
+// every RGB channel shifts equally by (1 - 2L) = 1 - (maxRGB + minRGB).
+vec3 invertLightnessBiconeHSL(vec3 rgb) {
+  float cMax = max(rgb.r, max(rgb.g, rgb.b));
+  float cMin = min(rgb.r, min(rgb.g, rgb.b));
+  float L = 0.5 * (cMax + cMin);
+  return clamp(rgb + vec3(1.0 - 2.0 * L), 0.0, 1.0);
+}
+
 void main() {
   vec2 screenCss = vec2(
     gl_FragCoord.x / u_dpr,
@@ -46,36 +62,76 @@ void main() {
   vec4 tex = texture(u_tex, uv);
   vec3 rgb = tex.rgb;
 
+  // Mode 0: Multiply (CSS mix-blend-mode: multiply, white -> transparent)
   if (u_mode == 0) {
-    // Native CSS mix-blend-mode: multiply works on white-backed canvas;
-    // blend toward white by opacity so u_opacity=0 becomes invisible in multiply mode.
     vec3 mixed = mix(vec3(1.0), rgb, u_opacity);
     outColor = vec4(mixed, 1.0);
     return;
   }
 
+  // Mode 1: Multiply Inverted (Bi-cone HSL lightness inversion + CSS mix-blend-mode: screen, black -> transparent)
   if (u_mode == 1) {
-    // Alpha = 1 - luminance (strict user formula, white becomes fully transparent)
+    vec3 invRgb = invertLightnessBiconeHSL(rgb);
+    vec3 mixed = mix(vec3(0.0), invRgb, u_opacity);
+    outColor = vec4(mixed, 1.0);
+    return;
+  }
+
+  // Mode 2: Alpha = 1 - luminance (white background becomes fully transparent)
+  if (u_mode == 2) {
     float luma = dot(rgb, vec3(0.299, 0.587, 0.114));
     float rawAlpha = clamp((u_whiteThreshold - luma) / max(u_whiteThreshold, 0.01), 0.0, 1.0);
     float a = rawAlpha * u_opacity;
     if (a < 0.004) discard;
-    // Un-blend white contamination slightly so colored marks stay crisp on transparent OS desktop
     vec3 fg = clamp((rgb - vec3(1.0 - rawAlpha)) / max(rawAlpha, 0.001), 0.0, 1.0);
-    // Output premultiplied alpha for WebGL premultipliedAlpha: true
     outColor = vec4(fg * a, a);
     return;
   }
 
-  // Mode 2: Color-to-Alpha (alpha = 1 - min(r,g,b)), preserves 100% color saturation over white
-  float minC = min(rgb.r, min(rgb.g, rgb.b));
-  float rawAlpha = clamp((u_whiteThreshold - minC) / max(u_whiteThreshold, 0.01), 0.0, 1.0);
+  // Mode 3: Alpha = 1 - luminance (Inverted via Bi-cone HSL: white->black transparent, dark marks->bright)
+  if (u_mode == 3) {
+    vec3 invRgb = invertLightnessBiconeHSL(rgb);
+    float lumaInv = dot(invRgb, vec3(0.299, 0.587, 0.114));
+    float blackFloor = 1.0 - u_whiteThreshold;
+    float rawAlpha = clamp((lumaInv - blackFloor) / max(1.0 - blackFloor, 0.01), 0.0, 1.0);
+    float a = rawAlpha * u_opacity;
+    if (a < 0.004) discard;
+    vec3 fg = clamp(invRgb / max(rawAlpha, 0.001), 0.0, 1.0);
+    outColor = vec4(fg * a, a);
+    return;
+  }
+
+  // Mode 4: Color-to-Alpha (alpha = 1 - min(r,g,b), white transparent, full color saturation)
+  if (u_mode == 4) {
+    float minC = min(rgb.r, min(rgb.g, rgb.b));
+    float rawAlpha = clamp((u_whiteThreshold - minC) / max(u_whiteThreshold, 0.01), 0.0, 1.0);
+    float a = rawAlpha * u_opacity;
+    if (a < 0.004) discard;
+    vec3 fg = clamp(1.0 - (1.0 - rgb) / max(rawAlpha, 0.001), 0.0, 1.0);
+    outColor = vec4(fg * a, a);
+    return;
+  }
+
+  // Mode 5: Color-to-Alpha Inverted (Bi-cone HSL inversion + alpha = max(invRgb), black transparent, full color saturation)
+  vec3 invRgb = invertLightnessBiconeHSL(rgb);
+  float maxC = max(invRgb.r, max(invRgb.g, invRgb.b));
+  float blackFloor = 1.0 - u_whiteThreshold;
+  float rawAlpha = clamp((maxC - blackFloor) / max(1.0 - blackFloor, 0.01), 0.0, 1.0);
   float a = rawAlpha * u_opacity;
   if (a < 0.004) discard;
-  vec3 fg = clamp(1.0 - (1.0 - rgb) / max(rawAlpha, 0.001), 0.0, 1.0);
+  vec3 fg = clamp(invRgb / max(rawAlpha, 0.001), 0.0, 1.0);
   outColor = vec4(fg * a, a);
 }
 `;
+
+const MODE_TO_INT: Record<BlendRenderMode, number> = {
+  multiply: 0,
+  'multiply-inv': 1,
+  'alpha-luma': 2,
+  'alpha-luma-inv': 3,
+  'alpha-minrgb': 4,
+  'alpha-minrgb-inv': 5,
+};
 
 export class WebGLPerspectiveRenderer {
   private gl: WebGL2RenderingContext;
@@ -208,9 +264,7 @@ export class WebGLPerspectiveRenderer {
     gl.uniformMatrix3fv(this.uInvH, false, mat3ToColumnMajorFloat32(invH));
     gl.uniform2f(this.uResolution, this.canvas.width, this.canvas.height);
     gl.uniform1f(this.uDpr, dpr);
-
-    const modeInt = mode === 'multiply' ? 0 : mode === 'alpha-luma' ? 1 : 2;
-    gl.uniform1i(this.uMode, modeInt);
+    gl.uniform1i(this.uMode, MODE_TO_INT[mode]);
     gl.uniform1f(this.uOpacity, opacity);
     gl.uniform1f(this.uWhiteThreshold, whiteThreshold);
 
