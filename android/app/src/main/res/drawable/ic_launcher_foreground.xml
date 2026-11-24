@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Perspective 3x3 puzzle quad -->
+    <path
+        android:fillColor="#1A84D7AA"
+        android:strokeColor="#A8C7FA"
+        android:strokeWidth="2.6"
+        android:strokeLineJoin="round"
+        android:pathData="M34,32 L78,28 L74,78 L30,74 Z" />
+    <!-- Vertical perspective grid dividers -->
+    <path
+        android:strokeColor="#80C2E7FF"
+        android:strokeWidth="1.8"
+        android:pathData="M48.7,30.7 L44.7,75.3 M63.3,29.3 L59.3,76.7" />
+    <!-- Horizontal perspective grid dividers -->
+    <path
+        android:strokeColor="#80C2E7FF"
+        android:strokeWidth="1.8"
+        android:pathData="M32.7,46 L76.7,44.7 M31.3,60 L75.3,61.3" />
+    <!-- Filled center puzzle cell -->
+    <path
+        android:fillColor="#A8C7FA"
+        android:pathData="M47.3,45.6 L62.0,45.1 L60.7,60.9 L46.0,60.4 Z" />
+    <!-- 4 perspective corner control handles -->
+    <path
+        android:fillColor="#D3E3FD"
+        android:strokeColor="#0842A0"
+        android:strokeWidth="1.8"
+        android:pathData="M34,32 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0" />
+    <path
+        android:fillColor="#D3E3FD"
+        android:strokeColor="#0842A0"
+        android:strokeWidth="1.8"
+        android:pathData="M78,28 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0" />
+    <path
+        android:fillColor="#D3E3FD"
+        android:strokeColor="#0842A0"
+        android:strokeWidth="1.8"
+        android:pathData="M74,78 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0" />
+    <path
+        android:fillColor="#D3E3FD"
+        android:strokeColor="#0842A0"
+        android:strokeWidth="1.8"
+        android:pathData="M30,74 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0" />
+</vector>
