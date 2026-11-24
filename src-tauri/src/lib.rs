@@ -18,6 +18,27 @@ struct Point2D {
     y: f64,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct HotkeyConfig {
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    meta: bool,
+    code: String,
+}
+
+impl Default for HotkeyConfig {
+    fn default() -> Self {
+        Self {
+            ctrl: true,
+            shift: true,
+            alt: false,
+            meta: false,
+            code: "KeyT".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct HitState {
     auto_passthrough: bool,
@@ -27,6 +48,7 @@ struct HitState {
     dock_rect: HitRect,
     quad: Vec<Point2D>,
     last_ignore: Option<bool>,
+    toggle_hotkey: Option<HotkeyConfig>,
 }
 
 struct AppOverlayState(Arc<Mutex<HitState>>);
@@ -40,6 +62,23 @@ fn point_in_rect_padded(px: f64, py: f64, r: &HitRect, pad: f64) -> bool {
         && py <= r.y + r.h + pad
 }
 
+fn point_to_segment_dist_sq(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    let abx = bx - ax;
+    let aby = by - ay;
+    let len_sq = abx * abx + aby * aby;
+    if len_sq <= 1e-6 {
+        let dx = px - ax;
+        let dy = py - ay;
+        return dx * dx + dy * dy;
+    }
+    let t = (((px - ax) * abx + (py - ay) * aby) / len_sq).clamp(0.0, 1.0);
+    let proj_x = ax + t * abx;
+    let proj_y = ay + t * aby;
+    let dx = px - proj_x;
+    let dy = py - proj_y;
+    dx * dx + dy * dy
+}
+
 fn point_in_quad_padded(px: f64, py: f64, quad: &[Point2D], corner_pad: f64) -> bool {
     if quad.len() != 4 {
         return false;
@@ -48,6 +87,14 @@ fn point_in_quad_padded(px: f64, py: f64, quad: &[Point2D], corner_pad: f64) -> 
         let dx = px - pt.x;
         let dy = py - pt.y;
         if dx * dx + dy * dy <= corner_pad * corner_pad {
+            return true;
+        }
+    }
+    let edge_pad_sq = 14.0 * 14.0;
+    for i in 0..4 {
+        let a = &quad[i];
+        let b = &quad[(i + 1) % 4];
+        if point_to_segment_dist_sq(px, py, a.x, a.y, b.x, b.y) <= edge_pad_sq {
             return true;
         }
     }
@@ -150,6 +197,17 @@ fn update_hit_regions(
 }
 
 #[tauri::command]
+fn set_toggle_hotkey(
+    state: State<'_, AppOverlayState>,
+    hotkey: Option<HotkeyConfig>,
+) -> Result<(), String> {
+    if let Ok(mut guard) = state.0.lock() {
+        guard.toggle_hotkey = hotkey.filter(|h| !h.code.is_empty());
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn close_app(window: WebviewWindow) -> Result<(), String> {
     window.close().map_err(|e| e.to_string())
 }
@@ -242,12 +300,65 @@ fn fit_overlay_window_to_monitor(window: &WebviewWindow) {
 }
 
 #[cfg(windows)]
+fn code_to_windows_vk(code: &str) -> Option<i32> {
+    if let Some(rest) = code.strip_prefix("Key") {
+        let bytes = rest.as_bytes();
+        if bytes.len() == 1 && bytes[0].is_ascii_uppercase() {
+            return Some(bytes[0] as i32);
+        }
+    }
+    if let Some(rest) = code.strip_prefix("Digit") {
+        let bytes = rest.as_bytes();
+        if bytes.len() == 1 && bytes[0].is_ascii_digit() {
+            return Some(bytes[0] as i32);
+        }
+    }
+    if let Some(rest) = code.strip_prefix("Numpad") {
+        let bytes = rest.as_bytes();
+        if bytes.len() == 1 && bytes[0].is_ascii_digit() {
+            return Some(0x60 + (bytes[0] - b'0') as i32);
+        }
+    }
+    if let Some(rest) = code.strip_prefix('F') {
+        if let Ok(n) = rest.parse::<i32>() {
+            if (1..=12).contains(&n) {
+                return Some(0x6F + n);
+            }
+        }
+    }
+    match code {
+        "Backquote" => Some(0xC0),
+        "Minus" => Some(0xBD),
+        "Equal" => Some(0xBB),
+        "BracketLeft" => Some(0xDB),
+        "BracketRight" => Some(0xDD),
+        "Backslash" => Some(0xDC),
+        "Semicolon" => Some(0xBA),
+        "Quote" => Some(0xDE),
+        "Comma" => Some(0xBC),
+        "Period" => Some(0xBE),
+        "Slash" => Some(0xBF),
+        "Space" => Some(0x20),
+        "Tab" => Some(0x09),
+        "Insert" => Some(0x2D),
+        "Delete" => Some(0x2E),
+        "Home" => Some(0x24),
+        "End" => Some(0x23),
+        "PageUp" => Some(0x21),
+        "PageDown" => Some(0x22),
+        "Pause" => Some(0x13),
+        "ScrollLock" => Some(0x91),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
 fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>) {
     use std::thread;
     use std::time::Duration;
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_CONTROL, VK_LBUTTON, VK_RBUTTON, VK_SHIFT,
+        GetAsyncKeyState, VK_CONTROL, VK_LBUTTON, VK_LWIN, VK_MENU, VK_RBUTTON, VK_RWIN, VK_SHIFT,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
@@ -270,12 +381,45 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
                 }
             }
 
-            let hotkey_down = unsafe {
-                (GetAsyncKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0
-                    && (GetAsyncKeyState(VK_SHIFT as i32) as u16 & 0x8000) != 0
-                    && (GetAsyncKeyState('T' as i32) as u16 & 0x8000) != 0
+            let (initialized, auto_enabled, force_ct, bar_rect, dock_rect, quad, last_ignore, toggle_hotkey) = {
+                let Ok(guard) = state.lock() else {
+                    continue;
+                };
+                (
+                    guard.initialized,
+                    guard.auto_passthrough,
+                    guard.force_click_through,
+                    guard.bar_rect.clone(),
+                    guard.dock_rect.clone(),
+                    guard.quad.clone(),
+                    guard.last_ignore,
+                    guard.toggle_hotkey.clone(),
+                )
             };
-            if hotkey_down && !prev_hotkey_down {
+
+            let hotkey_down = if let Some(ref hk) = toggle_hotkey {
+                if let Some(vk) = code_to_windows_vk(&hk.code) {
+                    unsafe {
+                        let key_down = (GetAsyncKeyState(vk) as u16 & 0x8000) != 0;
+                        let ctrl_down = (GetAsyncKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0;
+                        let shift_down = (GetAsyncKeyState(VK_SHIFT as i32) as u16 & 0x8000) != 0;
+                        let alt_down = (GetAsyncKeyState(VK_MENU as i32) as u16 & 0x8000) != 0;
+                        let meta_down = (GetAsyncKeyState(VK_LWIN as i32) as u16 & 0x8000) != 0
+                            || (GetAsyncKeyState(VK_RWIN as i32) as u16 & 0x8000) != 0;
+                        key_down
+                            && ctrl_down == hk.ctrl
+                            && shift_down == hk.shift
+                            && alt_down == hk.alt
+                            && meta_down == hk.meta
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if hotkey_down && !prev_hotkey_down && auto_enabled {
                 let next_force = if let Ok(mut guard) = state.lock() {
                     guard.force_click_through = !guard.force_click_through;
                     guard.last_ignore = None;
@@ -288,21 +432,6 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
                 }
             }
             prev_hotkey_down = hotkey_down;
-
-            let (initialized, auto_enabled, force_ct, bar_rect, dock_rect, quad, last_ignore) = {
-                let Ok(guard) = state.lock() else {
-                    continue;
-                };
-                (
-                    guard.initialized,
-                    guard.auto_passthrough,
-                    guard.force_click_through,
-                    guard.bar_rect.clone(),
-                    guard.dock_rect.clone(),
-                    guard.quad.clone(),
-                    guard.last_ignore,
-                )
-            };
 
             if !auto_enabled || !initialized {
                 continue;
@@ -349,6 +478,89 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
 }
 
 #[cfg(target_os = "macos")]
+fn code_to_macos_keycode(code: &str) -> Option<u16> {
+    match code {
+        "KeyA" => Some(0),
+        "KeyS" => Some(1),
+        "KeyD" => Some(2),
+        "KeyF" => Some(3),
+        "KeyH" => Some(4),
+        "KeyG" => Some(5),
+        "KeyZ" => Some(6),
+        "KeyX" => Some(7),
+        "KeyC" => Some(8),
+        "KeyV" => Some(9),
+        "KeyB" => Some(11),
+        "KeyQ" => Some(12),
+        "KeyW" => Some(13),
+        "KeyE" => Some(14),
+        "KeyR" => Some(15),
+        "KeyY" => Some(16),
+        "KeyT" => Some(17),
+        "Digit1" => Some(18),
+        "Digit2" => Some(19),
+        "Digit3" => Some(20),
+        "Digit4" => Some(21),
+        "Digit6" => Some(22),
+        "Digit5" => Some(23),
+        "Equal" => Some(24),
+        "Digit9" => Some(25),
+        "Digit7" => Some(26),
+        "Minus" => Some(27),
+        "Digit8" => Some(28),
+        "Digit0" => Some(29),
+        "BracketRight" => Some(30),
+        "KeyO" => Some(31),
+        "KeyU" => Some(32),
+        "BracketLeft" => Some(33),
+        "KeyI" => Some(34),
+        "KeyP" => Some(35),
+        "KeyL" => Some(37),
+        "KeyJ" => Some(38),
+        "Quote" => Some(39),
+        "KeyK" => Some(40),
+        "Semicolon" => Some(41),
+        "Backslash" => Some(42),
+        "Comma" => Some(43),
+        "Slash" => Some(44),
+        "KeyN" => Some(45),
+        "KeyM" => Some(46),
+        "Period" => Some(47),
+        "Tab" => Some(48),
+        "Space" => Some(49),
+        "Backquote" => Some(50),
+        "Delete" => Some(117),
+        "Home" => Some(115),
+        "End" => Some(119),
+        "PageUp" => Some(116),
+        "PageDown" => Some(121),
+        "F1" => Some(122),
+        "F2" => Some(120),
+        "F3" => Some(99),
+        "F4" => Some(118),
+        "F5" => Some(96),
+        "F6" => Some(97),
+        "F7" => Some(98),
+        "F8" => Some(100),
+        "F9" => Some(101),
+        "F10" => Some(109),
+        "F11" => Some(103),
+        "F12" => Some(111),
+        "Numpad0" => Some(82),
+        "Numpad1" => Some(83),
+        "Numpad2" => Some(84),
+        "Numpad3" => Some(85),
+        "Numpad4" => Some(86),
+        "Numpad5" => Some(87),
+        "Numpad6" => Some(88),
+        "Numpad7" => Some(89),
+        "Numpad8" => Some(91),
+        "Numpad9" => Some(92),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>) {
     use std::ffi::c_void;
     use std::thread;
@@ -375,11 +587,12 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
     }
 
     const K_COMBINED_SESSION_STATE: i32 = 0;
-    const KEY_T: u16 = 17;
     const KEY_CMD_L: u16 = 55;
     const KEY_CMD_R: u16 = 54;
     const KEY_SHIFT_L: u16 = 56;
     const KEY_SHIFT_R: u16 = 60;
+    const KEY_OPT_L: u16 = 58;
+    const KEY_OPT_R: u16 = 61;
     const KEY_CTRL_L: u16 = 59;
     const KEY_CTRL_R: u16 = 62;
 
@@ -402,19 +615,48 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
                 }
             }
 
-            // Global Cmd+Shift+T or Ctrl+Shift+T toggles forced click-through
-            let hotkey_down = unsafe {
-                let mod_cmd_or_ctrl = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_CMD_L)
-                    || CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_CMD_R)
-                    || CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_CTRL_L)
-                    || CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_CTRL_R);
-                let shift = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_SHIFT_L)
-                    || CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_SHIFT_R);
-                let key_t = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_T);
-                mod_cmd_or_ctrl && shift && key_t
+            let (initialized, auto_enabled, force_ct, bar_rect, dock_rect, quad, last_ignore, toggle_hotkey) = {
+                let Ok(guard) = state.lock() else {
+                    continue;
+                };
+                (
+                    guard.initialized,
+                    guard.auto_passthrough,
+                    guard.force_click_through,
+                    guard.bar_rect.clone(),
+                    guard.dock_rect.clone(),
+                    guard.quad.clone(),
+                    guard.last_ignore,
+                    guard.toggle_hotkey.clone(),
+                )
             };
 
-            if hotkey_down && !prev_hotkey_down {
+            let hotkey_down = if let Some(ref hk) = toggle_hotkey {
+                if let Some(kc) = code_to_macos_keycode(&hk.code) {
+                    unsafe {
+                        let key_down = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, kc);
+                        let ctrl_down = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_CTRL_L)
+                            || CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_CTRL_R);
+                        let shift_down = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_SHIFT_L)
+                            || CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_SHIFT_R);
+                        let alt_down = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_OPT_L)
+                            || CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_OPT_R);
+                        let meta_down = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_CMD_L)
+                            || CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_CMD_R);
+                        key_down
+                            && ctrl_down == hk.ctrl
+                            && shift_down == hk.shift
+                            && alt_down == hk.alt
+                            && meta_down == hk.meta
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if hotkey_down && !prev_hotkey_down && auto_enabled {
                 let next_force = if let Ok(mut guard) = state.lock() {
                     guard.force_click_through = !guard.force_click_through;
                     guard.last_ignore = None;
@@ -427,21 +669,6 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
                 }
             }
             prev_hotkey_down = hotkey_down;
-
-            let (initialized, auto_enabled, force_ct, bar_rect, dock_rect, quad, last_ignore) = {
-                let Ok(guard) = state.lock() else {
-                    continue;
-                };
-                (
-                    guard.initialized,
-                    guard.auto_passthrough,
-                    guard.force_click_through,
-                    guard.bar_rect.clone(),
-                    guard.dock_rect.clone(),
-                    guard.quad.clone(),
-                    guard.last_ignore,
-                )
-            };
 
             if !auto_enabled || !initialized {
                 continue;
@@ -499,6 +726,7 @@ pub fn run() {
     let shared_state = Arc::new(Mutex::new(HitState {
         auto_passthrough: true,
         initialized: false,
+        toggle_hotkey: Some(HotkeyConfig::default()),
         ..Default::default()
     }));
 
@@ -512,6 +740,7 @@ pub fn run() {
             set_overlay_window_mode,
             update_hit_regions,
             get_system_accent_color,
+            set_toggle_hotkey,
             close_app
         ])
         .setup(move |app| {
