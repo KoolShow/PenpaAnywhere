@@ -1,4 +1,10 @@
 /* PenpaAnywhere Dock Mode: keep Penpa+ UI 100% identical while projecting canvas externally */
+*,
+*::before,
+*::after {
+  -webkit-tap-highlight-color: transparent !important;
+}
+
 html,
 body {
   margin: 0 !important;
