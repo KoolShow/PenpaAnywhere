@@ -51,6 +51,9 @@ export interface PenpaIframeBridge {
   ): void;
   dispatchKey(type: 'keydown' | 'keyup', opts: PenpaKeyOpts): void;
   forceRedraw(): void;
+  saveDraftNow?(): void;
+  setMd3Tokens?(tokens: Record<string, string>): void;
+  setCustomCss?(css: string): void;
   subscribe(fn: (version: number) => void): () => void;
 }
 

@@ -28,6 +28,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.webkit.CookieManager
 import android.webkit.WebView
 import android.widget.FrameLayout
 import androidx.core.app.NotificationCompat
@@ -245,7 +246,7 @@ class OverlayService : Service() {
                 setClickThroughState(!forceClickThrough)
             }
             ACTION_STOP -> {
-                stopSelf()
+                flushWebStorageAndStop()
             }
         }
         return START_STICKY
@@ -604,6 +605,37 @@ class OverlayService : Service() {
             .build()
     }
 
+    private fun flushWebStorageAndStop() {
+        val wv = webView
+        if (wv == null) {
+            stopSelf()
+            return
+        }
+        var stopped = false
+        val doStop = Runnable {
+            if (!stopped) {
+                stopped = true
+                try {
+                    CookieManager.getInstance().flush()
+                } catch (_: Exception) {
+                }
+                stopSelf()
+            }
+        }
+        mainHandler.postDelayed(doStop, 150)
+        try {
+            wv.evaluateJavascript(
+                "window.__PENPAANYWHERE_FLUSH_STORAGE__ && window.__PENPAANYWHERE_FLUSH_STORAGE__();",
+            ) {
+                mainHandler.removeCallbacks(doStop)
+                doStop.run()
+            }
+        } catch (_: Exception) {
+            mainHandler.removeCallbacks(doStop)
+            doStop.run()
+        }
+    }
+
     override fun onDestroy() {
         isRunning = false
         ImagePickerActivity.onImagePicked = null
@@ -620,6 +652,13 @@ class OverlayService : Service() {
             }
         }
         webView?.let { wv ->
+            try {
+                wv.evaluateJavascript(
+                    "window.__PENPAANYWHERE_FLUSH_STORAGE__ && window.__PENPAANYWHERE_FLUSH_STORAGE__();",
+                    null,
+                )
+            } catch (_: Exception) {
+            }
             wv.onPause()
             wv.destroy()
         }

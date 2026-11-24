@@ -17,6 +17,7 @@ declare global {
     __PENPAANYWHERE_ON_ANDROID_IMAGE__?: (dataUrl: string) => void;
     __PENPAANYWHERE_ON_CLICK_THROUGH__?: (enabled: boolean) => void;
     __PENPAANYWHERE_APPLY_MD3_TOKENS__?: (tokens: Record<string, string> | string) => void;
+    __PENPAANYWHERE_FLUSH_STORAGE__?: () => void;
   }
 }
 

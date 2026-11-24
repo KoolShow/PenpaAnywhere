@@ -11,6 +11,7 @@ import android.util.Base64
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebView
@@ -145,8 +146,11 @@ class MainActivity : AppCompatActivity() {
             )
             setOnClickListener {
                 if (OverlayService.isRunning) {
-                    stopService(Intent(this@MainActivity, OverlayService::class.java))
-                    overlayToggleBtn?.postDelayed({ updateOverlayButtonStyle() }, 120)
+                    val stopIntent = Intent(this@MainActivity, OverlayService::class.java).apply {
+                        action = OverlayService.ACTION_STOP
+                    }
+                    startService(stopIntent)
+                    overlayToggleBtn?.postDelayed({ updateOverlayButtonStyle() }, 220)
                 } else {
                     requestOrStartOverlay()
                 }
@@ -243,7 +247,23 @@ class MainActivity : AppCompatActivity() {
         wv.loadUrl(OverlayWebViewFactory.ENTRY_URL)
     }
 
+    override fun onPause() {
+        inAppWebView?.evaluateJavascript(
+            "window.__PENPAANYWHERE_FLUSH_STORAGE__ && window.__PENPAANYWHERE_FLUSH_STORAGE__();",
+            null,
+        )
+        try {
+            CookieManager.getInstance().flush()
+        } catch (_: Exception) {
+        }
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        inAppWebView?.evaluateJavascript(
+            "window.__PENPAANYWHERE_FLUSH_STORAGE__ && window.__PENPAANYWHERE_FLUSH_STORAGE__();",
+            null,
+        )
         inAppWebView?.destroy()
         inAppWebView = null
         super.onDestroy()

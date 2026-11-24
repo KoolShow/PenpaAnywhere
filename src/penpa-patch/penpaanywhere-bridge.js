@@ -1,6 +1,113 @@
 (function () {
   'use strict';
 
+  // Upstream Penpa+ stores UserSettings (theme, language, shortcuts, etc.) via document.cookie
+  // with `this._expDate` (undefined in forEach / 2147483647 days -> Invalid Date), making every
+  // cookie session-only so settings reset on app restart. Back document.cookie with localStorage
+  // so every Penpa+ UserSettings preference persists across Web, Tauri, and Android restarts.
+  var COOKIE_STORAGE_KEY = 'penpaanywhere:penpa_cookies_v1';
+  var nativeCookieDesc =
+    Object.getOwnPropertyDescriptor(Document.prototype, 'cookie') ||
+    (typeof HTMLDocument !== 'undefined' &&
+      Object.getOwnPropertyDescriptor(HTMLDocument.prototype, 'cookie'));
+
+  function readCookieStore() {
+    try {
+      var raw = window.localStorage.getItem(COOKIE_STORAGE_KEY);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch (_) {}
+    return {};
+  }
+
+  function writeCookieStore(map) {
+    try {
+      window.localStorage.setItem(COOKIE_STORAGE_KEY, JSON.stringify(map));
+    } catch (_) {}
+  }
+
+  var cookieStore = readCookieStore();
+
+  if (nativeCookieDesc && nativeCookieDesc.get) {
+    try {
+      var existingCookies = nativeCookieDesc.get.call(document) || '';
+      if (existingCookies) {
+        var seeded = false;
+        existingCookies.split(';').forEach(function (part) {
+          var eq = part.indexOf('=');
+          if (eq <= 0) return;
+          var k = part.slice(0, eq).trim();
+          var v = part.slice(eq + 1).trim();
+          if (k && !(k in cookieStore)) {
+            cookieStore[k] = v;
+            seeded = true;
+          }
+        });
+        if (seeded) writeCookieStore(cookieStore);
+      }
+    } catch (_) {}
+  }
+
+  try {
+    Object.defineProperty(document, 'cookie', {
+      configurable: true,
+      enumerable: true,
+      get: function () {
+        var keys = Object.keys(cookieStore);
+        var pairs = [];
+        for (var i = 0; i < keys.length; i++) {
+          pairs.push(keys[i] + '=' + cookieStore[keys[i]]);
+        }
+        return pairs.join('; ');
+      },
+      set: function (cookieStr) {
+        if (typeof cookieStr !== 'string') return;
+        var parts = cookieStr.split(';');
+        var first = parts[0] || '';
+        var eq = first.indexOf('=');
+        if (eq <= 0) return;
+        var name = first.slice(0, eq).trim();
+        var value = first.slice(eq + 1).trim();
+        if (!name) return;
+
+        var isDelete = false;
+        for (var i = 1; i < parts.length; i++) {
+          var attr = parts[i].trim();
+          var lower = attr.toLowerCase();
+          if (lower.indexOf('expires=') === 0) {
+            var expMs = Date.parse(attr.slice(8).trim());
+            if (!isNaN(expMs) && expMs <= Date.now()) {
+              isDelete = true;
+            }
+          } else if (lower.indexOf('max-age=') === 0) {
+            var maxAge = parseInt(attr.slice(8).trim(), 10);
+            if (!isNaN(maxAge) && maxAge <= 0) {
+              isDelete = true;
+            }
+          }
+        }
+
+        if (isDelete) {
+          delete cookieStore[name];
+        } else {
+          cookieStore[name] = value;
+        }
+        writeCookieStore(cookieStore);
+
+        if (nativeCookieDesc && nativeCookieDesc.set) {
+          try {
+            var fixed = isDelete
+              ? name + '=;path=/;SameSite=Lax;max-age=0'
+              : name + '=' + value + ';path=/;SameSite=Lax;max-age=31536000';
+            nativeCookieDesc.set.call(document, fixed);
+          } catch (_) {}
+        }
+      },
+    });
+  } catch (_) {}
+
   // Prevent beforeunload blocking overlay close
   var origAddEventListener = document.addEventListener.bind(document);
   var origWinAddEventListener = window.addEventListener.bind(window);
@@ -16,15 +123,91 @@
   var frameVersion = 1;
   var listeners = new Set();
   var patchedProtos = new WeakSet();
+  var DRAFT_KEY = 'penpaanywhere:penpa_draft_v1';
+  var draftSaveTimer = 0;
+  var isRestoringDraft = false;
+  var draftRestoreAttempted = false;
+
+  function saveDraftNow() {
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = 0;
+    }
+    if (isRestoringDraft || !draftRestoreAttempted) return;
+    if (!window.pu || typeof window.pu.maketext_duplicate !== 'function') return;
+    try {
+      var fullUrl = window.pu.maketext_duplicate();
+      if (!fullUrl || typeof fullUrl !== 'string') return;
+      var param = '';
+      var hashIdx = fullUrl.indexOf('#');
+      var qIdx = fullUrl.indexOf('?');
+      if (hashIdx >= 0) param = fullUrl.slice(hashIdx + 1);
+      else if (qIdx >= 0) param = fullUrl.slice(qIdx + 1);
+      if (param && param.indexOf('p=') >= 0) {
+        window.localStorage.setItem(DRAFT_KEY, param);
+      }
+    } catch (_) {}
+  }
+
+  function scheduleDraftSave() {
+    if (isRestoringDraft || !draftRestoreAttempted) return;
+    if (draftSaveTimer) clearTimeout(draftSaveTimer);
+    draftSaveTimer = setTimeout(function () {
+      draftSaveTimer = 0;
+      saveDraftNow();
+    }, 350);
+  }
+
+  function restoreDraftOnce() {
+    if (draftRestoreAttempted) return;
+    draftRestoreAttempted = true;
+    try {
+      var saved = window.localStorage.getItem(DRAFT_KEY);
+      if (!saved || saved.indexOf('p=') === -1 || typeof window.load !== 'function') {
+        return;
+      }
+      var preferredTheme = cookieStore.color_theme;
+      var preferredLang = cookieStore.app_language;
+      isRestoringDraft = true;
+      Promise.resolve(window.load(saved, 'localstorage'))
+        .catch(function () {})
+        .finally(function () {
+          try {
+            if (typeof UserSettings !== 'undefined') {
+              if (preferredTheme && String(UserSettings.color_theme) !== String(preferredTheme)) {
+                UserSettings.color_theme = preferredTheme;
+              }
+              if (preferredLang && String(UserSettings.app_language) !== String(preferredLang)) {
+                UserSettings.app_language = preferredLang;
+              }
+            }
+          } catch (_) {}
+          isRestoringDraft = false;
+          tryPatchPuzzleProto();
+          notifyRedraw();
+        });
+    } catch (_) {
+      isRestoringDraft = false;
+    }
+  }
 
   function notifyRedraw() {
     frameVersion++;
+    scheduleDraftSave();
     listeners.forEach(function (fn) {
       try {
         fn(frameVersion);
       } catch (_) {}
     });
   }
+
+  origWinAddEventListener('pagehide', saveDraftNow);
+  origWinAddEventListener('beforeunload', saveDraftNow);
+  origAddEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') {
+      saveDraftNow();
+    }
+  });
 
   function tryPatchPuzzleProto() {
     if (typeof window.Puzzle === 'function' && window.Puzzle.prototype) {
@@ -271,11 +454,12 @@
     };
   }
 
-  // Poll until Penpa finishes boot(), then hook redraw
+  // Poll until Penpa finishes boot(), then hook redraw and restore saved draft
   var bootTimer = setInterval(function () {
     tryPatchPuzzleProto();
     if (isReady()) {
       clearInterval(bootTimer);
+      restoreDraftOnce();
       notifyRedraw();
     }
   }, 80);
@@ -430,6 +614,33 @@
         window.pu.redraw();
       }
       notifyRedraw();
+    },
+    saveDraftNow: saveDraftNow,
+    setMd3Tokens: function (tokens) {
+      if (!tokens || typeof tokens !== 'object') return;
+      var rootStyle = document.documentElement && document.documentElement.style;
+      if (!rootStyle) return;
+      var keys = Object.keys(tokens);
+      for (var i = 0; i < keys.length; i++) {
+        var k = keys[i];
+        if (k.indexOf('--md-sys-color-') === 0 && typeof tokens[k] === 'string') {
+          rootStyle.setProperty(k, tokens[k]);
+        }
+      }
+    },
+    setCustomCss: function (cssText) {
+      var id = 'penpaanywhere-custom-css';
+      var el = document.getElementById(id);
+      if (!cssText || typeof cssText !== 'string' || !cssText.trim()) {
+        if (el && el.parentNode) el.parentNode.removeChild(el);
+        return;
+      }
+      if (!el) {
+        el = document.createElement('style');
+        el.id = id;
+        (document.head || document.documentElement).appendChild(el);
+      }
+      el.textContent = cssText;
     },
     subscribe: function (fn) {
       listeners.add(fn);
