@@ -1,11 +1,20 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import ControlBar, { type BackdropMode } from './components/ControlBar.vue';
-import PerspectiveOverlay, { type AlignTarget } from './components/PerspectiveOverlay.vue';
+import PerspectiveOverlay, { type AlignTarget, type QuadMode } from './components/PerspectiveOverlay.vue';
 import PenpaDockWindow from './components/PenpaDockWindow.vue';
-import type { Point2D } from './core/homography';
+import SettingsDialog from './components/SettingsDialog.vue';
+import { isConvexQuad, type Point2D } from './core/homography';
 import type { BlendRenderMode } from './core/webglOverlay';
 import type { PenpaIframeBridge } from './core/penpaBridge';
+import { DEFAULT_PENPA_MD3_CSS } from './core/defaultPenpaCss';
+import {
+  DEFAULT_TOGGLE_HOTKEY,
+  formatHotkeyLabel,
+  matchesHotkey,
+  type HotkeyBinding,
+} from './core/hotkey';
+import { getCurrentMd3Tokens } from './core/theme';
 import {
   closeOverlayApp,
   detectPlatform,
@@ -14,19 +23,56 @@ import {
   supportsNativeTransparentOverlay,
   supportsScreenCapture,
 } from './core/platform';
+import {
+  flushPersistedStateNow,
+  loadPersistedState,
+  patchPersistedState,
+} from './core/storage';
 
 const platform = detectPlatform();
 const canNativeOverlay = supportsNativeTransparentOverlay(platform);
 const canScreenCapture = supportsScreenCapture();
+const savedState = loadPersistedState();
+
+const VALID_BLEND_MODES: ReadonlySet<BlendRenderMode> = new Set([
+  'multiply',
+  'multiply-inv',
+  'alpha-luma',
+  'alpha-luma-inv',
+  'alpha-minrgb',
+  'alpha-minrgb-inv',
+]);
 
 // Default mode: transparent overlay on Tauri/Android-overlay; image upload on pure web / android app
 const backdropMode = ref<BackdropMode>(canNativeOverlay ? 'overlay' : 'image');
-const blendMode = ref<BlendRenderMode>(canNativeOverlay ? 'alpha-luma' : 'multiply');
-const calibrating = ref(true);
-const alignTarget = ref<AlignTarget>('grid');
-const opacity = ref(1.0);
-const dockVisible = ref(true);
+const blendMode = ref<BlendRenderMode>(
+  savedState.blendMode && VALID_BLEND_MODES.has(savedState.blendMode)
+    ? savedState.blendMode
+    : canNativeOverlay
+      ? 'alpha-luma'
+      : 'multiply',
+);
+const calibrating = ref(savedState.calibrating ?? true);
+const alignTarget = ref<AlignTarget>(savedState.alignTarget ?? 'grid');
+const quadMode = ref<QuadMode>(savedState.quadMode ?? 'rect');
+const opacity = ref(
+  typeof savedState.opacity === 'number' && savedState.opacity >= 0.1 && savedState.opacity <= 1
+    ? savedState.opacity
+    : 1.0,
+);
+const dockVisible = ref(savedState.dockVisible ?? true);
 const clickThrough = ref(false);
+const settingsOpen = ref(false);
+const hotkeyRecording = ref(false);
+
+const customCssEnabled = ref(savedState.customCssEnabled ?? true);
+const customCss = ref(
+  typeof savedState.customCss === 'string' ? savedState.customCss : DEFAULT_PENPA_MD3_CSS,
+);
+const toggleHotkey = ref<HotkeyBinding | null>(
+  savedState.toggleHotkey === undefined ? { ...DEFAULT_TOGGLE_HOTKEY } : savedState.toggleHotkey,
+);
+const hotkeyLabel = computed(() => formatHotkeyLabel(toggleHotkey.value));
 
 const bridge = ref<PenpaIframeBridge | null>(null);
 const fileInputEl = ref<HTMLInputElement | null>(null);
@@ -57,21 +103,121 @@ function makeDefaultCorners(): [Point2D, Point2D, Point2D, Point2D] {
   ];
 }
 
-const corners = ref<[Point2D, Point2D, Point2D, Point2D]>(makeDefaultCorners());
+function loadInitialCorners(): [Point2D, Point2D, Point2D, Point2D] {
+  const norm = savedState.cornersNorm;
+  if (Array.isArray(norm) && norm.length === 4) {
+    const valid = norm.every(
+      (p) => p && typeof p.x === 'number' && typeof p.y === 'number' && Number.isFinite(p.x) && Number.isFinite(p.y),
+    );
+    if (valid) {
+      const w = window.innerWidth || 1280;
+      const h = window.innerHeight || 800;
+      const pts: [Point2D, Point2D, Point2D, Point2D] = [
+        { x: Math.max(8, Math.min(w - 8, norm[0].x * w)), y: Math.max(8, Math.min(h - 8, norm[0].y * h)) },
+        { x: Math.max(8, Math.min(w - 8, norm[1].x * w)), y: Math.max(8, Math.min(h - 8, norm[1].y * h)) },
+        { x: Math.max(8, Math.min(w - 8, norm[2].x * w)), y: Math.max(8, Math.min(h - 8, norm[2].y * h)) },
+        { x: Math.max(8, Math.min(w - 8, norm[3].x * w)), y: Math.max(8, Math.min(h - 8, norm[3].y * h)) },
+      ];
+      if (isConvexQuad(pts)) {
+        return pts;
+      }
+    }
+  }
+  return makeDefaultCorners();
+}
+
+const corners = ref<[Point2D, Point2D, Point2D, Point2D]>(loadInitialCorners());
 const outerQuad = ref<[Point2D, Point2D, Point2D, Point2D]>(corners.value);
 const barRect = ref({ x: 0, y: 0, w: 0, h: 0 });
 const dockRect = ref({ x: 0, y: 0, w: 0, h: 0 });
 
+watch(
+  [
+    blendMode,
+    alignTarget,
+    quadMode,
+    opacity,
+    calibrating,
+    dockVisible,
+    corners,
+    customCssEnabled,
+    customCss,
+    toggleHotkey,
+  ],
+  () => {
+    const w = window.innerWidth || 1;
+    const h = window.innerHeight || 1;
+    const cornersNorm: [Point2D, Point2D, Point2D, Point2D] = [
+      { x: corners.value[0].x / w, y: corners.value[0].y / h },
+      { x: corners.value[1].x / w, y: corners.value[1].y / h },
+      { x: corners.value[2].x / w, y: corners.value[2].y / h },
+      { x: corners.value[3].x / w, y: corners.value[3].y / h },
+    ];
+    patchPersistedState({
+      blendMode: blendMode.value,
+      alignTarget: alignTarget.value,
+      quadMode: quadMode.value,
+      opacity: opacity.value,
+      calibrating: calibrating.value,
+      dockVisible: dockVisible.value,
+      cornersNorm,
+      customCssEnabled: customCssEnabled.value,
+      customCss: customCss.value,
+      toggleHotkey: toggleHotkey.value,
+    });
+  },
+  { deep: true },
+);
+
+function syncPenpaThemeAndCss() {
+  const b = bridge.value;
+  if (!b) return;
+  b.setMd3Tokens?.(getCurrentMd3Tokens());
+  b.setCustomCss?.(customCssEnabled.value ? customCss.value : '');
+}
+
+watch([bridge, customCssEnabled, customCss], () => {
+  syncPenpaThemeAndCss();
+});
+
+async function syncNativeToggleHotkey() {
+  if (platform !== 'tauri') return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const active = hotkeyRecording.value ? null : toggleHotkey.value;
+    await invoke('set_toggle_hotkey', {
+      hotkey: active
+        ? {
+            ctrl: active.ctrl,
+            shift: active.shift,
+            alt: active.alt,
+            meta: active.meta,
+            code: active.code,
+          }
+        : null,
+    });
+  } catch {
+    // non-fatal
+  }
+}
+
+watch([toggleHotkey, hotkeyRecording], () => {
+  syncNativeToggleHotkey();
+});
+
+function flushAllStateNow() {
+  flushPersistedStateNow();
+  bridge.value?.saveDraftNow?.();
+}
+
+async function handleCloseOverlay() {
+  flushAllStateNow();
+  await closeOverlayApp();
+}
+
 const hasDomBackdrop = computed(() => {
   if (backdropMode.value === 'image') return true;
   if (backdropMode.value === 'screen') return true;
-  return false;
-});
-
-// Only enable CSS mix-blend-mode: multiply when a real image or screen capture video is rendered below
-const hasActiveMediaBackdrop = computed(() => {
-  if (backdropMode.value === 'image') return !!imageUrl.value;
-  if (backdropMode.value === 'screen') return !!screenStream.value;
   return false;
 });
 
@@ -106,8 +252,8 @@ async function syncOverlayHitRegions() {
           ? dockRect.value
           : { x: 0, y: 0, w: 0, h: 0 };
       await invoke('update_hit_regions', {
-        enabled: backdropMode.value === 'overlay',
-        forceClickThrough: backdropMode.value === 'overlay' && clickThrough.value,
+        enabled: backdropMode.value === 'overlay' && !settingsOpen.value,
+        forceClickThrough: backdropMode.value === 'overlay' && clickThrough.value && !settingsOpen.value,
         barRect: barRect.value,
         dockRect: dock,
         quad: outerQuad.value,
@@ -142,9 +288,18 @@ async function syncOverlayHitRegions() {
           }
         : { x: 0, y: 0, w: 0, h: 0 };
 
+    const c = corners.value;
+    const androidHandlePts: Point2D[] = [
+      ...c,
+      { x: (c[0].x + c[1].x) * 0.5, y: (c[0].y + c[1].y) * 0.5 },
+      { x: (c[1].x + c[2].x) * 0.5, y: (c[1].y + c[2].y) * 0.5 },
+      { x: (c[2].x + c[3].x) * 0.5, y: (c[2].y + c[3].y) * 0.5 },
+      { x: (c[3].x + c[0].x) * 0.5, y: (c[3].y + c[0].y) * 0.5 },
+    ];
+
     const payload = {
-      passthroughEnabled: backdropMode.value === 'overlay',
-      forceClickThrough: backdropMode.value === 'overlay' && clickThrough.value,
+      passthroughEnabled: backdropMode.value === 'overlay' && !settingsOpen.value,
+      forceClickThrough: backdropMode.value === 'overlay' && clickThrough.value && !settingsOpen.value,
       calibrating: calibrating.value,
       viewportW: window.innerWidth || 1,
       viewportH: window.innerHeight || 1,
@@ -152,7 +307,7 @@ async function syncOverlayHitRegions() {
       dockRect: dockVisible.value ? dockRect.value : { x: 0, y: 0, w: 0, h: 0 },
       boardRect,
       quad: outerQuad.value,
-      corners: corners.value,
+      corners: androidHandlePts,
     };
     try {
       window.AndroidOverlay.updateHitRegions(JSON.stringify(payload));
@@ -163,14 +318,16 @@ async function syncOverlayHitRegions() {
 }
 
 watch(
-  [backdropMode, clickThrough, calibrating, dockVisible, barRect, dockRect, corners, outerQuad],
+  [backdropMode, clickThrough, settingsOpen, calibrating, dockVisible, barRect, dockRect, corners, outerQuad],
   () => {
     syncOverlayHitRegions();
   },
   { deep: true },
 );
 
-function resetCorners() {
+function handleQuadModeChange(next: QuadMode) {
+  if (next === quadMode.value) return;
+  quadMode.value = next;
   corners.value = makeDefaultCorners();
 }
 
@@ -269,14 +426,21 @@ function stopScreenCapture() {
 
 // Forward keyboard shortcuts (digits, arrow keys, Ctrl+Z, Space, Delete...) to Penpa iframe
 function onWindowKey(type: 'keydown' | 'keyup', e: KeyboardEvent) {
-  // Global hotkey inside window: Ctrl/Cmd+Shift+T toggles click-through
-  if (type === 'keydown' && (e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 't') {
+  if (hotkeyRecording.value) return;
+
+  if (type === 'keydown' && matchesHotkey(e, toggleHotkey.value)) {
     if (canNativeOverlay && backdropMode.value === 'overlay') {
       e.preventDefault();
-      clickThrough.value = !clickThrough.value;
+      // On Tauri, the Rust global poller is the single source of truth so we don't double-toggle
+      if (platform !== 'tauri') {
+        clickThrough.value = !clickThrough.value;
+      }
       return;
     }
   }
+
+  if (settingsOpen.value) return;
+
   const activeTag = (document.activeElement?.tagName || '').toLowerCase();
   if (activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select') return;
   if (!bridge.value || !bridge.value.isReady()) return;
@@ -300,10 +464,20 @@ function onKeyUp(e: KeyboardEvent) {
   onWindowKey('keyup', e);
 }
 
+function onVisibilityChange() {
+  if (document.visibilityState === 'hidden') {
+    flushAllStateNow();
+  }
+}
+
 onMounted(async () => {
   window.addEventListener('paste', onPaste);
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('pagehide', flushAllStateNow);
+  window.addEventListener('beforeunload', flushAllStateNow);
+  window.addEventListener('penpaanywhere-md3-updated', syncPenpaThemeAndCss);
+  document.addEventListener('visibilitychange', onVisibilityChange);
 
   window.__PENPAANYWHERE_ON_ANDROID_IMAGE__ = (dataUrl: string) => {
     imageUrl.value = dataUrl;
@@ -312,8 +486,9 @@ onMounted(async () => {
   window.__PENPAANYWHERE_ON_CLICK_THROUGH__ = (enabled: boolean) => {
     clickThrough.value = enabled;
   };
+  window.__PENPAANYWHERE_FLUSH_STORAGE__ = flushAllStateNow;
 
-  // Listen to Tauri global shortcut event (Ctrl+Shift+T) even when window is click-through
+  // Listen to Tauri global shortcut event even when window is click-through
   if (platform === 'tauri') {
     try {
       const { listen } = await import('@tauri-apps/api/event');
@@ -323,6 +498,7 @@ onMounted(async () => {
     } catch {
       // ignore if listener unavailable
     }
+    syncNativeToggleHotkey();
     syncOverlayHitRegions();
   }
   if (platform === 'android-overlay') {
@@ -331,9 +507,14 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  flushAllStateNow();
   window.removeEventListener('paste', onPaste);
   window.removeEventListener('keydown', onKeyDown);
   window.removeEventListener('keyup', onKeyUp);
+  window.removeEventListener('pagehide', flushAllStateNow);
+  window.removeEventListener('beforeunload', flushAllStateNow);
+  window.removeEventListener('penpaanywhere-md3-updated', syncPenpaThemeAndCss);
+  document.removeEventListener('visibilitychange', onVisibilityChange);
   stopScreenCapture();
   if (imageUrl.value && imageUrl.value.startsWith('blob:')) {
     URL.revokeObjectURL(imageUrl.value);
@@ -405,10 +586,11 @@ onBeforeUnmount(() => {
       v-model:corners="corners"
       :bridge="bridge"
       :blend-mode="blendMode"
-      :has-dom-backdrop="hasActiveMediaBackdrop"
+      :has-dom-backdrop="hasDomBackdrop"
       :opacity="opacity"
       :calibrating="calibrating"
       :align-target="alignTarget"
+      :quad-mode="quadMode"
       @quad-geometry-change="(q) => (outerQuad = q)"
     />
 
@@ -428,17 +610,30 @@ onBeforeUnmount(() => {
       v-model:opacity="opacity"
       v-model:dock-visible="dockVisible"
       v-model:click-through="clickThrough"
+      :quad-mode="quadMode"
       :platform="platform"
       :can-native-overlay="canNativeOverlay"
       :can-screen-capture="canScreenCapture"
+      :hotkey-label="hotkeyLabel"
       :has-screen-stream="!!screenStream"
       :has-image="!!imageUrl"
+      @update:quad-mode="handleQuadModeChange"
       @pick-image="triggerImagePicker"
       @start-screen-capture="startScreenCapture"
       @stop-screen-capture="stopScreenCapture"
-      @reset-corners="resetCorners"
-      @close-overlay="closeOverlayApp"
+      @open-settings="settingsOpen = true"
+      @close-overlay="handleCloseOverlay"
       @bounds-change="(r) => (barRect = r)"
+    />
+
+    <!-- Settings Modal (Hotkey + Custom CSS Injection) -->
+    <SettingsDialog
+      v-model:open="settingsOpen"
+      v-model:custom-css-enabled="customCssEnabled"
+      v-model:custom-css="customCss"
+      v-model:toggle-hotkey="toggleHotkey"
+      :platform="platform"
+      @recording-change="(r) => (hotkeyRecording = r)"
     />
   </main>
 </template>

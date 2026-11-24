@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { BlendRenderMode } from '../core/webglOverlay';
-import type { AlignTarget } from './PerspectiveOverlay.vue';
+import type { AlignTarget, QuadMode } from './PerspectiveOverlay.vue';
 import type { RuntimePlatform } from '../core/platform';
+import { loadPersistedState, patchPersistedState } from '../core/storage';
 
 export type BackdropMode = 'overlay' | 'image' | 'screen';
 
@@ -14,9 +15,11 @@ const props = defineProps<{
   blendMode: BlendRenderMode;
   calibrating: boolean;
   alignTarget: AlignTarget;
+  quadMode: QuadMode;
   opacity: number;
   dockVisible: boolean;
   clickThrough: boolean;
+  hotkeyLabel?: string;
   hasScreenStream: boolean;
   hasImage: boolean;
 }>();
@@ -26,21 +29,56 @@ const emit = defineEmits<{
   (e: 'update:blendMode', v: BlendRenderMode): void;
   (e: 'update:calibrating', v: boolean): void;
   (e: 'update:alignTarget', v: AlignTarget): void;
+  (e: 'update:quadMode', v: QuadMode): void;
   (e: 'update:opacity', v: number): void;
   (e: 'update:dockVisible', v: boolean): void;
   (e: 'update:clickThrough', v: boolean): void;
   (e: 'pick-image'): void;
   (e: 'start-screen-capture'): void;
   (e: 'stop-screen-capture'): void;
-  (e: 'reset-corners'): void;
+  (e: 'open-settings'): void;
   (e: 'close-overlay'): void;
   (e: 'bounds-change', rect: { x: number; y: number; w: number; h: number }): void;
 }>();
 
 const barEl = ref<HTMLElement | null>(null);
-const compact = ref(false);
-const pos = ref({ x: 8, y: window.innerHeight > window.innerWidth ? 36 : 10 });
+const savedBar = loadPersistedState().bar;
+const compact = ref(savedBar?.compact ?? false);
+const pos = ref({
+  x:
+    typeof savedBar?.xRatio === 'number'
+      ? Math.max(4, Math.min(Math.max(4, window.innerWidth - 100), savedBar.xRatio * window.innerWidth))
+      : 8,
+  y:
+    typeof savedBar?.yRatio === 'number'
+      ? Math.max(4, Math.min(Math.max(4, window.innerHeight - 44), savedBar.yRatio * window.innerHeight))
+      : window.innerHeight > window.innerWidth
+        ? 36
+        : 10,
+});
 const openMenu = ref<'align' | 'blend' | null>(null);
+
+function persistBarState() {
+  const vw = Math.max(1, window.innerWidth);
+  const vh = Math.max(1, window.innerHeight);
+  patchPersistedState({
+    bar: {
+      xRatio: pos.value.x / vw,
+      yRatio: pos.value.y / vh,
+      compact: compact.value,
+    },
+  });
+}
+
+function clampBarToViewport() {
+  const bw = barEl.value?.offsetWidth || 160;
+  const bh = barEl.value?.offsetHeight || 40;
+  const maxX = Math.max(4, window.innerWidth - Math.min(bw, 100));
+  const maxY = Math.max(4, window.innerHeight - Math.min(bh, 44));
+  pos.value.x = Math.max(4, Math.min(maxX, pos.value.x));
+  pos.value.y = Math.max(4, Math.min(maxY, pos.value.y));
+  reportBounds();
+}
 
 const alignOptions: Array<{ value: AlignTarget; label: string }> = [
   { value: 'grid', label: '对齐:网格' },
@@ -141,6 +179,7 @@ function onBarPointerUp(e: PointerEvent) {
   if (dragMoved) {
     barEl.value?.releasePointerCapture?.(e.pointerId);
     reportBounds();
+    persistBarState();
     window.setTimeout(() => {
       suppressNextClick = false;
     }, 80);
@@ -160,18 +199,34 @@ function onBarClickCapture(e: MouseEvent) {
 function toggleCompact() {
   compact.value = !compact.value;
   openMenu.value = null;
+  persistBarState();
   requestAnimationFrame(reportBounds);
 }
 
+watch(
+  () => props.calibrating,
+  (cal) => {
+    if (!cal && openMenu.value === 'align') {
+      openMenu.value = null;
+    }
+    requestAnimationFrame(reportBounds);
+  },
+);
+
+let barResizeObserver: ResizeObserver | null = null;
+
 onMounted(() => {
-  requestAnimationFrame(reportBounds);
-  const ro = new ResizeObserver(reportBounds);
-  if (barEl.value) ro.observe(barEl.value);
+  requestAnimationFrame(clampBarToViewport);
+  barResizeObserver = new ResizeObserver(reportBounds);
+  if (barEl.value) barResizeObserver.observe(barEl.value);
   window.addEventListener('pointerdown', onGlobalPointerDown, true);
+  window.addEventListener('resize', clampBarToViewport);
 });
 
 onBeforeUnmount(() => {
+  barResizeObserver?.disconnect();
   window.removeEventListener('pointerdown', onGlobalPointerDown, true);
+  window.removeEventListener('resize', clampBarToViewport);
 });
 </script>
 
@@ -187,155 +242,235 @@ onBeforeUnmount(() => {
     @pointercancel="onBarPointerUp"
     @click.capture="onBarClickCapture"
   >
-    <!-- Row 1: Primary controls (fits cleanly on narrow mobile screens; drag anywhere to move bar) -->
-    <div class="ac-bar-row">
+    <!-- Row 1: Mode & Interaction controls (drag anywhere to move bar) -->
+    <div class="ac-bar-row ac-row-main">
       <span class="ac-brand" title="拖动工具栏任意位置移动">⋮⋮</span>
 
-      <template v-if="!compact">
-        <button
-          v-if="canNativeOverlay"
-          class="ac-btn"
-          :class="{ active: backdropMode === 'overlay' }"
-          @click="emit('update:backdropMode', 'overlay')"
-        >
-          叠加
-        </button>
-        <button
-          class="ac-btn"
-          :class="{ active: backdropMode === 'image' }"
-          @click="emit('update:backdropMode', 'image')"
-        >
-          图片
-        </button>
-        <button
-          v-if="canScreenCapture"
-          class="ac-btn"
-          :class="{ active: backdropMode === 'screen' }"
-          @click="
-            emit('update:backdropMode', 'screen');
-            if (!hasScreenStream) emit('start-screen-capture');
-          "
-        >
-          录屏
-        </button>
+      <div class="ac-anim-slot" :class="{ closed: compact }" :inert="compact">
+        <div class="ac-anim-inner">
+          <!-- Category 1: Backdrop Mode (Capsule Segmented Selector) -->
+          <div class="ac-segmented" role="group" aria-label="底图模式">
+            <button
+              v-if="canNativeOverlay"
+              class="ac-seg-btn"
+              :class="{ active: backdropMode === 'overlay' }"
+              @click="emit('update:backdropMode', 'overlay')"
+            >
+              叠加
+            </button>
+            <button
+              class="ac-seg-btn"
+              :class="{ active: backdropMode === 'image' }"
+              @click="emit('update:backdropMode', 'image')"
+            >
+              图片
+            </button>
+            <button
+              v-if="canScreenCapture"
+              class="ac-seg-btn"
+              :class="{ active: backdropMode === 'screen' }"
+              @click="
+                emit('update:backdropMode', 'screen');
+                if (!hasScreenStream) emit('start-screen-capture');
+              "
+            >
+              录屏
+            </button>
+          </div>
 
-        <button
-          v-if="backdropMode === 'image'"
-          class="ac-btn tonal"
-          @click="emit('pick-image')"
-        >
-          {{ hasImage ? '换图' : '选图' }}
-        </button>
-        <button
-          v-if="backdropMode === 'screen'"
-          class="ac-btn"
-          :class="hasScreenStream ? 'danger' : 'tonal'"
-          @click="hasScreenStream ? emit('stop-screen-capture') : emit('start-screen-capture')"
-        >
-          {{ hasScreenStream ? '停止' : '捕获' }}
-        </button>
+          <div
+            class="ac-anim-slot"
+            :class="{ closed: backdropMode !== 'image' }"
+            :inert="backdropMode !== 'image'"
+          >
+            <div class="ac-anim-inner ac-gap-left">
+              <button class="ac-btn tonal" @click="emit('pick-image')">
+                {{ hasImage ? '换图' : '选图' }}
+              </button>
+            </div>
+          </div>
 
-        <button
-          class="ac-btn"
-          :class="{ active: calibrating }"
-          @click="emit('update:calibrating', !calibrating)"
-        >
-          {{ calibrating ? '去画图' : '调四点' }}
-        </button>
+          <div
+            class="ac-anim-slot"
+            :class="{ closed: backdropMode !== 'screen' }"
+            :inert="backdropMode !== 'screen'"
+          >
+            <div class="ac-anim-inner ac-gap-left">
+              <button
+                class="ac-btn"
+                :class="hasScreenStream ? 'danger' : 'tonal'"
+                @click="hasScreenStream ? emit('stop-screen-capture') : emit('start-screen-capture')"
+              >
+                {{ hasScreenStream ? '停止' : '捕获' }}
+              </button>
+            </div>
+          </div>
 
-        <button
-          class="ac-btn"
-          :class="{ active: dockVisible }"
-          @click="emit('update:dockVisible', !dockVisible)"
-        >
-          {{ dockVisible ? '藏工具' : '工具' }}
-        </button>
+          <span class="ac-sep" aria-hidden="true" />
 
-        <button
-          v-if="canNativeOverlay && backdropMode === 'overlay'"
-          class="ac-btn"
-          :class="{ danger: clickThrough }"
-          title="锁定题板与工具窗穿透到底层应用"
-          @click="emit('update:clickThrough', !clickThrough)"
-        >
-          {{ clickThrough ? '穿透中' : '穿透' }}
-        </button>
+          <!-- Category 2: Interaction & Dock -->
+          <button
+            class="ac-btn"
+            :class="{ active: calibrating }"
+            @click="emit('update:calibrating', !calibrating)"
+          >
+            {{ calibrating ? '去画图' : '调四点' }}
+          </button>
 
-        <button
-          v-if="platform === 'tauri' || platform === 'android-overlay'"
-          class="ac-btn danger"
-          title="退出叠加层"
-          @click="emit('close-overlay')"
-        >
-          退出
-        </button>
-      </template>
+          <button
+            class="ac-btn ac-gap-left"
+            :class="{ active: dockVisible }"
+            @click="emit('update:dockVisible', !dockVisible)"
+          >
+            {{ dockVisible ? '藏工具' : '工具' }}
+          </button>
 
-      <button class="ac-btn" :title="compact ? '展开控制条' : '收起控制条'" @click="toggleCompact">
+          <div
+            v-if="canNativeOverlay"
+            class="ac-anim-slot"
+            :class="{ closed: backdropMode !== 'overlay' }"
+            :inert="backdropMode !== 'overlay'"
+          >
+            <div class="ac-anim-inner ac-gap-left">
+              <button
+                class="ac-btn"
+                :class="{ danger: clickThrough }"
+                :title="`锁定题板与工具窗穿透到底层应用${hotkeyLabel && hotkeyLabel !== '未绑定' ? ` (${hotkeyLabel})` : ''}`"
+                @click="emit('update:clickThrough', !clickThrough)"
+              >
+                {{ clickThrough ? '穿透中' : '穿透' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 2: Calibration Alignment (only in calibrating mode) & Blend/Opacity -->
+    <div class="ac-anim-slot ac-row-render-slot" :class="{ closed: compact }" :inert="compact">
+      <div class="ac-anim-inner">
+        <span class="ac-sep ac-sep-desktop" aria-hidden="true" />
+
+        <div class="ac-bar-row ac-row-render">
+          <!-- Category 3: Alignment & Rect/Free Mode (ONLY shown while calibrating) -->
+          <div class="ac-anim-slot" :class="{ closed: !calibrating }" :inert="!calibrating">
+            <div class="ac-anim-inner">
+              <button
+                class="ac-btn ac-dropdown-trigger"
+                :class="{ active: openMenu === 'align' }"
+                @click="toggleMenu('align')"
+              >
+                <span>{{ currentAlignLabel }}</span>
+                <span class="ac-caret">▾</span>
+              </button>
+
+              <div
+                class="ac-segmented ac-gap-left"
+                role="group"
+                aria-label="拖拽几何模式"
+                title="切换矩形/自由模式时自动重置四角"
+              >
+                <button
+                  class="ac-seg-btn"
+                  :class="{ active: quadMode === 'rect' }"
+                  @click="emit('update:quadMode', 'rect')"
+                >
+                  矩形
+                </button>
+                <button
+                  class="ac-seg-btn"
+                  :class="{ active: quadMode === 'free' }"
+                  @click="emit('update:quadMode', 'free')"
+                >
+                  自由
+                </button>
+              </div>
+
+              <span class="ac-sep" aria-hidden="true" />
+            </div>
+          </div>
+
+          <!-- Category 4: Blend Mode & Opacity -->
+          <button
+            class="ac-btn ac-dropdown-trigger"
+            :class="{ active: openMenu === 'blend' }"
+            @click="toggleMenu('blend')"
+          >
+            <span>{{ currentBlendLabel }}</span>
+            <span class="ac-caret">▾</span>
+          </button>
+
+          <label class="ac-opacity-box ac-gap-left" title="题板叠加不透明度">
+            <span>{{ Math.round(opacity * 100) }}%</span>
+            <input
+              type="range"
+              min="0.1"
+              max="1"
+              step="0.02"
+              :value="opacity"
+              @input="emit('update:opacity', parseFloat(($event.target as HTMLInputElement).value))"
+            />
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- Category 5: System Actions (Settings / Exit / Collapse) -->
+    <div class="ac-bar-row ac-row-sys">
+      <div class="ac-anim-slot" :class="{ closed: compact }" :inert="compact">
+        <div class="ac-anim-inner">
+          <span class="ac-sep" aria-hidden="true" />
+          <button class="ac-btn" title="自定义 CSS 与快捷键设置" @click="emit('open-settings')">
+            设置
+          </button>
+
+          <button
+            v-if="platform === 'tauri' || platform === 'android-overlay'"
+            class="ac-btn danger ac-gap-left"
+            title="退出叠加层"
+            @click="emit('close-overlay')"
+          >
+            退出
+          </button>
+        </div>
+      </div>
+
+      <button
+        class="ac-btn ac-gap-left"
+        :title="compact ? '展开控制条' : '收起控制条'"
+        @click="toggleCompact"
+      >
         {{ compact ? '展开' : '收起' }}
       </button>
     </div>
 
-    <!-- Row 2: Alignment, Reset, Blend Mode, Opacity -->
-    <div v-if="!compact" class="ac-bar-row">
-      <button
-        class="ac-btn ac-dropdown-trigger"
-        :class="{ active: openMenu === 'align' }"
-        @click="toggleMenu('align')"
-      >
-        <span>{{ currentAlignLabel }}</span>
-        <span class="ac-caret">▾</span>
-      </button>
+    <!-- Pure-DOM MD3 inline option strip with smooth vertical collapse animation -->
+    <div class="ac-popover-wrap" :class="{ open: !compact && openMenu !== null }">
+      <div class="ac-popover-inner">
+        <div v-if="openMenu === 'align'" class="ac-popover-row">
+          <button
+            v-for="opt in alignOptions"
+            :key="opt.value"
+            class="ac-btn"
+            :class="{ active: alignTarget === opt.value }"
+            @click="selectAlign(opt.value)"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
 
-      <button class="ac-btn" title="重置四控制点" @click="emit('reset-corners')">
-        重置四角
-      </button>
-
-      <button
-        class="ac-btn ac-dropdown-trigger"
-        :class="{ active: openMenu === 'blend' }"
-        @click="toggleMenu('blend')"
-      >
-        <span>{{ currentBlendLabel }}</span>
-        <span class="ac-caret">▾</span>
-      </button>
-
-      <label class="ac-opacity-box" title="题板叠加不透明度">
-        <span>{{ Math.round(opacity * 100) }}%</span>
-        <input
-          type="range"
-          min="0.1"
-          max="1"
-          step="0.02"
-          :value="opacity"
-          @input="emit('update:opacity', parseFloat(($event.target as HTMLInputElement).value))"
-        />
-      </label>
-    </div>
-
-    <!-- Pure-DOM MD3 inline option strip -->
-    <div v-if="!compact && openMenu === 'align'" class="ac-popover-row">
-      <button
-        v-for="opt in alignOptions"
-        :key="opt.value"
-        class="ac-btn"
-        :class="{ active: alignTarget === opt.value }"
-        @click="selectAlign(opt.value)"
-      >
-        {{ opt.label }}
-      </button>
-    </div>
-
-    <div v-if="!compact && openMenu === 'blend'" class="ac-popover-row">
-      <button
-        v-for="opt in blendOptions"
-        :key="opt.value"
-        class="ac-btn"
-        :class="{ active: blendMode === opt.value }"
-        @click="selectBlend(opt.value)"
-      >
-        {{ opt.label }}
-      </button>
+        <div v-else-if="openMenu === 'blend'" class="ac-popover-row">
+          <button
+            v-for="opt in blendOptions"
+            :key="opt.value"
+            class="ac-btn"
+            :class="{ active: blendMode === opt.value }"
+            @click="selectBlend(opt.value)"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
+      </div>
     </div>
   </nav>
 </template>
@@ -348,7 +483,7 @@ onBeforeUnmount(() => {
   flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 0;
   max-width: calc(100vw - 16px);
   padding: 6px 10px;
   border-radius: 18px;
@@ -359,14 +494,120 @@ onBeforeUnmount(() => {
   pointer-events: auto;
   cursor: move;
   touch-action: none;
+  transition: border-radius 0.22s cubic-bezier(0.2, 0, 0, 1), padding 0.22s cubic-bezier(0.2, 0, 0, 1);
 }
 
 .ac-bar-row {
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
-  gap: 5px;
+  gap: 0;
   max-width: 100%;
+}
+
+/* Smooth MD3 horizontal collapse/expand slot for dynamic toolbar items */
+.ac-anim-slot {
+  display: inline-grid;
+  grid-template-columns: 1fr;
+  align-items: center;
+  opacity: 1;
+  transition:
+    grid-template-columns 0.24s cubic-bezier(0.2, 0, 0, 1),
+    opacity 0.18s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ac-anim-slot.closed {
+  grid-template-columns: 0fr;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ac-anim-inner {
+  overflow: hidden;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.ac-gap-left {
+  margin-left: 5px;
+}
+
+.ac-sep {
+  display: inline-block;
+  width: 1px;
+  height: 16px;
+  margin: 0 7px;
+  background: var(--md-sys-color-outline-variant);
+  opacity: 0.9;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.ac-popover-wrap {
+  width: 100%;
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 0.2s cubic-bezier(0.2, 0, 0, 1),
+    opacity 0.16s ease,
+    margin-top 0.2s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ac-popover-wrap.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  margin-top: 6px;
+}
+
+.ac-popover-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.ac-segmented {
+  display: inline-flex;
+  align-items: stretch;
+  height: 30px;
+  border-radius: 999px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  background: var(--md-sys-color-surface-container-high);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.ac-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 0 10px;
+  border: none;
+  border-right: 1px solid var(--md-sys-color-outline-variant);
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.ac-seg-btn:last-child {
+  border-right: none;
+}
+
+.ac-seg-btn:hover {
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+}
+
+.ac-seg-btn.active {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  font-weight: 600;
 }
 
 .ac-popover-row {
@@ -416,18 +657,53 @@ onBeforeUnmount(() => {
 
 @media (max-width: 760px) {
   .ac-control-bar {
-    flex-direction: column;
-    align-items: stretch;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
     width: auto;
     max-width: calc(100vw - 12px);
     padding: 5px 7px;
-    gap: 5px;
+    row-gap: 5px;
     border-radius: 14px;
   }
 
   .ac-bar-row {
     flex-wrap: wrap;
-    gap: 4px;
+    row-gap: 4px;
+  }
+
+  .ac-row-main {
+    order: 1;
+  }
+
+  .ac-row-sys {
+    order: 2;
+  }
+
+  .ac-row-render-slot {
+    order: 3;
+    width: 100%;
+  }
+
+  .ac-row-render-slot.closed {
+    display: none;
+  }
+
+  .ac-popover-wrap {
+    order: 4;
+  }
+
+  .ac-gap-left {
+    margin-left: 4px;
+  }
+
+  .ac-sep {
+    height: 14px;
+    margin: 0 5px;
+  }
+
+  .ac-sep-desktop {
+    display: none;
   }
 
   .ac-control-bar :deep(.ac-btn) {
@@ -435,6 +711,15 @@ onBeforeUnmount(() => {
     padding: 0 7px;
     font-size: 11px;
     flex-shrink: 0;
+  }
+
+  .ac-segmented {
+    height: 26px;
+  }
+
+  .ac-seg-btn {
+    padding: 0 7px;
+    font-size: 11px;
   }
 
   .ac-opacity-box input {
