@@ -172,17 +172,9 @@ jobs:
           if-no-files-found: error
 
   build-macos:
-    name: Build macOS (${{ matrix.arch }})
+    name: Build macOS (Apple Silicon & Intel)
     needs: meta
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            arch: apple-silicon
-          - target: x86_64-apple-darwin
-            arch: intel
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -200,16 +192,16 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - name: Setup Rust toolchain
+      - name: Setup Rust toolchain (arm64 + x86_64)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Cache Rust build
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-          key: macos-${{ matrix.arch }}
+          key: macos-dual
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -219,25 +211,32 @@ jobs:
           node scripts/gen-icons.mjs
           pnpm run sync:penpa
 
-      - name: Build macOS Tauri 2 release (.app)
-        run: pnpm exec tauri build --target ${{ matrix.target }} --bundles app
-
-      - name: Package macOS .dmg and .app.tar.gz
+      - name: Build & package macOS Apple Silicon (aarch64)
         env:
           TAG: ${{ needs.meta.outputs.tag }}
-          TARGET: ${{ matrix.target }}
-          ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p release-assets
-          APP_DIR="src-tauri/target/${TARGET}/release/bundle/macos"
-          tar -czf "release-assets/PenpaAnywhere-${TAG}-macos-${ARCH}.app.tar.gz" -C "${APP_DIR}" PenpaAnywhere.app
-          hdiutil create -volname "PenpaAnywhere" -srcfolder "${APP_DIR}/PenpaAnywhere.app" -ov -format UDZO "release-assets/PenpaAnywhere-${TAG}-macos-${ARCH}.dmg"
+          pnpm exec tauri build --target aarch64-apple-darwin --bundles app
+          APP_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
+          codesign --force --deep --sign - "${APP_DIR}/PenpaAnywhere.app"
+          tar -czf "release-assets/PenpaAnywhere-${TAG}-macos-apple-silicon.app.tar.gz" -C "${APP_DIR}" PenpaAnywhere.app
+          hdiutil create -volname "PenpaAnywhere" -srcfolder "${APP_DIR}/PenpaAnywhere.app" -ov -format UDZO "release-assets/PenpaAnywhere-${TAG}-macos-apple-silicon.dmg"
+
+      - name: Build & package macOS Intel (x86_64)
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          pnpm exec tauri build --target x86_64-apple-darwin --bundles app
+          APP_DIR="src-tauri/target/x86_64-apple-darwin/release/bundle/macos"
+          codesign --force --deep --sign - "${APP_DIR}/PenpaAnywhere.app"
+          tar -czf "release-assets/PenpaAnywhere-${TAG}-macos-intel.app.tar.gz" -C "${APP_DIR}" PenpaAnywhere.app
+          hdiutil create -volname "PenpaAnywhere" -srcfolder "${APP_DIR}/PenpaAnywhere.app" -ov -format UDZO "release-assets/PenpaAnywhere-${TAG}-macos-intel.dmg"
           ls -lh release-assets
 
       - name: Upload macOS release assets
         uses: actions/upload-artifact@v4
         with:
-          name: release-macos-${{ matrix.arch }}
+          name: release-macos
           path: release-assets/*
           if-no-files-found: error
 

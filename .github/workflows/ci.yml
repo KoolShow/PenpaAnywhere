@@ -139,8 +139,9 @@ jobs:
       - name: Build macOS debug app bundle (Tauri 2)
         run: pnpm exec tauri build --debug --bundles app
 
-      - name: Archive macOS debug app bundle (preserve executable bits)
+      - name: Ad-hoc sign & archive macOS debug app bundle
         run: |
+          codesign --force --deep --sign - src-tauri/target/debug/bundle/macos/PenpaAnywhere.app
           mkdir -p dist-macos
           tar -czf dist-macos/PenpaAnywhere-macos-debug.app.tar.gz -C src-tauri/target/debug/bundle/macos PenpaAnywhere.app
 
