@@ -1,0 +1,205 @@
+name: CI Debug Build
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-debug-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-web:
+    name: Web (dist)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync Penpa+ assets & generate icons
+        run: |
+          node scripts/gen-icons.mjs
+          pnpm run sync:penpa
+
+      - name: Typecheck & build Web
+        run: pnpm run build
+
+      - name: Upload Web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PenpaAnywhere-web-dist
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
+
+  build-windows-debug:
+    name: Windows (debug)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync Penpa+ assets & generate icons
+        run: |
+          node scripts/gen-icons.mjs
+          pnpm run sync:penpa
+
+      - name: Build Windows debug executable (Tauri 2)
+        run: pnpm exec tauri build --debug --no-bundle
+
+      - name: Upload Windows debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PenpaAnywhere-windows-debug
+          path: src-tauri/target/debug/penpaanywhere.exe
+          retention-days: 14
+          if-no-files-found: error
+
+  build-macos-debug:
+    name: macOS (debug)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync Penpa+ assets & generate icons
+        run: |
+          node scripts/gen-icons.mjs
+          pnpm run sync:penpa
+
+      - name: Build macOS debug app bundle (Tauri 2)
+        run: pnpm exec tauri build --debug --bundles app
+
+      - name: Archive macOS debug app bundle (preserve executable bits)
+        run: |
+          mkdir -p dist-macos
+          tar -czf dist-macos/PenpaAnywhere-macos-debug.app.tar.gz -C src-tauri/target/debug/bundle/macos PenpaAnywhere.app
+
+      - name: Upload macOS debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PenpaAnywhere-macos-debug
+          path: dist-macos/PenpaAnywhere-macos-debug.app.tar.gz
+          retention-days: 14
+          if-no-files-found: error
+
+  build-android-debug:
+    name: Android (debug APK)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend & sync Android assets
+        run: |
+          node scripts/gen-icons.mjs
+          pnpm run sync:penpa
+          pnpm run android:prepare
+
+      - name: Build Android debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Upload Android debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PenpaAnywhere-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
+          if-no-files-found: error
