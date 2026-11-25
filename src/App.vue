@@ -16,6 +16,7 @@ import {
 } from './core/hotkey';
 import { getCurrentMd3Tokens } from './core/theme';
 import { safeAreaInsets } from './core/safeArea';
+import { getPenpaLangCode, messages, type AppLocale } from './core/i18n';
 import {
   closeOverlayApp,
   detectPlatform,
@@ -77,7 +78,9 @@ const customCss = ref(
 const toggleHotkey = ref<HotkeyBinding | null>(
   savedState.toggleHotkey === undefined ? { ...DEFAULT_TOGGLE_HOTKEY } : savedState.toggleHotkey,
 );
-const hotkeyLabel = computed(() => formatHotkeyLabel(toggleHotkey.value));
+const hotkeyLabel = computed(() =>
+  formatHotkeyLabel(toggleHotkey.value, messages.value.settings.hotkeyUnbound),
+);
 
 const overlayRef = ref<InstanceType<typeof PerspectiveOverlay> | null>(null);
 const bridge = ref<PenpaIframeBridge | null>(null);
@@ -390,6 +393,10 @@ function handleRespondScreenshotPrompt(choice: 'enable' | 'dismiss' | 'later') {
   refreshAndroidScreenshotStatus();
 }
 
+function handleSyncPenpaLanguage(locale: AppLocale) {
+  bridge.value?.setLanguage?.(getPenpaLangCode(locale));
+}
+
 function handleQuadModeChange(next: QuadMode) {
   if (next === quadMode.value) return;
   quadMode.value = next;
@@ -452,7 +459,7 @@ function onPaste(e: ClipboardEvent) {
 async function startScreenCapture() {
   screenError.value = null;
   if (!canScreenCapture) {
-    screenError.value = '当前环境不支持 getDisplayMedia 屏幕捕获 API。';
+    screenError.value = messages.value.stage.screenUnsupported;
     return;
   }
   try {
@@ -475,7 +482,7 @@ async function startScreenCapture() {
       }
     });
   } catch (err) {
-    screenError.value = err instanceof Error ? err.message : '用户取消了屏幕捕获';
+    screenError.value = err instanceof Error ? err.message : messages.value.stage.screenCancelled;
   }
 }
 
@@ -621,7 +628,7 @@ onBeforeUnmount(() => {
         v-if="backdropMode === 'image' && imageUrl"
         :src="imageUrl"
         class="ac-backdrop-media"
-        alt="Uploaded puzzle screenshot"
+        :alt="messages.stage.imageAlt"
       />
       <video
         v-else-if="backdropMode === 'screen'"
@@ -637,25 +644,29 @@ onBeforeUnmount(() => {
     <!-- Floating guidance card when no screenshot / stream is loaded yet -->
     <div v-if="backdropMode === 'image' && !imageUrl" class="ac-backdrop-placeholder">
       <div style="font-size: 13px; font-weight: 600; color: var(--md-sys-color-on-surface)">
-        上传题目截图 / 粘贴 (Ctrl+V) / 拖拽图片
+        {{ messages.stage.imageTitle }}
       </div>
       <div style="font-size: 11px">
-        背景棋盘格用于预览透明效果；上传截图后将按正片叠底 / Alpha=1-亮度 叠加 Penpa+ 画布
+        {{ messages.stage.imageDesc }}
       </div>
-      <button class="ac-btn active" @click="triggerImagePicker">选择截图文件</button>
+      <button class="ac-btn active" @click="triggerImagePicker">
+        {{ messages.stage.chooseImage }}
+      </button>
     </div>
 
     <div v-if="backdropMode === 'screen' && !screenStream" class="ac-backdrop-placeholder">
       <div style="font-size: 13px; font-weight: 600; color: var(--md-sys-color-on-surface)">
-        Web 屏幕捕获叠加模式
+        {{ messages.stage.screenTitle }}
       </div>
       <div style="font-size: 11px">
-        通过 Screen Capture API 实时捕获屏幕或窗口作为底图
+        {{ messages.stage.screenDesc }}
       </div>
       <div v-if="screenError" style="font-size: 11px; color: var(--md-sys-color-error)">
         {{ screenError }}
       </div>
-      <button class="ac-btn active" @click="startScreenCapture">开始屏幕捕获</button>
+      <button class="ac-btn active" @click="startScreenCapture">
+        {{ messages.stage.startScreen }}
+      </button>
     </div>
 
     <!-- WebGL2 4-point Perspective Overlay Canvas (Multiply / Alpha=1-Luma) -->
@@ -704,7 +715,7 @@ onBeforeUnmount(() => {
       @bounds-change="(r) => (barRect = r)"
     />
 
-    <!-- Settings Modal (Hotkey + Custom CSS Injection + Android Screenshot Compatibility) -->
+    <!-- Settings Modal (Language + Hotkey + Custom CSS Injection + Android Screenshot Compatibility) -->
     <SettingsDialog
       v-model:open="settingsOpen"
       v-model:custom-css-enabled="customCssEnabled"
@@ -715,6 +726,7 @@ onBeforeUnmount(() => {
       @toggle-android-screenshot-composite="handleToggleAndroidScreenshotComposite"
       @request-android-all-files="handleRequestAndroidAllFiles"
       @recording-change="(r) => (hotkeyRecording = r)"
+      @sync-penpa-language="handleSyncPenpaLanguage"
     />
 
     <!-- First-time Android Screenshot Auto-Composite Prompt -->
@@ -723,18 +735,24 @@ onBeforeUnmount(() => {
       class="ac-prompt-backdrop"
       @pointerdown.self="handleRespondScreenshotPrompt('later')"
     >
-      <section class="ac-prompt-card" role="dialog" aria-modal="true" aria-label="截图合成提示">
-        <div class="ac-prompt-title">检测到系统截屏</div>
-        <p class="ac-prompt-body">
-          部分 Android 系统截屏不会包含悬浮叠加层。是否开启「截图自动合成叠加层」？开启后每次系统截屏都会自动将当前
-          Penpa+ 题板合成写入原截图文件（需授予「所有文件访问权限」）。
-        </p>
+      <section
+        class="ac-prompt-card"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="messages.screenshotPrompt.ariaLabel"
+      >
+        <div class="ac-prompt-title">{{ messages.screenshotPrompt.title }}</div>
+        <p class="ac-prompt-body">{{ messages.screenshotPrompt.body }}</p>
         <div v-if="screenshotPromptFile" class="ac-prompt-file">{{ screenshotPromptFile }}</div>
         <div class="ac-prompt-actions">
-          <button class="ac-btn" @click="handleRespondScreenshotPrompt('dismiss')">不再提示</button>
-          <button class="ac-btn" @click="handleRespondScreenshotPrompt('later')">暂不</button>
+          <button class="ac-btn" @click="handleRespondScreenshotPrompt('dismiss')">
+            {{ messages.screenshotPrompt.dismiss }}
+          </button>
+          <button class="ac-btn" @click="handleRespondScreenshotPrompt('later')">
+            {{ messages.screenshotPrompt.later }}
+          </button>
           <button class="ac-btn active" @click="handleRespondScreenshotPrompt('enable')">
-            开启并合成此截图
+            {{ messages.screenshotPrompt.enable }}
           </button>
         </div>
       </section>

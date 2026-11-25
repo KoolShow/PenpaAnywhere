@@ -1,6 +1,7 @@
 import type { Point2D } from './homography';
 import type { BlendRenderMode } from './webglOverlay';
 import type { HotkeyBinding } from './hotkey';
+import type { AppLocale } from './i18n';
 
 export interface PersistedBarState {
   xRatio: number;
@@ -31,6 +32,7 @@ export interface PersistedAppState {
   customCssEnabled?: boolean;
   customCss?: string;
   toggleHotkey?: HotkeyBinding | null;
+  locale?: AppLocale;
 }
 
 const STORAGE_KEY = 'penpaanywhere:ui_state_v1';

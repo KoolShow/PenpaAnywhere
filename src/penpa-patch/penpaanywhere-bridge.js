@@ -642,6 +642,22 @@
       }
       el.textContent = cssText;
     },
+    setLanguage: function (lang) {
+      if (lang !== 'ZH' && lang !== 'EN' && lang !== 'JP') return;
+      try {
+        if (typeof UserSettings !== 'undefined') {
+          UserSettings.app_language = lang;
+          return;
+        }
+      } catch (_) {}
+      try {
+        var opt = document.getElementById('language_opt');
+        if (opt) {
+          opt.value = lang;
+          opt.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      } catch (_) {}
+    },
     subscribe: function (fn) {
       listeners.add(fn);
       return function () {

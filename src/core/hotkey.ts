@@ -69,8 +69,11 @@ export function formatCodeName(code: string): string {
   return SPECIAL_CODE_LABELS[code] || code;
 }
 
-export function formatHotkeyLabel(hk: Omit<HotkeyBinding, 'label'> | null | undefined): string {
-  if (!hk || !hk.code) return '未绑定';
+export function formatHotkeyLabel(
+  hk: Omit<HotkeyBinding, 'label'> | null | undefined,
+  unboundLabel = 'Unbound',
+): string {
+  if (!hk || !hk.code) return unboundLabel;
   const parts: string[] = [];
   if (hk.ctrl) parts.push('Ctrl');
   if (hk.alt) parts.push('Alt');

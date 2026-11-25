@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { getPenpaBridge, type PenpaIframeBridge } from '../core/penpaBridge';
 import { loadPersistedState, patchPersistedState } from '../core/storage';
 import { safeAreaInsets } from '../core/safeArea';
+import { messages } from '../core/i18n';
 
 const props = defineProps<{
   visible: boolean;
@@ -262,8 +263,8 @@ onBeforeUnmount(() => {
       <div class="ac-dock-actions">
         <div class="ac-dock-sliders" :class="{ closed: collapsed }" :inert="collapsed">
           <div class="ac-dock-sliders-inner">
-            <label class="ac-mini-slider" title="悬浮窗缩放">
-              <span>缩放</span>
+            <label class="ac-mini-slider" :title="messages.dock.zoomTitle">
+              <span>{{ messages.dock.zoom }}</span>
               <input
                 v-model.number="scale"
                 type="range"
@@ -272,8 +273,8 @@ onBeforeUnmount(() => {
                 step="0.05"
               />
             </label>
-            <label class="ac-mini-slider" title="悬浮窗透明度">
-              <span>透明</span>
+            <label class="ac-mini-slider" :title="messages.dock.opacityTitle">
+              <span>{{ messages.dock.opacity }}</span>
               <input
                 v-model.number="dockOpacity"
                 type="range"
@@ -285,10 +286,18 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="ac-dock-btns">
-          <button class="ac-icon-btn" :title="collapsed ? '展开' : '折叠'" @click="toggleCollapsed">
+          <button
+            class="ac-icon-btn"
+            :title="collapsed ? messages.dock.expand : messages.dock.collapse"
+            @click="toggleCollapsed"
+          >
             {{ collapsed ? '▢' : '—' }}
           </button>
-          <button class="ac-icon-btn" title="隐藏工具窗" @click="emit('update:visible', false)">
+          <button
+            class="ac-icon-btn"
+            :title="messages.dock.hide"
+            @click="emit('update:visible', false)"
+          >
             ✕
           </button>
         </div>
@@ -306,7 +315,7 @@ onBeforeUnmount(() => {
       <div
         v-if="!collapsed"
         class="ac-resize-handle"
-        title="拖动调整悬浮窗大小"
+        :title="messages.dock.resizeTitle"
         @pointerdown="startResize"
         @pointermove="onDragMove"
         @pointerup="onDragEnd"

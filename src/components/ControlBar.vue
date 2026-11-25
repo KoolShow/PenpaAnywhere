@@ -5,6 +5,7 @@ import type { AlignTarget, QuadMode } from './PerspectiveOverlay.vue';
 import type { RuntimePlatform } from '../core/platform';
 import { loadPersistedState, patchPersistedState } from '../core/storage';
 import { safeAreaInsets } from '../core/safeArea';
+import { currentLocale, messages } from '../core/i18n';
 
 export type BackdropMode = 'overlay' | 'image' | 'screen';
 
@@ -100,27 +101,36 @@ function clampBarToViewport() {
   reportBounds();
 }
 
-const alignOptions: Array<{ value: AlignTarget; label: string }> = [
-  { value: 'grid', label: '对齐:网格' },
-  { value: 'canvas', label: '对齐:画布' },
-];
+const alignOptions = computed<Array<{ value: AlignTarget; label: string }>>(() => [
+  { value: 'grid', label: messages.value.bar.alignGrid },
+  { value: 'canvas', label: messages.value.bar.alignCanvas },
+]);
 
-const blendOptions: Array<{ value: BlendRenderMode; label: string }> = [
-  { value: 'multiply', label: '正片叠底' },
-  { value: 'multiply-inv', label: '正片叠底(反转)' },
-  { value: 'alpha-luma', label: 'Alpha=1-亮度' },
-  { value: 'alpha-luma-inv', label: 'Alpha=1-亮度(反转)' },
-  { value: 'alpha-minrgb', label: '去白保色' },
-  { value: 'alpha-minrgb-inv', label: '去白保色(反转)' },
-];
+const blendOptions = computed<Array<{ value: BlendRenderMode; label: string }>>(() => [
+  { value: 'multiply', label: messages.value.bar.blendMultiply },
+  { value: 'multiply-inv', label: messages.value.bar.blendMultiplyInv },
+  { value: 'alpha-luma', label: messages.value.bar.blendAlphaLuma },
+  { value: 'alpha-luma-inv', label: messages.value.bar.blendAlphaLumaInv },
+  { value: 'alpha-minrgb', label: messages.value.bar.blendAlphaMinRgb },
+  { value: 'alpha-minrgb-inv', label: messages.value.bar.blendAlphaMinRgbInv },
+]);
 
 const currentAlignLabel = computed(
-  () => alignOptions.find((o) => o.value === props.alignTarget)?.label ?? '对齐:网格',
+  () => alignOptions.value.find((o) => o.value === props.alignTarget)?.label ?? messages.value.bar.alignGrid,
 );
 
 const currentBlendLabel = computed(
-  () => blendOptions.find((o) => o.value === props.blendMode)?.label ?? 'Alpha=1-亮度',
+  () => blendOptions.value.find((o) => o.value === props.blendMode)?.label ?? messages.value.bar.blendAlphaLuma,
 );
+
+const passthroughTooltip = computed(() => {
+  const base = messages.value.bar.passthroughTitle;
+  const hk = props.hotkeyLabel;
+  if (hk && hk !== messages.value.settings.hotkeyUnbound) {
+    return `${base} (${hk})`;
+  }
+  return base;
+});
 
 // Universal drag from ANY area of the toolbar (including interactive buttons),
 // while preserving normal button taps (movement <= 8px) and range slider input.
@@ -221,7 +231,7 @@ function toggleCompact() {
 }
 
 watch(
-  safeAreaInsets,
+  [safeAreaInsets, currentLocale],
   () => {
     requestAnimationFrame(clampBarToViewport);
   },
@@ -269,26 +279,26 @@ onBeforeUnmount(() => {
   >
     <!-- Row 1: Mode & Interaction controls (drag anywhere to move bar) -->
     <div class="ac-bar-row ac-row-main">
-      <span class="ac-brand" title="拖动工具栏任意位置移动">⋮⋮</span>
+      <span class="ac-brand" :title="messages.bar.dragTitle">⋮⋮</span>
 
       <div class="ac-anim-slot" :class="{ closed: compact }" :inert="compact">
         <div class="ac-anim-inner">
           <!-- Category 1: Backdrop Mode (Capsule Segmented Selector) -->
-          <div class="ac-segmented" role="group" aria-label="底图模式">
+          <div class="ac-segmented" role="group" :aria-label="messages.bar.backdropGroupAria">
             <button
               v-if="canNativeOverlay"
               class="ac-seg-btn"
               :class="{ active: backdropMode === 'overlay' }"
               @click="emit('update:backdropMode', 'overlay')"
             >
-              叠加
+              {{ messages.bar.modeOverlay }}
             </button>
             <button
               class="ac-seg-btn"
               :class="{ active: backdropMode === 'image' }"
               @click="emit('update:backdropMode', 'image')"
             >
-              图片
+              {{ messages.bar.modeImage }}
             </button>
             <button
               v-if="canScreenCapture"
@@ -299,7 +309,7 @@ onBeforeUnmount(() => {
                 if (!hasScreenStream) emit('start-screen-capture');
               "
             >
-              录屏
+              {{ messages.bar.modeScreen }}
             </button>
           </div>
 
@@ -310,7 +320,7 @@ onBeforeUnmount(() => {
           >
             <div class="ac-anim-inner ac-gap-left">
               <button class="ac-btn tonal" @click="emit('pick-image')">
-                {{ hasImage ? '换图' : '选图' }}
+                {{ hasImage ? messages.bar.changeImage : messages.bar.pickImage }}
               </button>
             </div>
           </div>
@@ -326,7 +336,7 @@ onBeforeUnmount(() => {
                 :class="hasScreenStream ? 'danger' : 'tonal'"
                 @click="hasScreenStream ? emit('stop-screen-capture') : emit('start-screen-capture')"
               >
-                {{ hasScreenStream ? '停止' : '捕获' }}
+                {{ hasScreenStream ? messages.bar.stopCapture : messages.bar.startCapture }}
               </button>
             </div>
           </div>
@@ -339,7 +349,7 @@ onBeforeUnmount(() => {
             :class="{ active: calibrating }"
             @click="emit('update:calibrating', !calibrating)"
           >
-            {{ calibrating ? '去画图' : '调四点' }}
+            {{ calibrating ? messages.bar.toDraw : messages.bar.toAlign }}
           </button>
 
           <button
@@ -347,7 +357,7 @@ onBeforeUnmount(() => {
             :class="{ active: dockVisible }"
             @click="emit('update:dockVisible', !dockVisible)"
           >
-            {{ dockVisible ? '藏工具' : '工具' }}
+            {{ dockVisible ? messages.bar.hideTools : messages.bar.showTools }}
           </button>
 
           <div
@@ -360,10 +370,10 @@ onBeforeUnmount(() => {
               <button
                 class="ac-btn"
                 :class="{ danger: clickThrough }"
-                :title="`锁定题板与工具窗穿透到底层应用${hotkeyLabel && hotkeyLabel !== '未绑定' ? ` (${hotkeyLabel})` : ''}`"
+                :title="passthroughTooltip"
                 @click="emit('update:clickThrough', !clickThrough)"
               >
-                {{ clickThrough ? '穿透中' : '穿透' }}
+                {{ clickThrough ? messages.bar.passthroughOn : messages.bar.passthroughOff }}
               </button>
             </div>
           </div>
@@ -392,22 +402,22 @@ onBeforeUnmount(() => {
               <div
                 class="ac-segmented ac-gap-left"
                 role="group"
-                aria-label="拖拽几何模式"
-                title="切换矩形/自由模式时自动重置四角"
+                :aria-label="messages.bar.geomGroupAria"
+                :title="messages.bar.quadModeTitle"
               >
                 <button
                   class="ac-seg-btn"
                   :class="{ active: quadMode === 'rect' }"
                   @click="emit('update:quadMode', 'rect')"
                 >
-                  矩形
+                  {{ messages.bar.quadRect }}
                 </button>
                 <button
                   class="ac-seg-btn"
                   :class="{ active: quadMode === 'free' }"
                   @click="emit('update:quadMode', 'free')"
                 >
-                  自由
+                  {{ messages.bar.quadFree }}
                 </button>
               </div>
 
@@ -425,7 +435,7 @@ onBeforeUnmount(() => {
             <span class="ac-caret">▾</span>
           </button>
 
-          <label class="ac-opacity-box ac-gap-left" title="题板叠加不透明度">
+          <label class="ac-opacity-box ac-gap-left" :title="messages.bar.opacityTitle">
             <span>{{ Math.round(opacity * 100) }}%</span>
             <input
               type="range"
@@ -445,27 +455,27 @@ onBeforeUnmount(() => {
       <div class="ac-anim-slot" :class="{ closed: compact }" :inert="compact">
         <div class="ac-anim-inner">
           <span class="ac-sep" aria-hidden="true" />
-          <button class="ac-btn" title="自定义 CSS 与快捷键设置" @click="emit('open-settings')">
-            设置
+          <button class="ac-btn" :title="messages.bar.settingsTitle" @click="emit('open-settings')">
+            {{ messages.bar.settings }}
           </button>
 
           <button
             v-if="platform === 'tauri' || platform === 'android-overlay' || platform === 'android-app'"
             class="ac-btn danger ac-gap-left"
-            :title="platform === 'android-app' ? '返回主界面' : '退出叠加层'"
+            :title="platform === 'android-app' ? messages.bar.exitAppTitle : messages.bar.exitOverlayTitle"
             @click="emit('close-overlay')"
           >
-            退出
+            {{ messages.bar.exit }}
           </button>
         </div>
       </div>
 
       <button
         class="ac-btn ac-gap-left"
-        :title="compact ? '展开控制条' : '收起控制条'"
+        :title="compact ? messages.bar.expandTitle : messages.bar.collapseTitle"
         @click="toggleCompact"
       >
-        {{ compact ? '展开' : '收起' }}
+        {{ compact ? messages.bar.expand : messages.bar.collapse }}
       </button>
     </div>
 

@@ -1,0 +1,22 @@
+<resources>
+    <string name="app_name">PenpaAnywhere</string>
+    <string name="launcher_start_overlay">启动叠加层</string>
+    <string name="launcher_stop_overlay">停止叠加层</string>
+    <string name="launcher_image_mode">截图模式</string>
+    <string name="toast_overlay_permission_required">需要悬浮窗权限</string>
+    <string name="toast_overlay_permission_missing">缺少悬浮窗权限，请先授权</string>
+    <string name="notification_channel_name">PenpaAnywhere 透明叠加层</string>
+    <string name="notification_title">PenpaAnywhere 叠加层运行中</string>
+    <string name="notification_status_passthrough">当前：题板已穿透（点顶栏或此通知恢复）</string>
+    <string name="notification_status_interactive">当前：精确蒙版穿透 / 元素区可交互</string>
+    <string name="notification_action_unlock">恢复题板交互</string>
+    <string name="notification_action_lock">锁定题板穿透</string>
+    <string name="notification_action_stop">关闭叠加层</string>
+    <string name="toast_screenshot_composite_enabled">已开启截图自动合成叠加层</string>
+    <string name="toast_all_files_denied_overwrite">未授予文件访问权限，无法原地修改截图</string>
+    <string name="toast_all_files_granted">已授予文件访问权限</string>
+    <string name="toast_all_files_denied_retry">未授予文件访问权限，可在设置中重新授权</string>
+    <string name="toast_all_files_needed_composite">需要文件访问权限才能合成截图，请授权</string>
+    <string name="toast_screenshot_composite_success">已将完整叠加层合成到截图</string>
+    <string name="toast_screenshot_composite_failed">截图合成失败：%1$s</string>
+</resources>

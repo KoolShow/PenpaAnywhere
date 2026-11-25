@@ -72,7 +72,7 @@ class MainActivity : AppCompatActivity() {
             if (Settings.canDrawOverlays(this)) {
                 ensureMediaReadThenStartOverlay()
             } else {
-                Toast.makeText(this, "需要悬浮窗权限", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.toast_overlay_permission_required), Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -116,13 +116,13 @@ class MainActivity : AppCompatActivity() {
         if (running) {
             val bg = Md3DynamicColorProvider.resolveColor(this, MaterialR.attr.colorErrorContainer, "#8C1D18")
             val fg = Md3DynamicColorProvider.resolveColor(this, MaterialR.attr.colorOnErrorContainer, "#F9DEDC")
-            btn.text = "停止叠加层"
+            btn.text = getString(R.string.launcher_stop_overlay)
             btn.backgroundTintList = ColorStateList.valueOf(bg)
             btn.setTextColor(fg)
         } else {
             val bg = Md3DynamicColorProvider.resolveColor(this, MaterialR.attr.colorPrimary, "#A8C7FA")
             val fg = Md3DynamicColorProvider.resolveColor(this, MaterialR.attr.colorOnPrimary, "#062E6F")
-            btn.text = "启动叠加层"
+            btn.text = getString(R.string.launcher_start_overlay)
             btn.backgroundTintList = ColorStateList.valueOf(bg)
             btn.setTextColor(fg)
         }
@@ -185,7 +185,7 @@ class MainActivity : AppCompatActivity() {
         updateOverlayButtonStyle()
 
         val btnImage = MaterialButton(this).apply {
-            text = "截图模式"
+            text = getString(R.string.launcher_image_mode)
             isAllCaps = false
             textSize = 15f
             cornerRadius = dp(28)

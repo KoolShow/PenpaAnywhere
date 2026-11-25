@@ -211,7 +211,7 @@ class OverlayService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification())
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
             Log.w("PenpaAnywhereWeb", "OverlayService started without SYSTEM_ALERT_WINDOW permission; stopping safely")
-            Toast.makeText(this, "缺少悬浮窗权限，请先授权", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.toast_overlay_permission_missing), Toast.LENGTH_SHORT).show()
             isRunning = false
             stopSelf()
             return
@@ -694,7 +694,7 @@ class OverlayService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "PenpaAnywhere 透明叠加层",
+                getString(R.string.notification_channel_name),
                 NotificationManager.IMPORTANCE_LOW,
             )
             val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
@@ -723,18 +723,26 @@ class OverlayService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        val status = if (forceClickThrough) "当前：题板已穿透（点顶栏或此通知恢复）" else "当前：精确蒙版穿透 / 元素区可交互"
+        val status = if (forceClickThrough) {
+            getString(R.string.notification_status_passthrough)
+        } else {
+            getString(R.string.notification_status_interactive)
+        }
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_edit)
-            .setContentTitle("PenpaAnywhere 叠加层运行中")
+            .setContentTitle(getString(R.string.notification_title))
             .setContentText(status)
             .setOngoing(true)
             .addAction(
                 0,
-                if (forceClickThrough) "恢复题板交互" else "锁定题板穿透",
+                if (forceClickThrough) {
+                    getString(R.string.notification_action_unlock)
+                } else {
+                    getString(R.string.notification_action_lock)
+                },
                 togglePending,
             )
-            .addAction(0, "关闭叠加层", stopPending)
+            .addAction(0, getString(R.string.notification_action_stop), stopPending)
             .build()
     }
 

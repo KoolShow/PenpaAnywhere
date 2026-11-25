@@ -12,6 +12,7 @@ import {
 import { WebGLPerspectiveRenderer, type BlendRenderMode } from '../core/webglOverlay';
 import type { GridBoundsNormalized, PenpaIframeBridge } from '../core/penpaBridge';
 import { safeAreaInsets } from '../core/safeArea';
+import { formatMessage, messages } from '../core/i18n';
 
 export type AlignTarget = 'grid' | 'canvas';
 export type QuadMode = 'rect' | 'free';
@@ -779,7 +780,7 @@ defineExpose({
     </svg>
 
     <div v-if="glError" class="ac-gl-error">
-      WebGL2 初始化失败：{{ glError }}
+      {{ formatMessage(messages.overlay.webglInitFailed, { error: glError }) }}
     </div>
   </div>
 </template>

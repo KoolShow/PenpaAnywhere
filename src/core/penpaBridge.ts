@@ -54,6 +54,7 @@ export interface PenpaIframeBridge {
   saveDraftNow?(): void;
   setMd3Tokens?(tokens: Record<string, string>): void;
   setCustomCss?(css: string): void;
+  setLanguage?(lang: 'ZH' | 'EN' | 'JP'): void;
   subscribe(fn: (version: number) => void): () => void;
 }
 

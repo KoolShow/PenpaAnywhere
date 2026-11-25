@@ -1,3 +1,22 @@
 <resources>
     <string name="app_name">PenpaAnywhere</string>
+    <string name="launcher_start_overlay">Start Overlay</string>
+    <string name="launcher_stop_overlay">Stop Overlay</string>
+    <string name="launcher_image_mode">Image Mode</string>
+    <string name="toast_overlay_permission_required">Overlay permission is required</string>
+    <string name="toast_overlay_permission_missing">Overlay permission missing; please grant it first</string>
+    <string name="notification_channel_name">PenpaAnywhere Overlay</string>
+    <string name="notification_title">PenpaAnywhere Overlay Running</string>
+    <string name="notification_status_passthrough">Status: Click-through locked (tap bar or here to unlock)</string>
+    <string name="notification_status_interactive">Status: Precise touch mask / board interactive</string>
+    <string name="notification_action_unlock">Unlock Board</string>
+    <string name="notification_action_lock">Lock Click-through</string>
+    <string name="notification_action_stop">Close Overlay</string>
+    <string name="toast_screenshot_composite_enabled">Auto-composite overlay on screenshots enabled</string>
+    <string name="toast_all_files_denied_overwrite">All files access denied; cannot update screenshots in-place</string>
+    <string name="toast_all_files_granted">All files access granted</string>
+    <string name="toast_all_files_denied_retry">All files access denied; you can grant it later in Settings</string>
+    <string name="toast_all_files_needed_composite">All files access required to composite screenshot</string>
+    <string name="toast_screenshot_composite_success">Full overlay composited onto screenshot</string>
+    <string name="toast_screenshot_composite_failed">Screenshot composite failed: %1$s</string>
 </resources>

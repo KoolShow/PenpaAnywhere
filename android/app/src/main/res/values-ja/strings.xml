@@ -1,0 +1,22 @@
+<resources>
+    <string name="app_name">PenpaAnywhere</string>
+    <string name="launcher_start_overlay">オーバーレイを開始</string>
+    <string name="launcher_stop_overlay">オーバーレイを停止</string>
+    <string name="launcher_image_mode">画像モード</string>
+    <string name="toast_overlay_permission_required">オーバーレイ権限が必要です</string>
+    <string name="toast_overlay_permission_missing">オーバーレイ権限がありません。先に許可してください</string>
+    <string name="notification_channel_name">PenpaAnywhere オーバーレイ</string>
+    <string name="notification_title">PenpaAnywhere オーバーレイ実行中</string>
+    <string name="notification_status_passthrough">状態: 透過固定中（バーまたは通知で解除）</string>
+    <string name="notification_status_interactive">状態: 精密マスク透過 / 盤面操作可能</string>
+    <string name="notification_action_unlock">透過を解除</string>
+    <string name="notification_action_lock">透過を固定</string>
+    <string name="notification_action_stop">終了</string>
+    <string name="toast_screenshot_composite_enabled">スクショ自動合成を有効にしました</string>
+    <string name="toast_all_files_denied_overwrite">ファイル権限が未許可のためスクショを上書きできません</string>
+    <string name="toast_all_files_granted">ファイルアクセス権限を許可しました</string>
+    <string name="toast_all_files_denied_retry">ファイル権限が未許可です。設定から再度許可できます</string>
+    <string name="toast_all_files_needed_composite">スクショ合成にはファイルアクセス権限が必要です</string>
+    <string name="toast_screenshot_composite_success">オーバーレイ全体をスクショに合成しました</string>
+    <string name="toast_screenshot_composite_failed">スクショ合成に失敗しました: %1$s</string>
+</resources>

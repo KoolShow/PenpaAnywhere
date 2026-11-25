@@ -12,6 +12,14 @@ import {
   type AndroidScreenshotCompositeStatus,
   type RuntimePlatform,
 } from '../core/platform';
+import {
+  currentLocale,
+  formatMessage,
+  LOCALE_OPTIONS,
+  messages,
+  setLocale,
+  type AppLocale,
+} from '../core/i18n';
 
 const props = defineProps<{
   open: boolean;
@@ -30,11 +38,46 @@ const emit = defineEmits<{
   (e: 'toggle-android-screenshot-composite', enabled: boolean): void;
   (e: 'request-android-all-files'): void;
   (e: 'recording-change', recording: boolean): void;
+  (e: 'sync-penpa-language', locale: AppLocale): void;
 }>();
 
+type RecordHintState =
+  | null
+  | { kind: 'prompt' | 'cancelled' | 'needModifier' | 'cleared' }
+  | { kind: 'bound' | 'resetDone'; label: string };
+
 const recording = ref(false);
-const recordHint = ref('');
+const recordStatus = ref<RecordHintState>(null);
+const syncedPenpaLocale = ref<AppLocale | null>(null);
 const cssDraft = ref(props.customCss);
+
+const recordHintText = computed(() => {
+  const s = recordStatus.value;
+  if (!s) return '';
+  const m = messages.value.settings;
+  switch (s.kind) {
+    case 'prompt':
+      return m.hotkeyPrompt;
+    case 'cancelled':
+      return m.hotkeyCancelled;
+    case 'needModifier':
+      return m.hotkeyNeedModifier;
+    case 'cleared':
+      return m.hotkeyCleared;
+    case 'bound':
+      return formatMessage(m.hotkeyBound, { label: s.label });
+    case 'resetDone':
+      return formatMessage(m.hotkeyResetDone, { label: s.label });
+  }
+});
+
+const langSyncedHint = computed(() => {
+  if (!syncedPenpaLocale.value) return '';
+  const opt = LOCALE_OPTIONS.find((o) => o.value === syncedPenpaLocale.value);
+  return formatMessage(messages.value.settings.syncedToPenpa, {
+    lang: opt?.label ?? syncedPenpaLocale.value,
+  });
+});
 
 watch(
   () => props.customCss,
@@ -53,12 +96,25 @@ watch(
       setAndroidKeyboardFocusable(false);
     } else {
       cssDraft.value = props.customCss;
-      recordHint.value = '';
+      recordStatus.value = null;
+      syncedPenpaLocale.value = null;
     }
   },
 );
 
-const hotkeyText = computed(() => formatHotkeyLabel(props.toggleHotkey));
+const hotkeyText = computed(() =>
+  formatHotkeyLabel(props.toggleHotkey, messages.value.settings.hotkeyUnbound),
+);
+
+function selectLanguage(loc: AppLocale) {
+  setLocale(loc);
+  syncedPenpaLocale.value = null;
+}
+
+function handleSyncPenpaLanguage() {
+  emit('sync-penpa-language', currentLocale.value);
+  syncedPenpaLocale.value = currentLocale.value;
+}
 
 function closeDialog() {
   stopRecording();
@@ -67,7 +123,7 @@ function closeDialog() {
 
 function startRecording() {
   recording.value = true;
-  recordHint.value = '请按下快捷键组合（支持 Ctrl/Alt/Shift/Win + 键，或单独 F1-F12 / `），Esc 取消';
+  recordStatus.value = { kind: 'prompt' };
   emit('recording-change', true);
   window.addEventListener('keydown', onRecordKeyDown, true);
 }
@@ -84,7 +140,7 @@ function onRecordKeyDown(e: KeyboardEvent) {
   e.stopPropagation();
 
   if (e.code === 'Escape') {
-    recordHint.value = '已取消录制';
+    recordStatus.value = { kind: 'cancelled' };
     stopRecording();
     return;
   }
@@ -101,25 +157,25 @@ function onRecordKeyDown(e: KeyboardEvent) {
 
   const parsed = keyboardEventToHotkey(e);
   if (!parsed) {
-    recordHint.value = '普通字母/数字请搭配 Ctrl、Alt 或 Shift 使用（功能键 F1-F12 可单键绑定）';
+    recordStatus.value = { kind: 'needModifier' };
     return;
   }
 
   emit('update:toggleHotkey', parsed);
-  recordHint.value = `已绑定：${parsed.label}`;
+  recordStatus.value = { kind: 'bound', label: parsed.label };
   stopRecording();
 }
 
 function resetDefaultHotkey() {
   stopRecording();
   emit('update:toggleHotkey', { ...DEFAULT_TOGGLE_HOTKEY });
-  recordHint.value = `已恢复默认：${DEFAULT_TOGGLE_HOTKEY.label}`;
+  recordStatus.value = { kind: 'resetDone', label: DEFAULT_TOGGLE_HOTKEY.label };
 }
 
 function clearHotkey() {
   stopRecording();
   emit('update:toggleHotkey', null);
-  recordHint.value = '已清除穿透切换快捷键';
+  recordStatus.value = { kind: 'cleared' };
 }
 
 function onCssInput(e: Event) {
@@ -163,28 +219,63 @@ onBeforeUnmount(() => {
 
 <template>
   <div v-if="open" class="ac-settings-backdrop" @pointerdown.self="closeDialog">
-    <section class="ac-settings-card" role="dialog" aria-modal="true" aria-label="PenpaAnywhere 设置">
+    <section
+      class="ac-settings-card"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="messages.settings.ariaLabel"
+    >
       <header class="ac-settings-header">
-        <div class="ac-settings-title">设置</div>
-        <button class="ac-btn" @click="closeDialog">关闭</button>
+        <div class="ac-settings-title">{{ messages.settings.title }}</div>
+        <button class="ac-btn" @click="closeDialog">{{ messages.settings.close }}</button>
       </header>
 
       <div class="ac-settings-body">
+        <!-- Section 0: Interface Language (CN / EN / JP) -->
+        <div class="ac-setting-section">
+          <div class="ac-setting-row">
+            <div>
+              <div class="ac-setting-label">{{ messages.settings.languageLabel }}</div>
+              <div class="ac-setting-desc">{{ messages.settings.languageDesc }}</div>
+            </div>
+            <div class="ac-lang-segmented" role="group" :aria-label="messages.settings.languageLabel">
+              <button
+                v-for="opt in LOCALE_OPTIONS"
+                :key="opt.value"
+                class="ac-lang-seg-btn"
+                :class="{ active: currentLocale === opt.value }"
+                @click="selectLanguage(opt.value)"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+          </div>
+
+          <div class="ac-setting-actions">
+            <button class="ac-btn tonal" @click="handleSyncPenpaLanguage">
+              {{ messages.settings.syncToPenpa }}
+            </button>
+            <span v-if="langSyncedHint" class="ac-setting-hint">{{ langSyncedHint }}</span>
+          </div>
+        </div>
+
+        <div class="ac-divider" />
+
         <!-- Section 1: Click-through Toggle Hotkey -->
         <div class="ac-setting-section">
           <div class="ac-setting-row">
             <div>
-              <div class="ac-setting-label">切换穿透快捷键</div>
+              <div class="ac-setting-label">{{ messages.settings.hotkeyLabel }}</div>
               <div class="ac-setting-desc">
                 {{
                   platform === 'tauri'
-                    ? '全局生效，穿透锁定时也可直接按快捷键恢复交互'
-                    : '窗口聚焦时或外接键盘按下可切换题板穿透'
+                    ? messages.settings.hotkeyDescTauri
+                    : messages.settings.hotkeyDescOther
                 }}
               </div>
             </div>
             <span class="ac-hotkey-pill" :class="{ recording }">
-              {{ recording ? '按键中...' : hotkeyText }}
+              {{ recording ? messages.settings.hotkeyRecordingPill : hotkeyText }}
             </span>
           </div>
 
@@ -194,13 +285,17 @@ onBeforeUnmount(() => {
               :class="{ active: recording }"
               @click="recording ? stopRecording() : startRecording()"
             >
-              {{ recording ? '取消录制' : '录制快捷键' }}
+              {{ recording ? messages.settings.hotkeyCancelBtn : messages.settings.hotkeyRecordBtn }}
             </button>
-            <button class="ac-btn" @click="resetDefaultHotkey">恢复默认</button>
-            <button class="ac-btn" @click="clearHotkey">清除</button>
+            <button class="ac-btn" @click="resetDefaultHotkey">
+              {{ messages.settings.hotkeyResetBtn }}
+            </button>
+            <button class="ac-btn" @click="clearHotkey">
+              {{ messages.settings.hotkeyClearBtn }}
+            </button>
           </div>
 
-          <div v-if="recordHint" class="ac-setting-hint">{{ recordHint }}</div>
+          <div v-if="recordHintText" class="ac-setting-hint">{{ recordHintText }}</div>
         </div>
 
         <!-- Android Compatibility Section: Auto-Composite Overlay onto System Screenshots -->
@@ -209,33 +304,35 @@ onBeforeUnmount(() => {
           <div class="ac-setting-section">
             <div class="ac-setting-row">
               <div>
-                <div class="ac-setting-label">截图自动合成叠加层（Android 兼容）</div>
-                <div class="ac-setting-desc">
-                  针对系统截屏不包含悬浮窗的设备：检测到新截屏时自动将 Penpa+ 叠加层原地合成写入该截图文件
-                </div>
+                <div class="ac-setting-label">{{ messages.settings.androidShotLabel }}</div>
+                <div class="ac-setting-desc">{{ messages.settings.androidShotDesc }}</div>
               </div>
               <button
                 class="ac-btn"
                 :class="{ active: !!androidScreenshotStatus?.enabled }"
                 @click="emit('toggle-android-screenshot-composite', !androidScreenshotStatus?.enabled)"
               >
-                {{ androidScreenshotStatus?.enabled ? '已开启' : '已关闭' }}
+                {{
+                  androidScreenshotStatus?.enabled
+                    ? messages.settings.enabled
+                    : messages.settings.disabled
+                }}
               </button>
             </div>
             <div v-if="androidScreenshotStatus" class="ac-setting-actions">
               <span class="ac-setting-desc">
                 <template v-if="androidScreenshotStatus.enabled">
-                  文件写入权限：{{
+                  {{
                     androidScreenshotStatus.hasWritePermission
-                      ? '已授权（所有文件访问权限）'
-                      : '未授权（需所有文件访问权限）'
+                      ? messages.settings.androidPermGranted
+                      : messages.settings.androidPermMissing
                   }}
                 </template>
                 <template v-else-if="!androidScreenshotStatus.hasReadPermission">
-                  尚未授予图片读取权限，无法自动检测首次截屏；开启后将引导授权
+                  {{ messages.settings.androidReadMissing }}
                 </template>
                 <template v-else>
-                  已具备截屏检测权限，开启后将自动合成完整叠加层到截图
+                  {{ messages.settings.androidReadReady }}
                 </template>
               </span>
               <button
@@ -243,7 +340,7 @@ onBeforeUnmount(() => {
                 class="ac-btn tonal"
                 @click="emit('request-android-all-files')"
               >
-                去授权
+                {{ messages.settings.grantPermission }}
               </button>
             </div>
           </div>
@@ -255,10 +352,11 @@ onBeforeUnmount(() => {
         <div class="ac-setting-section">
           <div class="ac-setting-row">
             <div>
-              <div class="ac-setting-label">注入 Penpa+ 自定义 CSS</div>
+              <div class="ac-setting-label">{{ messages.settings.cssLabel }}</div>
               <div class="ac-setting-desc">
-                实时注入到 Penpa+ 工具窗内，支持直接引用宿主
-                <code>--md-sys-color-*</code> 动态主题变量
+                {{ messages.settings.cssDescBefore }}
+                <code>--md-sys-color-*</code>
+                {{ messages.settings.cssDescAfter }}
               </div>
             </div>
             <button
@@ -266,7 +364,7 @@ onBeforeUnmount(() => {
               :class="{ active: customCssEnabled }"
               @click="emit('update:customCssEnabled', !customCssEnabled)"
             >
-              {{ customCssEnabled ? '已启用' : '已关闭' }}
+              {{ customCssEnabled ? messages.settings.cssEnabled : messages.settings.disabled }}
             </button>
           </div>
 
@@ -275,7 +373,7 @@ onBeforeUnmount(() => {
             :value="cssDraft"
             :disabled="!customCssEnabled"
             spellcheck="false"
-            placeholder="在此输入要注入到 Penpa+ 工具栏的 CSS..."
+            :placeholder="messages.settings.cssPlaceholder"
             @input="onCssInput"
             @keydown="onCssKeyDown"
             @focus="setAndroidKeyboardFocusable(true)"
@@ -283,8 +381,12 @@ onBeforeUnmount(() => {
           />
 
           <div class="ac-setting-actions">
-            <button class="ac-btn tonal" @click="resetDefaultCss">恢复默认 MD3 样式</button>
-            <button class="ac-btn" @click="clearCss">清空</button>
+            <button class="ac-btn tonal" @click="resetDefaultCss">
+              {{ messages.settings.cssResetDefault }}
+            </button>
+            <button class="ac-btn" @click="clearCss">
+              {{ messages.settings.cssClear }}
+            </button>
           </div>
         </div>
       </div>
@@ -351,9 +453,60 @@ onBeforeUnmount(() => {
 
 .ac-setting-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px 12px;
+}
+
+.ac-setting-row > div:first-child {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.ac-lang-segmented {
+  display: inline-flex;
+  align-items: stretch;
+  height: 30px;
+  border-radius: 999px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  background: var(--md-sys-color-surface-container-high);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.ac-lang-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 0 12px;
+  border: none;
+  border-right: 1px solid var(--md-sys-color-outline-variant);
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.ac-lang-seg-btn:last-child {
+  border-right: none;
+}
+
+@media (hover: hover) {
+  .ac-lang-seg-btn:hover {
+    background: var(--md-sys-color-surface-container-highest);
+    color: var(--md-sys-color-on-surface);
+  }
+}
+
+.ac-lang-seg-btn.active {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  font-weight: 600;
 }
 
 .ac-setting-label {

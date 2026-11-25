@@ -182,17 +182,17 @@ class ScreenshotCompositeManager(
                         compositeAndOverwriteAsync(pending.file, pending.snapshot)
                     } else {
                         pending?.snapshot?.recycle()
-                        showToast("已开启截图自动合成叠加层")
+                        showToast(context.getString(R.string.toast_screenshot_composite_enabled))
                     }
                 } else {
                     pendingFirstScreenshot?.snapshot?.recycle()
                     pendingFirstScreenshot = null
-                    showToast("未授予文件访问权限，无法原地修改截图")
+                    showToast(context.getString(R.string.toast_all_files_denied_overwrite))
                 }
             }
         } else if (enabled) {
             restartWatchers()
-            showToast("已开启截图自动合成叠加层")
+            showToast(context.getString(R.string.toast_screenshot_composite_enabled))
         }
     }
 
@@ -201,7 +201,7 @@ class ScreenshotCompositeManager(
             notifyStatus()
             if (granted) {
                 restartWatchers()
-                showToast("已授予文件访问权限")
+                showToast(context.getString(R.string.toast_all_files_granted))
             }
         }
     }
@@ -231,7 +231,7 @@ class ScreenshotCompositeManager(
                         } else {
                             queued?.snapshot?.recycle()
                             if (!granted) {
-                                showToast("未授予文件访问权限，可在设置中重新授权")
+                                showToast(context.getString(R.string.toast_all_files_denied_retry))
                             }
                         }
                     }
@@ -388,7 +388,10 @@ class ScreenshotCompositeManager(
                 }
 
                 val combined = "$relPath/$name/$dataPath".lowercase()
-                val looksLikeScreenshot = combined.contains("screenshot") || combined.contains("截屏")
+                val looksLikeScreenshot =
+                    combined.contains("screenshot") ||
+                        combined.contains("截屏") ||
+                        combined.contains("スクリーンショット")
                 if (!looksLikeScreenshot || dataPath.isEmpty()) return
 
                 handleCandidateFile(File(dataPath))
@@ -448,7 +451,7 @@ class ScreenshotCompositeManager(
                         } else {
                             pendingFirstScreenshot?.snapshot?.recycle()
                             pendingFirstScreenshot = PendingScreenshot(file, snapshot, System.currentTimeMillis())
-                            showToast("需要文件访问权限才能合成截图，请授权")
+                            showToast(context.getString(R.string.toast_all_files_needed_composite))
                             requestWritePermission { granted ->
                                 notifyStatus()
                                 val queued = pendingFirstScreenshot
@@ -594,11 +597,11 @@ class ScreenshotCompositeManager(
 
                 refreshMediaStore(file)
                 Log.i(TAG, "Composited full overlay onto screenshot: ${file.absolutePath} (${outBmp.width}x${outBmp.height})")
-                showToast("已将完整叠加层合成到截图")
+                showToast(context.getString(R.string.toast_screenshot_composite_success))
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to composite screenshot ${file.absolutePath}: ${e.message}", e)
                 notifyStatus()
-                showToast("截图合成失败：${e.message}")
+                showToast(context.getString(R.string.toast_screenshot_composite_failed, e.message ?: ""))
             } finally {
                 baseBmp?.recycle()
                 glBmp?.recycle()
