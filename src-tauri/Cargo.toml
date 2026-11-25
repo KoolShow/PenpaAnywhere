@@ -2,7 +2,8 @@
 name = "penpaanywhere"
 version = "0.1.0"
 description = "PenpaAnywhere - Transparent Penpa+ Perspective Overlay"
-authors = ["PenpaAnywhere"]
+authors = ["KoolShow"]
+license = "MIT"
 edition = "2021"
 
 [lib]
