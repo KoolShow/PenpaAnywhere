@@ -1,4 +1,4 @@
-package com.penpaanywhere.overlay
+package io.github.koolshow.penpaanywhere
 
 import android.net.Uri
 import android.os.Bundle

@@ -1,4 +1,4 @@
-package com.penpaanywhere.overlay
+package io.github.koolshow.penpaanywhere
 
 import android.Manifest
 import android.content.Intent

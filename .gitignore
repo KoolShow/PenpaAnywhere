@@ -5,6 +5,10 @@ src-tauri/target/
 src-tauri/gen/schemas/
 android/.gradle/
 android/local.properties
+android/keystore.properties
 android/app/build/
 android/app/src/main/assets/www/
+*.jks
+*.keystore
+*.p12
 *.log

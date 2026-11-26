@@ -1,9 +1,10 @@
-package com.penpaanywhere.overlay
+package io.github.koolshow.penpaanywhere
 
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
@@ -35,6 +36,10 @@ import com.google.android.material.color.DynamicColors
 import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        const val EXTRA_OPEN_IMAGE_MODE = "io.github.koolshow.penpaanywhere.EXTRA_OPEN_IMAGE_MODE"
+    }
 
     private var inAppWebView: WebView? = null
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
@@ -88,6 +93,10 @@ class MainActivity : AppCompatActivity() {
         DynamicColors.applyToActivityIfAvailable(this)
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+            window.isStatusBarContrastEnforced = false
+        }
         onBackPressedDispatcher.addCallback(
             this,
             object : OnBackPressedCallback(true) {
@@ -102,7 +111,30 @@ class MainActivity : AppCompatActivity() {
                 }
             },
         )
-        showLauncherUi()
+        if (intent?.getBooleanExtra(EXTRA_OPEN_IMAGE_MODE, false) == true) {
+            openInAppWebView()
+        } else {
+            showLauncherUi()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_OPEN_IMAGE_MODE, false) && inAppWebView == null) {
+            openInAppWebView()
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val bundleJson = Md3DynamicColorProvider.exportDualTokensJson(this)
+        inAppWebView?.post {
+            inAppWebView?.evaluateJavascript(
+                "window.__PENPAANYWHERE_APPLY_ANDROID_THEME_BUNDLE__ && window.__PENPAANYWHERE_APPLY_ANDROID_THEME_BUNDLE__($bundleJson);",
+                null,
+            )
+        }
     }
 
     override fun onResume() {
@@ -262,7 +294,10 @@ class MainActivity : AppCompatActivity() {
             onClickThrough = {},
             onFocusable = {},
             onGetDynamicColorTokens = { Md3DynamicColorProvider.exportCssTokensJson(this) },
+            onGetDynamicColorBundle = { Md3DynamicColorProvider.exportDualTokensJson(this) },
             onGetSafeAreaInsets = { lastSafeInsetsJson },
+            onSwitchToOverlayService = { runOnUiThread { closeInAppWebView(thenLaunchOverlay = true) } },
+            onOpenExternalUrl = { url -> runOnUiThread { openExternalBrowserUrl(url) } },
             onClose = { runOnUiThread { closeInAppWebView() } },
             onPickImage = { runOnUiThread { directImageLauncher.launch("image/*") } },
         )
@@ -314,10 +349,20 @@ class MainActivity : AppCompatActivity() {
         wv.loadUrl(OverlayWebViewFactory.ENTRY_URL)
     }
 
-    private fun closeInAppWebView() {
+    private fun openExternalBrowserUrl(url: String) {
+        if (!url.startsWith("https://github.com/KoolShow/PenpaAnywhere")) return
+        try {
+            val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            startActivity(viewIntent)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun closeInAppWebView(thenLaunchOverlay: Boolean = false) {
         val wv = inAppWebView
         if (wv == null) {
             showLauncherUi()
+            if (thenLaunchOverlay) requestOrStartOverlay()
             return
         }
         inAppWebView = null
@@ -332,9 +377,12 @@ class MainActivity : AppCompatActivity() {
                 wv.onPause()
                 wv.destroy()
                 showLauncherUi()
+                if (thenLaunchOverlay) {
+                    requestOrStartOverlay()
+                }
             }
         }
-        wv.postDelayed(finishClose, 150)
+        wv.postDelayed(finishClose, 180)
         try {
             wv.evaluateJavascript(
                 "window.__PENPAANYWHERE_FLUSH_STORAGE__ && window.__PENPAANYWHERE_FLUSH_STORAGE__();",

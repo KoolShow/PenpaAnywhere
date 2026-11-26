@@ -1,4 +1,4 @@
-package com.penpaanywhere.overlay
+package io.github.koolshow.penpaanywhere
 
 import android.annotation.SuppressLint
 import android.app.Notification
@@ -19,6 +19,7 @@ import android.graphics.Rect
 import android.graphics.Region
 import android.hardware.display.DisplayManager
 import android.hardware.input.InputManager
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -47,8 +48,8 @@ class OverlayService : Service() {
     companion object {
         const val CHANNEL_ID = "penpaanywhere_overlay_channel"
         const val NOTIFICATION_ID = 1001
-        const val ACTION_TOGGLE_PASSTHROUGH = "com.penpaanywhere.overlay.ACTION_TOGGLE_PASSTHROUGH"
-        const val ACTION_STOP = "com.penpaanywhere.overlay.ACTION_STOP"
+        const val ACTION_TOGGLE_PASSTHROUGH = "io.github.koolshow.penpaanywhere.ACTION_TOGGLE_PASSTHROUGH"
+        const val ACTION_STOP = "io.github.koolshow.penpaanywhere.ACTION_STOP"
 
         @Volatile
         var isRunning = false
@@ -71,13 +72,19 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                fitInsetsTypes = 0
+                fitInsetsSides = 0
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
         }
 
         private var activeGesture = false
+        private var hasPendingRect = false
         private var pendingRect: Rect? = null
         private var attached = false
         private val proxyLoc = IntArray(2)
@@ -91,8 +98,10 @@ class OverlayService : Service() {
                     MotionEvent.ACTION_DOWN -> activeGesture = true
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         activeGesture = false
-                        pendingRect?.let { r ->
+                        if (hasPendingRect) {
+                            val r = pendingRect
                             pendingRect = null
+                            hasPendingRect = false
                             mainHandler.post { applyRectImmediate(r) }
                         }
                     }
@@ -123,6 +132,7 @@ class OverlayService : Service() {
             if (!attached) return
             if (activeGesture) {
                 pendingRect = rect
+                hasPendingRect = true
                 return
             }
             applyRectImmediate(rect)
@@ -198,10 +208,17 @@ class OverlayService : Service() {
     private var lastCornerPts: List<PointF> = emptyList()
     private var lastScaleX = 1f
     private var lastPayloadJson: String? = null
+    private var storageFlushedForStop = false
     @Volatile
     private var lastSafeInsetsJson: String = "{\"top\":0,\"right\":0,\"bottom\":0,\"left\":0}"
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val reapplyTouchRegionsRunnable = Runnable { applyTouchRegions() }
+
+    private fun scheduleReapplyTouchRegions() {
+        mainHandler.removeCallbacks(reapplyTouchRegionsRunnable)
+        mainHandler.post(reapplyTouchRegionsRunnable)
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -246,10 +263,10 @@ class OverlayService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         overlayContext = createOverlayUiContext()
-        val tokensJson = Md3DynamicColorProvider.exportCssTokensJson(overlayContext)
+        val bundleJson = Md3DynamicColorProvider.exportDualTokensJson(overlayContext)
         mainHandler.post {
             webView?.evaluateJavascript(
-                "window.__PENPAANYWHERE_APPLY_MD3_TOKENS__ && window.__PENPAANYWHERE_APPLY_MD3_TOKENS__($tokensJson);",
+                "window.__PENPAANYWHERE_APPLY_ANDROID_THEME_BUNDLE__ && window.__PENPAANYWHERE_APPLY_ANDROID_THEME_BUNDLE__($bundleJson);",
                 null,
             )
             lastPayloadJson?.let { handleUpdateHitRegions(it) }
@@ -306,7 +323,12 @@ class OverlayService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 alpha = safePassthroughAlpha()
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                fitInsetsTypes = 0
+                fitInsetsSides = 0
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
@@ -327,6 +349,9 @@ class OverlayService : Service() {
             onGetDynamicColorTokens = {
                 Md3DynamicColorProvider.exportCssTokensJson(overlayContext)
             },
+            onGetDynamicColorBundle = {
+                Md3DynamicColorProvider.exportDualTokensJson(overlayContext)
+            },
             onGetSafeAreaInsets = {
                 lastSafeInsetsJson
             },
@@ -341,6 +366,12 @@ class OverlayService : Service() {
             },
             onRequestAllFilesPermission = {
                 mainHandler.post { screenshotManager?.requestWritePermissionFromUi() }
+            },
+            onSwitchToImageActivity = {
+                mainHandler.post { switchToImageActivity() }
+            },
+            onOpenExternalUrl = { url ->
+                mainHandler.post { openExternalBrowserUrl(url) }
             },
             onClose = {
                 mainHandler.post { flushWebStorageAndStop() }
@@ -385,6 +416,11 @@ class OverlayService : Service() {
             barProxy = TouchProxyWindow("bar").also { it.attach() }
         }
 
+        container.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+            if ((right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop)) {
+                scheduleReapplyTouchRegions()
+            }
+        }
         wv.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
             if ((right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop)) {
                 rootContainer?.let { ViewCompat.requestApplyInsets(it) }
@@ -561,6 +597,10 @@ class OverlayService : Service() {
                 updateWebWindowFlags()
             }
             applyTouchRegions()
+            if (flagsChanged) {
+                // Re-apply after updateViewLayout's scheduled traversal so WMS/SurfaceFlinger never keeps stale bounds
+                scheduleReapplyTouchRegions()
+            }
         } catch (e: Exception) {
             Log.e("PenpaAnywhereWeb", "updateHitRegions parse failed: ${e.message}")
         }
@@ -596,17 +636,25 @@ class OverlayService : Service() {
     private fun applyNativeSurfaceTouchableRegion() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
         val root = rootContainer ?: return
-        val sc = root.rootSurfaceControl ?: return
-
-        if (!regionPassthroughEnabled) {
-            // Non-overlay (uploaded image) mode: whole window is touchable
-            sc.setTouchableRegion(null)
+        if (!root.isAttachedToWindow) return
+        val sc = root.rootSurfaceControl
+        val w = root.width
+        val h = root.height
+        if (sc == null || w <= 0 || h <= 0) {
+            scheduleReapplyTouchRegions()
             return
         }
 
-        val w = root.width.takeIf { it > 0 } ?: return
-        val h = root.height.takeIf { it > 0 } ?: return
         val clip = Region(0, 0, w, h)
+        if (!regionPassthroughEnabled) {
+            // Pass an explicit non-null full-window Region instead of null:
+            // On Android 13/14 ViewRootImpl.performTraversals(), setTouchableRegion(null) skips
+            // mWindowSession.setInsets() when no OnComputeInternalInsetsListener is registered
+            // (`&& mTouchableRegion != null`), leaving the previous toolbar/dock mask stuck in WMS.
+            sc.setTouchableRegion(clip)
+            return
+        }
+
         val mask = Region()
 
         // Always keep top control bar interactive so user can unlock passthrough / switch modes
@@ -646,6 +694,64 @@ class OverlayService : Service() {
         }
 
         sc.setTouchableRegion(mask)
+    }
+
+    private fun openExternalBrowserUrl(url: String) {
+        if (!url.startsWith("https://github.com/KoolShow/PenpaAnywhere")) return
+        try {
+            val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(viewIntent)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun switchToImageActivity() {
+        val launch = Runnable {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                putExtra(MainActivity.EXTRA_OPEN_IMAGE_MODE, true)
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP,
+                )
+            }
+            try {
+                startActivity(intent)
+            } catch (_: Exception) {
+            }
+            stopSelf()
+        }
+        val wv = webView
+        if (wv == null) {
+            launch.run()
+            return
+        }
+        var done = false
+        val finish = Runnable {
+            if (!done) {
+                done = true
+                storageFlushedForStop = true
+                try {
+                    CookieManager.getInstance().flush()
+                } catch (_: Exception) {
+                }
+                launch.run()
+            }
+        }
+        mainHandler.postDelayed(finish, 180)
+        try {
+            wv.evaluateJavascript(
+                "window.__PENPAANYWHERE_FLUSH_STORAGE__ && window.__PENPAANYWHERE_FLUSH_STORAGE__();",
+            ) {
+                mainHandler.removeCallbacks(finish)
+                finish.run()
+            }
+        } catch (_: Exception) {
+            mainHandler.removeCallbacks(finish)
+            finish.run()
+        }
     }
 
     private fun launchImagePicker() {
@@ -756,6 +862,7 @@ class OverlayService : Service() {
         val doStop = Runnable {
             if (!stopped) {
                 stopped = true
+                storageFlushedForStop = true
                 try {
                     CookieManager.getInstance().flush()
                 } catch (_: Exception) {
@@ -779,6 +886,7 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        mainHandler.removeCallbacks(reapplyTouchRegionsRunnable)
         screenshotManager?.stop()
         screenshotManager = null
         ImagePickerActivity.onImagePicked = null
@@ -795,12 +903,14 @@ class OverlayService : Service() {
             }
         }
         webView?.let { wv ->
-            try {
-                wv.evaluateJavascript(
-                    "window.__PENPAANYWHERE_FLUSH_STORAGE__ && window.__PENPAANYWHERE_FLUSH_STORAGE__();",
-                    null,
-                )
-            } catch (_: Exception) {
+            if (!storageFlushedForStop) {
+                try {
+                    wv.evaluateJavascript(
+                        "window.__PENPAANYWHERE_FLUSH_STORAGE__ && window.__PENPAANYWHERE_FLUSH_STORAGE__();",
+                        null,
+                    )
+                } catch (_: Exception) {
+                }
             }
             wv.onPause()
             wv.destroy()

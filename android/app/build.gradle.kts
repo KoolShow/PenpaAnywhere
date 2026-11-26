@@ -1,14 +1,16 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
 
 android {
-    namespace = "com.penpaanywhere.overlay"
+    namespace = "io.github.koolshow.penpaanywhere"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.penpaanywhere.overlay"
+        applicationId = "io.github.koolshow.penpaanywhere"
         minSdk = 24
         targetSdk = 35
         versionCode = 1
@@ -17,12 +19,25 @@ android {
 
     signingConfigs {
         create("release") {
+            val ksPropsFile = rootProject.file("keystore.properties")
+            val ksProps = Properties()
+            if (ksPropsFile.exists()) {
+                ksPropsFile.inputStream().use { ksProps.load(it) }
+            }
             val ksPath = System.getenv("ANDROID_KEYSTORE_PATH")
+                ?.takeIf { it.isNotBlank() }
+                ?: ksProps.getProperty("storeFile")?.takeIf { it.isNotBlank() }
             if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
                 storeFile = file(ksPath)
                 storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: ksProps.getProperty("storePassword")
                 keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: ksProps.getProperty("keyAlias")
                 keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: ksProps.getProperty("keyPassword")
             }
         }
     }

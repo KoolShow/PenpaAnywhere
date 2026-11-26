@@ -28,6 +28,35 @@
         <item name="android:windowLightStatusBar">false</item>
     </style>
 
+    <style name="Theme.PenpaAnywhere.Light" parent="Theme.Material3.Light.NoActionBar">
+        <item name="colorPrimary">#0B57D0</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorPrimaryContainer">#D3E3FD</item>
+        <item name="colorOnPrimaryContainer">#041E49</item>
+        <item name="colorSecondary">#00639B</item>
+        <item name="colorOnSecondary">#FFFFFF</item>
+        <item name="colorSecondaryContainer">#CEE5FF</item>
+        <item name="colorOnSecondaryContainer">#001D33</item>
+        <item name="colorTertiary">#146C2E</item>
+        <item name="colorOnTertiary">#FFFFFF</item>
+        <item name="colorTertiaryContainer">#C4EED0</item>
+        <item name="colorOnTertiaryContainer">#072711</item>
+        <item name="colorError">#B3261E</item>
+        <item name="colorOnError">#FFFFFF</item>
+        <item name="colorErrorContainer">#F9DEDC</item>
+        <item name="colorOnErrorContainer">#410E0B</item>
+        <item name="android:colorBackground">#F8F9FC</item>
+        <item name="colorSurface">#F8F9FC</item>
+        <item name="colorOnSurface">#1A1C1E</item>
+        <item name="colorSurfaceVariant">#E0E2EC</item>
+        <item name="colorOnSurfaceVariant">#44474E</item>
+        <item name="colorOutline">#74777F</item>
+        <item name="colorOutlineVariant">#C4C6D0</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
     <style name="Theme.PenpaAnywhere.Translucent" parent="Theme.Material3.Dark.NoActionBar">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>

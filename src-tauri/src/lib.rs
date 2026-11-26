@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tauri::{
-    window::Color, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow,
+    window::Color, Emitter, Manager, PhysicalPosition, PhysicalSize, State, Theme, WebviewWindow,
 };
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -41,6 +41,8 @@ impl Default for HotkeyConfig {
 
 #[derive(Debug, Default)]
 struct HitState {
+    is_overlay_mode: bool,
+    window_is_dark: bool,
     auto_passthrough: bool,
     force_click_through: bool,
     initialized: bool,
@@ -49,6 +51,7 @@ struct HitState {
     quad: Vec<Point2D>,
     last_ignore: Option<bool>,
     toggle_hotkey: Option<HotkeyConfig>,
+    saved_normal_bounds: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
 }
 
 struct AppOverlayState(Arc<Mutex<HitState>>);
@@ -153,21 +156,76 @@ fn set_overlay_window_mode(
     state: State<'_, AppOverlayState>,
     overlay: bool,
 ) -> Result<(), String> {
-    if let Ok(mut guard) = state.0.lock() {
+    let (was_overlay, saved_bounds, is_dark) = {
+        let mut guard = state
+            .0
+            .lock()
+            .map_err(|_| "overlay state lock poisoned".to_string())?;
+        let prev = guard.is_overlay_mode;
+        guard.is_overlay_mode = overlay;
         guard.auto_passthrough = overlay;
         if !overlay {
             guard.force_click_through = false;
             guard.last_ignore = Some(false);
+        } else {
+            guard.last_ignore = None;
+        }
+        (prev, guard.saved_normal_bounds, guard.window_is_dark)
+    };
+
+    if !overlay {
+        let _ = window.set_ignore_cursor_events(false);
+        window
+            .set_always_on_top(false)
+            .map_err(|e| e.to_string())?;
+        let bg = if is_dark {
+            Color(17, 19, 24, 255)
+        } else {
+            Color(248, 249, 252, 255)
+        };
+        let _ = window.set_background_color(Some(bg));
+        let _ = window.set_theme(Some(if is_dark { Theme::Dark } else { Theme::Light }));
+        let _ = window.set_decorations(true);
+        let _ = window.set_resizable(true);
+        let _ = window.set_shadow(true);
+
+        if was_overlay {
+            if let Some((pos, size)) = saved_bounds {
+                let _ = window.set_size(size);
+                let _ = window.set_position(pos);
+            } else {
+                fit_normal_window_to_monitor(&window);
+            }
+            let _ = window.set_focus();
+        }
+        return Ok(());
+    }
+
+    // Returning from normal resizable window -> save bounds & restore full-monitor transparent overlay
+    if !was_overlay {
+        let is_max = window.is_maximized().unwrap_or(false);
+        let is_min = window.is_minimized().unwrap_or(false);
+        if !is_max && !is_min {
+            if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
+                if size.width >= 320 && size.height >= 240 {
+                    if let Ok(mut guard) = state.0.lock() {
+                        guard.saved_normal_bounds = Some((pos, size));
+                    }
+                }
+            }
+        }
+        if is_max {
+            let _ = window.unmaximize();
         }
     }
+
+    let _ = window.set_decorations(false);
+    let _ = window.set_shadow(false);
+    let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
     window
-        .set_always_on_top(overlay)
+        .set_always_on_top(true)
         .map_err(|e| e.to_string())?;
-    if !overlay {
-        window
-            .set_ignore_cursor_events(false)
-            .map_err(|e| e.to_string())?;
-    }
+    fit_overlay_window_to_monitor(&window);
     Ok(())
 }
 
@@ -203,6 +261,62 @@ fn set_toggle_hotkey(
 ) -> Result<(), String> {
     if let Ok(mut guard) = state.0.lock() {
         guard.toggle_hotkey = hotkey.filter(|h| !h.code.is_empty());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_window_theme(
+    window: WebviewWindow,
+    state: State<'_, AppOverlayState>,
+    dark: bool,
+) -> Result<(), String> {
+    let is_overlay = if let Ok(mut guard) = state.0.lock() {
+        guard.window_is_dark = dark;
+        guard.is_overlay_mode
+    } else {
+        true
+    };
+    let _ = window.set_theme(Some(if dark { Theme::Dark } else { Theme::Light }));
+    if !is_overlay {
+        let bg = if dark {
+            Color(17, 19, 24, 255)
+        } else {
+            Color(248, 249, 252, 255)
+        };
+        let _ = window.set_background_color(Some(bg));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://github.com/KoolShow/PenpaAnywhere") {
+        return Err("URL not allowed".to_string());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -248,26 +362,92 @@ fn read_windows_accent_hex() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn read_macos_accent_hex() -> Option<String> {
-    let out = std::process::Command::new("defaults")
-        .args(["read", "-g", "AppleAccentColor"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    use std::ffi::{c_char, c_void, CStr};
+
+    type CFTypeRef = *const c_void;
+    type CFStringRef = *const c_void;
+    type CFAllocatorRef = *const c_void;
+    type CFTypeID = usize;
+
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    const K_CF_NUMBER_SINT32_TYPE: isize = 3;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFPreferencesAnyApplication: CFStringRef;
+        fn CFStringCreateWithCString(
+            alloc: CFAllocatorRef,
+            c_str: *const c_char,
+            encoding: u32,
+        ) -> CFStringRef;
+        fn CFPreferencesAppSynchronize(application_id: CFStringRef) -> bool;
+        fn CFPreferencesCopyAppValue(key: CFStringRef, application_id: CFStringRef) -> CFTypeRef;
+        fn CFGetTypeID(cf: CFTypeRef) -> CFTypeID;
+        fn CFNumberGetTypeID() -> CFTypeID;
+        fn CFStringGetTypeID() -> CFTypeID;
+        fn CFNumberGetValue(number: CFTypeRef, the_type: isize, value_ptr: *mut c_void) -> bool;
+        fn CFStringGetCString(
+            the_string: CFStringRef,
+            buffer: *mut c_char,
+            buffer_size: isize,
+            encoding: u32,
+        ) -> bool;
+        fn CFRelease(cf: CFTypeRef);
     }
-    let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let hex = match code.as_str() {
-        "-1" => "#8E8E93", // Graphite
-        "0" => "#FF3B30",  // Red
-        "1" => "#FF9500",  // Orange
-        "2" => "#FFCC00",  // Yellow
-        "3" => "#34C759",  // Green
-        "4" => "#007AFF",  // Blue
-        "5" => "#AF52DE",  // Purple
-        "6" => "#FF2D55",  // Pink
-        _ => return None,
-    };
-    Some(hex.to_string())
+
+    unsafe {
+        let key_cstr = b"AppleAccentColor\0";
+        let key = CFStringCreateWithCString(
+            std::ptr::null(),
+            key_cstr.as_ptr().cast(),
+            K_CF_STRING_ENCODING_UTF8,
+        );
+        if key.is_null() {
+            return None;
+        }
+        let _ = CFPreferencesAppSynchronize(kCFPreferencesAnyApplication);
+        let val = CFPreferencesCopyAppValue(key, kCFPreferencesAnyApplication);
+        CFRelease(key);
+        if val.is_null() {
+            return None;
+        }
+
+        let type_id = CFGetTypeID(val);
+        let mut parsed_code: Option<i32> = None;
+
+        if type_id == CFNumberGetTypeID() {
+            let mut num: i32 = 0;
+            if CFNumberGetValue(val, K_CF_NUMBER_SINT32_TYPE, (&mut num as *mut i32).cast()) {
+                parsed_code = Some(num);
+            }
+        } else if type_id == CFStringGetTypeID() {
+            let mut buf = [0u8; 32];
+            if CFStringGetCString(
+                val,
+                buf.as_mut_ptr().cast(),
+                buf.len() as isize,
+                K_CF_STRING_ENCODING_UTF8,
+            ) {
+                if let Ok(s) = CStr::from_ptr(buf.as_ptr().cast()).to_str() {
+                    parsed_code = s.trim().parse::<i32>().ok();
+                }
+            }
+        }
+        CFRelease(val);
+
+        let hex = match parsed_code? {
+            -1 => "#8E8E93", // Graphite
+            0 => "#FF3B30",  // Red
+            1 => "#FF9500",  // Orange
+            2 => "#FFCC00",  // Yellow
+            3 => "#34C759",  // Green
+            4 => "#007AFF",  // Blue
+            5 => "#AF52DE",  // Purple
+            6 => "#FF2D55",  // Pink
+            _ => return None,
+        };
+        Some(hex.to_string())
+    }
 }
 
 #[tauri::command]
@@ -296,6 +476,26 @@ fn fit_overlay_window_to_monitor(window: &WebviewWindow) {
         let h = size.height.max(400);
         let _ = window.set_position(PhysicalPosition::new(pos.x, pos.y));
         let _ = window.set_size(PhysicalSize::new(size.width, h));
+    }
+}
+
+fn fit_normal_window_to_monitor(window: &WebviewWindow) {
+    if let Ok(Some(monitor)) = window.current_monitor().or_else(|_| window.primary_monitor()) {
+        let pos = monitor.position();
+        let size = monitor.size();
+        let scale = monitor.scale_factor();
+        let target_w = ((1280.0 * scale).round() as u32)
+            .min((size.width as f64 * 0.85).round() as u32)
+            .max(640)
+            .min(size.width.max(320));
+        let target_h = ((820.0 * scale).round() as u32)
+            .min((size.height as f64 * 0.82).round() as u32)
+            .max(480)
+            .min(size.height.max(240));
+        let x = pos.x + ((size.width.saturating_sub(target_w)) / 2) as i32;
+        let y = pos.y + ((size.height.saturating_sub(target_h)) / 2) as i32;
+        let _ = window.set_size(PhysicalSize::new(target_w, target_h));
+        let _ = window.set_position(PhysicalPosition::new(x, y));
     }
 }
 
@@ -603,15 +803,13 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
         loop {
             thread::sleep(Duration::from_millis(25));
 
-            // Poll macOS system accent color every ~2s so theme changes apply live
+            // Poll macOS system accent color via CoreFoundation every ~2s so theme changes apply live
             accent_tick = accent_tick.wrapping_add(1);
             if accent_tick % 80 == 0 {
                 let current = read_macos_accent_hex();
                 if current != prev_accent {
                     prev_accent = current.clone();
-                    if let Some(hex) = current {
-                        let _ = window.emit("system-accent-changed", hex);
-                    }
+                    let _ = window.emit("system-accent-changed", current);
                 }
             }
 
@@ -724,6 +922,8 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let shared_state = Arc::new(Mutex::new(HitState {
+        is_overlay_mode: true,
+        window_is_dark: true,
         auto_passthrough: true,
         initialized: false,
         toggle_hotkey: Some(HotkeyConfig::default()),
@@ -738,6 +938,8 @@ pub fn run() {
             set_click_through,
             set_always_on_top,
             set_overlay_window_mode,
+            set_window_theme,
+            open_external_url,
             update_hit_regions,
             get_system_accent_color,
             set_toggle_hotkey,
