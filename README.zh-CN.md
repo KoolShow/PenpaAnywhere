@@ -1,4 +1,4 @@
-# PenpaAnywhere
+# <img src="docs/images/icon.png" width="36" height="36" align="absmiddle" alt="PenpaAnywhere" /> PenpaAnywhere
 
 [English](README.md) | 简体中文
 

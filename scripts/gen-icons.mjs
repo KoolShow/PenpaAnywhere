@@ -7,6 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
 const iconsDir = path.join(rootDir, 'src-tauri', 'icons');
 const publicDir = path.join(rootDir, 'public');
+const docsImagesDir = path.join(rootDir, 'docs', 'images');
 const androidMipmapDir = path.join(
   rootDir,
   'android',
@@ -19,9 +20,10 @@ const androidMipmapDir = path.join(
 
 fs.mkdirSync(iconsDir, { recursive: true });
 fs.mkdirSync(publicDir, { recursive: true });
+fs.mkdirSync(docsImagesDir, { recursive: true });
 fs.mkdirSync(androidMipmapDir, { recursive: true });
 
-// Unified SVG matching Android Adaptive Icon (ic_launcher_background + ic_launcher_foreground)
+// Unified Emerald Green SVG matching Android Adaptive Icon (ic_launcher_background + ic_launcher_foreground)
 const UNIFIED_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="256" height="256">
   <defs>
     <clipPath id="r">
@@ -29,16 +31,16 @@ const UNIFIED_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 10
     </clipPath>
   </defs>
   <g clip-path="url(#r)">
-    <rect x="0" y="0" width="108" height="108" fill="#111820"/>
-    <path d="M0,0 L108,0 L108,68 Q54,90 0,62 Z" fill="#182738"/>
-    <path d="M34,32 L78,28 L74,78 L30,74 Z" fill="#84D7AA" fill-opacity="0.12" stroke="#A8C7FA" stroke-width="2.6" stroke-linejoin="round"/>
-    <path d="M48.7,30.7 L44.7,75.3 M63.3,29.3 L59.3,76.7" stroke="#C2E7FF" stroke-opacity="0.55" stroke-width="1.8"/>
-    <path d="M32.7,46 L76.7,44.7 M31.3,60 L75.3,61.3" stroke="#C2E7FF" stroke-opacity="0.55" stroke-width="1.8"/>
-    <path d="M47.3,45.6 L62.0,45.1 L60.7,60.9 L46.0,60.4 Z" fill="#A8C7FA"/>
-    <circle cx="34" cy="32" r="4.5" fill="#D3E3FD" stroke="#0842A0" stroke-width="1.8"/>
-    <circle cx="78" cy="28" r="4.5" fill="#D3E3FD" stroke="#0842A0" stroke-width="1.8"/>
-    <circle cx="74" cy="78" r="4.5" fill="#D3E3FD" stroke="#0842A0" stroke-width="1.8"/>
-    <circle cx="30" cy="74" r="4.5" fill="#D3E3FD" stroke="#0842A0" stroke-width="1.8"/>
+    <rect x="0" y="0" width="108" height="108" fill="#0D1713"/>
+    <path d="M0,0 L108,0 L108,68 Q54,90 0,62 Z" fill="#122B22"/>
+    <path d="M34,32 L78,28 L74,78 L30,74 Z" fill="#84D7AA" fill-opacity="0.14" stroke="#7CD9B2" stroke-width="2.6" stroke-linejoin="round"/>
+    <path d="M48.7,30.7 L44.7,75.3 M63.3,29.3 L59.3,76.7" stroke="#B7F5DB" stroke-opacity="0.55" stroke-width="1.8"/>
+    <path d="M32.7,46 L76.7,44.7 M31.3,60 L75.3,61.3" stroke="#B7F5DB" stroke-opacity="0.55" stroke-width="1.8"/>
+    <path d="M47.3,45.6 L62.0,45.1 L60.7,60.9 L46.0,60.4 Z" fill="#7CD9B2"/>
+    <circle cx="34" cy="32" r="4.5" fill="#B7F5DB" stroke="#00513B" stroke-width="1.8"/>
+    <circle cx="78" cy="28" r="4.5" fill="#B7F5DB" stroke="#00513B" stroke-width="1.8"/>
+    <circle cx="74" cy="78" r="4.5" fill="#B7F5DB" stroke="#00513B" stroke-width="1.8"/>
+    <circle cx="30" cy="74" r="4.5" fill="#B7F5DB" stroke="#00513B" stroke-width="1.8"/>
   </g>
 </svg>
 `;
@@ -128,50 +130,50 @@ function sampleIcon(x, y, roundMask) {
     if (Math.hypot(x - cx, y - cy) > 24) return [0, 0, 0, 0];
   }
 
-  // Background base #111820
-  let col = [0x11, 0x18, 0x20, 1];
+  // Background base #0D1713
+  let col = [0x0d, 0x17, 0x13, 1];
 
-  // Top curved highlight #182738: Q54,90 from (0,62) to (108,68)
+  // Top curved highlight #122B22: Q54,90 from (0,62) to (108,68)
   const t = x / 108;
   const waveY = (1 - t) * (1 - t) * 62 + 2 * (1 - t) * t * 90 + t * t * 68;
   if (y <= waveY) {
-    col = [0x18, 0x27, 0x38, 1];
+    col = [0x12, 0x2b, 0x22, 1];
   }
 
-  // Quad translucent fill #1A84D7AA
+  // Quad translucent fill #2484D7AA
   if (pointInPoly(x, y, QUAD)) {
-    col = blend(col, [0x84, 0xd7, 0xaa, 0.12]);
+    col = blend(col, [0x84, 0xd7, 0xaa, 0.14]);
   }
 
-  // Inner grid dividers #80C2E7FF, stroke-width 1.8
+  // Inner grid dividers #8CB7F5DB, stroke-width 1.8
   for (const [ax, ay, bx, by] of INNER_LINES) {
     if (distToSegment(x, y, ax, ay, bx, by) <= 0.9) {
-      col = blend(col, [0xc2, 0xe7, 0xff, 0.55]);
+      col = blend(col, [0xb7, 0xf5, 0xdb, 0.55]);
     }
   }
 
-  // Filled center cell #A8C7FA
+  // Filled center cell #7CD9B2
   if (pointInPoly(x, y, CENTER_CELL)) {
-    col = blend(col, [0xa8, 0xc7, 0xfa, 1.0]);
+    col = blend(col, [0x7c, 0xd9, 0xb2, 1.0]);
   }
 
-  // Outer quad border #A8C7FA, stroke-width 2.6
+  // Outer quad border #7CD9B2, stroke-width 2.6
   for (let i = 0; i < 4; i++) {
     const [ax, ay] = QUAD[i];
     const [bx, by] = QUAD[(i + 1) % 4];
     if (distToSegment(x, y, ax, ay, bx, by) <= 1.3) {
-      col = blend(col, [0xa8, 0xc7, 0xfa, 1.0]);
+      col = blend(col, [0x7c, 0xd9, 0xb2, 1.0]);
     }
   }
 
-  // 4 corner handles: fill #D3E3FD, r=4.5, stroke #0842A0 width 1.8
+  // 4 corner handles: fill #B7F5DB, r=4.5, stroke #00513B width 1.8
   for (const [hx, hy] of CORNERS) {
     const d = Math.hypot(x - hx, y - hy);
     if (d <= 5.4) {
       if (d <= 3.6) {
-        col = blend(col, [0xd3, 0xe3, 0xfd, 1.0]);
+        col = blend(col, [0xb7, 0xf5, 0xdb, 1.0]);
       } else {
-        col = blend(col, [0x08, 0x42, 0xa0, 1.0]);
+        col = blend(col, [0x00, 0x51, 0x3b, 1.0]);
       }
     }
   }
@@ -274,10 +276,11 @@ const icoAll = createIcoFromPngs([
   { size: 256, buf: png256 },
 ]);
 
-// Desktop (Windows / macOS Tauri 2)
+// Desktop (Windows / macOS Tauri 2) & Docs README icon
 fs.writeFileSync(path.join(iconsDir, 'icon.png'), png256);
 fs.writeFileSync(path.join(iconsDir, 'icon.ico'), icoAll);
 fs.writeFileSync(path.join(iconsDir, 'icon.icns'), createIcnsFromPng(png256));
+fs.writeFileSync(path.join(docsImagesDir, 'icon.png'), png256);
 
 // Web favicon
 fs.writeFileSync(path.join(publicDir, 'favicon.svg'), UNIFIED_SVG, 'utf8');

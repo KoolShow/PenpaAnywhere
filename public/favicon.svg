@@ -5,15 +5,15 @@
     </clipPath>
   </defs>
   <g clip-path="url(#r)">
-    <rect x="0" y="0" width="108" height="108" fill="#111820"/>
-    <path d="M0,0 L108,0 L108,68 Q54,90 0,62 Z" fill="#182738"/>
-    <path d="M34,32 L78,28 L74,78 L30,74 Z" fill="#84D7AA" fill-opacity="0.12" stroke="#A8C7FA" stroke-width="2.6" stroke-linejoin="round"/>
-    <path d="M48.7,30.7 L44.7,75.3 M63.3,29.3 L59.3,76.7" stroke="#C2E7FF" stroke-opacity="0.55" stroke-width="1.8"/>
-    <path d="M32.7,46 L76.7,44.7 M31.3,60 L75.3,61.3" stroke="#C2E7FF" stroke-opacity="0.55" stroke-width="1.8"/>
-    <path d="M47.3,45.6 L62.0,45.1 L60.7,60.9 L46.0,60.4 Z" fill="#A8C7FA"/>
-    <circle cx="34" cy="32" r="4.5" fill="#D3E3FD" stroke="#0842A0" stroke-width="1.8"/>
-    <circle cx="78" cy="28" r="4.5" fill="#D3E3FD" stroke="#0842A0" stroke-width="1.8"/>
-    <circle cx="74" cy="78" r="4.5" fill="#D3E3FD" stroke="#0842A0" stroke-width="1.8"/>
-    <circle cx="30" cy="74" r="4.5" fill="#D3E3FD" stroke="#0842A0" stroke-width="1.8"/>
+    <rect x="0" y="0" width="108" height="108" fill="#0D1713"/>
+    <path d="M0,0 L108,0 L108,68 Q54,90 0,62 Z" fill="#122B22"/>
+    <path d="M34,32 L78,28 L74,78 L30,74 Z" fill="#84D7AA" fill-opacity="0.14" stroke="#7CD9B2" stroke-width="2.6" stroke-linejoin="round"/>
+    <path d="M48.7,30.7 L44.7,75.3 M63.3,29.3 L59.3,76.7" stroke="#B7F5DB" stroke-opacity="0.55" stroke-width="1.8"/>
+    <path d="M32.7,46 L76.7,44.7 M31.3,60 L75.3,61.3" stroke="#B7F5DB" stroke-opacity="0.55" stroke-width="1.8"/>
+    <path d="M47.3,45.6 L62.0,45.1 L60.7,60.9 L46.0,60.4 Z" fill="#7CD9B2"/>
+    <circle cx="34" cy="32" r="4.5" fill="#B7F5DB" stroke="#00513B" stroke-width="1.8"/>
+    <circle cx="78" cy="28" r="4.5" fill="#B7F5DB" stroke="#00513B" stroke-width="1.8"/>
+    <circle cx="74" cy="78" r="4.5" fill="#B7F5DB" stroke="#00513B" stroke-width="1.8"/>
+    <circle cx="30" cy="74" r="4.5" fill="#B7F5DB" stroke="#00513B" stroke-width="1.8"/>
   </g>
 </svg>
