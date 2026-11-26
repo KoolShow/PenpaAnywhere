@@ -13,13 +13,24 @@ interface AndroidOverlayInterface {
   setFocusable?: (focusable: boolean) => void;
   updateHitRegions?: (payloadJson: string) => void;
   getDynamicColorTokens?: () => string;
+  getDynamicColorBundle?: () => string;
   getSafeAreaInsets?: () => string;
   getScreenshotCompositeStatus?: () => string;
   setScreenshotCompositeEnabled?: (enabled: boolean) => void;
   respondScreenshotPrompt?: (choice: 'enable' | 'dismiss' | 'later') => void;
   requestAllFilesPermission?: () => void;
+  switchToImageActivity?: () => void;
+  switchToOverlayService?: () => void;
+  openExternalUrl?: (url: string) => void;
   closeOverlay?: () => void;
   pickImage?: () => void;
+}
+
+export interface AndroidThemeBundle {
+  dark: Record<string, string>;
+  light: Record<string, string>;
+  systemDark?: boolean;
+  available?: boolean;
 }
 
 declare global {
@@ -29,6 +40,7 @@ declare global {
     __PENPAANYWHERE_ON_ANDROID_IMAGE__?: (dataUrl: string) => void;
     __PENPAANYWHERE_ON_CLICK_THROUGH__?: (enabled: boolean) => void;
     __PENPAANYWHERE_APPLY_MD3_TOKENS__?: (tokens: Record<string, string> | string) => void;
+    __PENPAANYWHERE_APPLY_ANDROID_THEME_BUNDLE__?: (bundle: AndroidThemeBundle | string) => void;
     __PENPAANYWHERE_APPLY_SAFE_INSETS__?: (
       insets: { top: number; right: number; bottom: number; left: number } | string,
     ) => void;
@@ -54,6 +66,73 @@ export function detectPlatform(): RuntimePlatform {
 
 export function supportsNativeTransparentOverlay(platform: RuntimePlatform): boolean {
   return platform === 'tauri' || platform === 'android-overlay';
+}
+
+export function supportsOverlaySwitch(platform: RuntimePlatform): boolean {
+  return platform === 'tauri' || platform === 'android-overlay' || platform === 'android-app';
+}
+
+export function supportsOsDynamicColor(platform: RuntimePlatform): boolean {
+  return platform === 'tauri' || platform === 'android-overlay' || platform === 'android-app';
+}
+
+export async function setOsWindowTheme(dark: boolean): Promise<void> {
+  if (detectPlatform() !== 'tauri') return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('set_window_theme', { dark });
+  } catch {
+    // non-fatal
+  }
+}
+
+export function switchAndroidToImageActivity(): boolean {
+  if (detectPlatform() !== 'android-overlay') return false;
+  try {
+    if (window.AndroidOverlay?.switchToImageActivity) {
+      window.AndroidOverlay.switchToImageActivity();
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+export function switchAndroidToOverlayService(): boolean {
+  if (detectPlatform() !== 'android-app') return false;
+  try {
+    if (window.AndroidOverlay?.switchToOverlayService) {
+      window.AndroidOverlay.switchToOverlayService();
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+export async function openExternalLink(url: string): Promise<void> {
+  const platform = detectPlatform();
+  if (platform === 'tauri') {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('open_external_url', { url });
+      return;
+    } catch {
+      // fall through
+    }
+  } else if (platform === 'android-overlay' || platform === 'android-app') {
+    try {
+      if (window.AndroidOverlay?.openExternalUrl) {
+        window.AndroidOverlay.openExternalUrl(url);
+        return;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
 }
 
 export function supportsScreenCapture(): boolean {

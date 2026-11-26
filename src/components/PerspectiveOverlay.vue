@@ -19,6 +19,23 @@ export type QuadMode = 'rect' | 'free';
 type RectEdge = 'top' | 'right' | 'bottom' | 'left';
 
 const MIN_RECT_SIZE = 48;
+const MIN_FREE_EDGE = 24;
+
+interface ActiveDrag {
+  pointerId: number;
+  kind: 'corner' | 'edge' | 'whole';
+  index: number;
+  startPointer: Point2D;
+  currentPointer: Point2D;
+  grabOffset: Point2D;
+}
+
+interface SafeBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
 
 const props = defineProps<{
   bridge: PenpaIframeBridge | null;
@@ -29,6 +46,7 @@ const props = defineProps<{
   alignTarget: AlignTarget;
   quadMode: QuadMode;
   corners: [Point2D, Point2D, Point2D, Point2D];
+  visible?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -43,21 +61,16 @@ const glError = ref<string | null>(null);
 let renderer: WebGLPerspectiveRenderer | null = null;
 let rafId = 0;
 let unsubscribeBridge: (() => void) | null = null;
+let hostResizeObserver: ResizeObserver | null = null;
 let needsRender = true;
 
 const activePointerDraw = ref(false);
-const draggingHandleIndex = ref<number | null>(null);
-const draggingEdge = ref<{
-  edge: RectEdge;
-  edgeIndex: number;
-  start: Point2D;
-  initialCorners: [Point2D, Point2D, Point2D, Point2D];
-} | null>(null);
+const activeDrags = new Map<number, ActiveDrag>();
+const activeHandleKeys = ref<Set<string>>(new Set());
+let dragBaselineCorners: [Point2D, Point2D, Point2D, Point2D] | null = null;
+let shiftPressed = false;
+let altPressed = false;
 const hoveredHandle = ref<string | null>(null);
-const draggingWholeQuad = ref<{
-  start: Point2D;
-  initialCorners: [Point2D, Point2D, Point2D, Point2D];
-} | null>(null);
 
 const currentBounds = ref<GridBoundsNormalized>({
   u0: 0,
@@ -71,10 +84,10 @@ const currentBounds = ref<GridBoundsNormalized>({
 // Effective WebGL blend mode: CSS multiply/screen only work when a DOM backdrop exists in the same page.
 const effectiveShaderMode = computed<BlendRenderMode>(() => {
   if (props.blendMode === 'multiply' && !props.hasDomBackdrop) {
-    return 'alpha-luma';
+    return 'alpha-minrgb';
   }
   if (props.blendMode === 'multiply-inv' && !props.hasDomBackdrop) {
-    return 'alpha-luma-inv';
+    return 'alpha-minrgb-inv';
   }
   return props.blendMode;
 });
@@ -129,6 +142,7 @@ watch(
   () => [props.quadMode, props.calibrating],
   () => {
     hoveredHandle.value = null;
+    clearAllDrags();
   },
 );
 
@@ -176,15 +190,38 @@ watch(
 
 function handleResize() {
   if (!renderer || !hostEl.value) return;
+  if (hostEl.value.clientWidth < 1 || hostEl.value.clientHeight < 1) return;
   const rect = hostEl.value.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return;
   const dpr = window.devicePixelRatio || 1;
   renderer.resize(rect.width, rect.height, dpr);
   needsRender = true;
 }
 
+watch(
+  () => props.visible,
+  (vis) => {
+    if (vis !== false) {
+      requestAnimationFrame(() => {
+        handleResize();
+        needsRender = true;
+      });
+    }
+  },
+);
+
 function renderLoop() {
   rafId = requestAnimationFrame(renderLoop);
   if (!renderer || !hostEl.value) return;
+  if (props.visible === false) return;
+  if (hostEl.value.clientWidth < 1 || hostEl.value.clientHeight < 1) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const rect = hostEl.value.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return;
+  if (renderer.resize(rect.width, rect.height, dpr)) {
+    needsRender = true;
+  }
 
   const bridge = props.bridge;
   if (bridge && bridge.isReady()) {
@@ -207,7 +244,6 @@ function renderLoop() {
     renderer.clear();
     return;
   }
-  const dpr = window.devicePixelRatio || 1;
   renderer.render(invH, dpr, effectiveShaderMode.value, props.opacity);
 }
 
@@ -299,15 +335,166 @@ function onSurfaceContextMenu(e: MouseEvent) {
   props.bridge?.dispatchPointer('contextmenu', uv.u, uv.v, { button: 2, buttons: 0 });
 }
 
-// --- Calibration handle dragging ---
-function startHandleDrag(index: number, e: PointerEvent) {
-  e.preventDefault();
-  e.stopPropagation();
-  draggingHandleIndex.value = index;
-  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+// --- Calibration geometry helpers & multi-touch / Shift / Alt handle dragging ---
+const EDGE_NAMES: [RectEdge, RectEdge, RectEdge, RectEdge] = ['top', 'right', 'bottom', 'left'];
+
+function cloneCorners(c: [Point2D, Point2D, Point2D, Point2D]): [Point2D, Point2D, Point2D, Point2D] {
+  return [
+    { x: c[0].x, y: c[0].y },
+    { x: c[1].x, y: c[1].y },
+    { x: c[2].x, y: c[2].y },
+    { x: c[3].x, y: c[3].y },
+  ];
 }
 
-function getSafeHostBounds(rect: DOMRect) {
+function clampVal(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function clampPoint(p: Point2D, b: SafeBounds): Point2D {
+  return { x: clampVal(p.x, b.minX, b.maxX), y: clampVal(p.y, b.minY, b.maxY) };
+}
+
+function subPt(a: Point2D, b: Point2D): Point2D {
+  return { x: a.x - b.x, y: a.y - b.y };
+}
+
+function lerpPt(a: Point2D, b: Point2D, t: number): Point2D {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+function cross2(ax: number, ay: number, bx: number, by: number): number {
+  return ax * by - ay * bx;
+}
+
+function intersectLines(p1: Point2D, d1: Point2D, p2: Point2D, d2: Point2D): Point2D | null {
+  const denom = cross2(d1.x, d1.y, d2.x, d2.y);
+  if (Math.abs(denom) < 1e-6) return null;
+  const rx = p2.x - p1.x;
+  const ry = p2.y - p1.y;
+  const t = cross2(rx, ry, d2.x, d2.y) / denom;
+  if (!Number.isFinite(t)) return null;
+  return { x: p1.x + t * d1.x, y: p1.y + t * d1.y };
+}
+
+function quadCentroid(c: [Point2D, Point2D, Point2D, Point2D]): Point2D {
+  return {
+    x: (c[0].x + c[1].x + c[2].x + c[3].x) * 0.25,
+    y: (c[0].y + c[1].y + c[2].y + c[3].y) * 0.25,
+  };
+}
+
+function sameEdgeDirections(
+  base: [Point2D, Point2D, Point2D, Point2D],
+  cand: [Point2D, Point2D, Point2D, Point2D],
+): boolean {
+  for (let i = 0; i < 4; i++) {
+    const b0 = base[i];
+    const b1 = base[(i + 1) % 4];
+    const c0 = cand[i];
+    const c1 = cand[(i + 1) % 4];
+    const dot = (c1.x - c0.x) * (b1.x - b0.x) + (c1.y - c0.y) * (b1.y - b0.y);
+    if (dot <= 0) return false;
+  }
+  return true;
+}
+
+function isValidQuadInBounds(
+  pts: [Point2D, Point2D, Point2D, Point2D],
+  bounds: SafeBounds,
+): boolean {
+  for (let i = 0; i < 4; i++) {
+    const p = pts[i];
+    if (
+      !Number.isFinite(p.x) ||
+      !Number.isFinite(p.y) ||
+      p.x < bounds.minX - 0.5 ||
+      p.x > bounds.maxX + 0.5 ||
+      p.y < bounds.minY - 0.5 ||
+      p.y > bounds.maxY + 0.5
+    ) {
+      return false;
+    }
+    const q = pts[(i + 1) % 4];
+    if (Math.hypot(q.x - p.x, q.y - p.y) < MIN_FREE_EDGE) {
+      return false;
+    }
+  }
+  return isConvexQuad(pts);
+}
+
+function solveMaxValidAlpha(
+  evalAt: (alpha: number) => [Point2D, Point2D, Point2D, Point2D] | null,
+  bounds: SafeBounds,
+  extraCheck?: (cand: [Point2D, Point2D, Point2D, Point2D]) => boolean,
+): [Point2D, Point2D, Point2D, Point2D] | null {
+  const isOk = (c: [Point2D, Point2D, Point2D, Point2D] | null): c is [Point2D, Point2D, Point2D, Point2D] =>
+    !!c && isValidQuadInBounds(c, bounds) && (!extraCheck || extraCheck(c));
+
+  const full = evalAt(1);
+  if (isOk(full)) return full;
+
+  let lo = 0;
+  let hi = 1;
+  let best: [Point2D, Point2D, Point2D, Point2D] | null = null;
+  for (let iter = 0; iter < 18; iter++) {
+    const mid = (lo + hi) * 0.5;
+    const cand = evalAt(mid);
+    if (isOk(cand)) {
+      best = cand;
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return best;
+}
+
+function makeRectCorners(left: number, right: number, top: number, bottom: number): [Point2D, Point2D, Point2D, Point2D] {
+  return [
+    { x: left, y: top },
+    { x: right, y: top },
+    { x: right, y: bottom },
+    { x: left, y: bottom },
+  ];
+}
+
+function dragKeyFor(kind: 'corner' | 'edge' | 'whole', index: number): string {
+  if (kind === 'corner') return `c-${index}`;
+  if (kind === 'edge') return `e-${index}`;
+  return 'whole';
+}
+
+function syncActiveHandleKeys() {
+  const next = new Set<string>();
+  for (const d of activeDrags.values()) {
+    next.add(dragKeyFor(d.kind, d.index));
+  }
+  activeHandleKeys.value = next;
+}
+
+function clearAllDrags() {
+  activeDrags.clear();
+  dragBaselineCorners = null;
+  syncActiveHandleKeys();
+}
+
+function resnapshotDrags(corners: [Point2D, Point2D, Point2D, Point2D]) {
+  dragBaselineCorners = cloneCorners(corners);
+  for (const d of activeDrags.values()) {
+    d.startPointer = { ...d.currentPointer };
+    if (d.kind === 'corner') {
+      d.grabOffset = {
+        x: corners[d.index].x - d.currentPointer.x,
+        y: corners[d.index].y - d.currentPointer.y,
+      };
+    } else {
+      d.grabOffset = { x: 0, y: 0 };
+    }
+  }
+}
+
+function getSafeHostBounds(rect: DOMRect): SafeBounds {
   const safe = safeAreaInsets.value;
   const minX = safe.left + 8;
   const minY = safe.top + 8;
@@ -316,146 +503,646 @@ function getSafeHostBounds(rect: DOMRect) {
   return { minX, minY, maxX, maxY };
 }
 
-function moveHandleDrag(e: PointerEvent) {
-  const idx = draggingHandleIndex.value;
-  if (idx === null || !hostEl.value) return;
-  e.preventDefault();
+function getLocalPointer(e: PointerEvent): Point2D | null {
+  if (!hostEl.value) return null;
   const rect = hostEl.value.getBoundingClientRect();
-  const bounds = getSafeHostBounds(rect);
-  const nx = Math.max(bounds.minX, Math.min(bounds.maxX, e.clientX - rect.left));
-  const ny = Math.max(bounds.minY, Math.min(bounds.maxY, e.clientY - rect.top));
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
 
-  if (props.quadMode === 'rect') {
-    let left = Math.min(props.corners[0].x, props.corners[3].x);
-    let right = Math.max(props.corners[1].x, props.corners[2].x);
-    let top = Math.min(props.corners[0].y, props.corners[1].y);
-    let bottom = Math.max(props.corners[2].y, props.corners[3].y);
+function applySingleRectDrag(
+  drag: ActiveDrag,
+  base: [Point2D, Point2D, Point2D, Point2D],
+  bounds: SafeBounds,
+): [Point2D, Point2D, Point2D, Point2D] {
+  const L0 = Math.min(base[0].x, base[3].x);
+  const R0 = Math.max(base[1].x, base[2].x);
+  const T0 = Math.min(base[0].y, base[1].y);
+  const B0 = Math.max(base[2].y, base[3].y);
+  const W0 = Math.max(MIN_RECT_SIZE, R0 - L0);
+  const H0 = Math.max(MIN_RECT_SIZE, B0 - T0);
+  const cx0 = (L0 + R0) * 0.5;
+  const cy0 = (T0 + B0) * 0.5;
 
-    if (idx === 0) {
-      left = Math.min(nx, right - MIN_RECT_SIZE);
-      top = Math.min(ny, bottom - MIN_RECT_SIZE);
-    } else if (idx === 1) {
-      right = Math.max(nx, left + MIN_RECT_SIZE);
-      top = Math.min(ny, bottom - MIN_RECT_SIZE);
-    } else if (idx === 2) {
-      right = Math.max(nx, left + MIN_RECT_SIZE);
-      bottom = Math.max(ny, top + MIN_RECT_SIZE);
-    } else if (idx === 3) {
-      left = Math.min(nx, right - MIN_RECT_SIZE);
-      bottom = Math.max(ny, top + MIN_RECT_SIZE);
+  if (drag.kind === 'corner') {
+    const idx = drag.index;
+    const sx = idx === 1 || idx === 2 ? 1 : -1;
+    const sy = idx === 2 || idx === 3 ? 1 : -1;
+    const target = {
+      x: drag.currentPointer.x + drag.grabOffset.x,
+      y: drag.currentPointer.y + drag.grabOffset.y,
+    };
+
+    if (shiftPressed && altPressed) {
+      // Center-symmetric aspect-locked scaling from initial drag-start ratio
+      const hw0 = W0 * 0.5;
+      const hh0 = H0 * 0.5;
+      const vx = sx * (target.x - cx0);
+      const vy = sy * (target.y - cy0);
+      const maxHw = Math.max(MIN_RECT_SIZE * 0.5, Math.min(cx0 - bounds.minX, bounds.maxX - cx0));
+      const maxHh = Math.max(MIN_RECT_SIZE * 0.5, Math.min(cy0 - bounds.minY, bounds.maxY - cy0));
+      const sMax = Math.min(maxHw / hw0, maxHh / hh0);
+      const sMin = Math.min(sMax, Math.max(MIN_RECT_SIZE / W0, MIN_RECT_SIZE / H0));
+      const rawS = (vx * hw0 + vy * hh0) / (hw0 * hw0 + hh0 * hh0);
+      const s = clampVal(rawS, sMin, sMax);
+      return makeRectCorners(cx0 - hw0 * s, cx0 + hw0 * s, cy0 - hh0 * s, cy0 + hh0 * s);
     }
 
+    if (shiftPressed) {
+      // Aspect-locked scaling anchored at opposite corner using initial drag-start aspect ratio
+      const ax = sx > 0 ? L0 : R0;
+      const ay = sy > 0 ? T0 : B0;
+      const vx = sx * (target.x - ax);
+      const vy = sy * (target.y - ay);
+      const maxW = Math.max(MIN_RECT_SIZE, sx > 0 ? bounds.maxX - ax : ax - bounds.minX);
+      const maxH = Math.max(MIN_RECT_SIZE, sy > 0 ? bounds.maxY - ay : ay - bounds.minY);
+      const sMax = Math.min(maxW / W0, maxH / H0);
+      const sMin = Math.min(sMax, Math.max(MIN_RECT_SIZE / W0, MIN_RECT_SIZE / H0));
+      const rawS = (vx * W0 + vy * H0) / (W0 * W0 + H0 * H0);
+      const s = clampVal(rawS, sMin, sMax);
+      const nw = W0 * s;
+      const nh = H0 * s;
+      const left = sx > 0 ? ax : ax - nw;
+      const right = sx > 0 ? ax + nw : ax;
+      const top = sy > 0 ? ay : ay - nh;
+      const bottom = sy > 0 ? ay + nh : ay;
+      return makeRectCorners(left, right, top, bottom);
+    }
+
+    if (altPressed) {
+      // Center-symmetric independent width/height adjustment around initial rect center
+      const maxHw = Math.max(MIN_RECT_SIZE * 0.5, Math.min(cx0 - bounds.minX, bounds.maxX - cx0));
+      const maxHh = Math.max(MIN_RECT_SIZE * 0.5, Math.min(cy0 - bounds.minY, bounds.maxY - cy0));
+      const hw = clampVal(sx * (target.x - cx0), MIN_RECT_SIZE * 0.5, maxHw);
+      const hh = clampVal(sy * (target.y - cy0), MIN_RECT_SIZE * 0.5, maxHh);
+      return makeRectCorners(cx0 - hw, cx0 + hw, cy0 - hh, cy0 + hh);
+    }
+
+    // Standard single-corner rect drag
+    const nx = clampVal(target.x, bounds.minX, bounds.maxX);
+    const ny = clampVal(target.y, bounds.minY, bounds.maxY);
+    let left = L0;
+    let right = R0;
+    let top = T0;
+    let bottom = B0;
+    if (idx === 0) {
+      left = Math.min(nx, R0 - MIN_RECT_SIZE);
+      top = Math.min(ny, B0 - MIN_RECT_SIZE);
+    } else if (idx === 1) {
+      right = Math.max(nx, L0 + MIN_RECT_SIZE);
+      top = Math.min(ny, B0 - MIN_RECT_SIZE);
+    } else if (idx === 2) {
+      right = Math.max(nx, L0 + MIN_RECT_SIZE);
+      bottom = Math.max(ny, T0 + MIN_RECT_SIZE);
+    } else if (idx === 3) {
+      left = Math.min(nx, R0 - MIN_RECT_SIZE);
+      bottom = Math.max(ny, T0 + MIN_RECT_SIZE);
+    }
+    return makeRectCorners(left, right, top, bottom);
+  }
+
+  // Edge drag in rect mode
+  const edge = EDGE_NAMES[drag.index];
+  const dx = drag.currentPointer.x - drag.startPointer.x;
+  const dy = drag.currentPointer.y - drag.startPointer.y;
+  let left = L0;
+  let right = R0;
+  let top = T0;
+  let bottom = B0;
+
+  if (altPressed) {
+    // Center-symmetric edge expansion/contraction around initial rect center
+    const maxHw = Math.max(MIN_RECT_SIZE * 0.5, Math.min(cx0 - bounds.minX, bounds.maxX - cx0));
+    const maxHh = Math.max(MIN_RECT_SIZE * 0.5, Math.min(cy0 - bounds.minY, bounds.maxY - cy0));
+    if (edge === 'top') {
+      const hh = clampVal(H0 * 0.5 - dy, MIN_RECT_SIZE * 0.5, maxHh);
+      top = cy0 - hh;
+      bottom = cy0 + hh;
+    } else if (edge === 'bottom') {
+      const hh = clampVal(H0 * 0.5 + dy, MIN_RECT_SIZE * 0.5, maxHh);
+      top = cy0 - hh;
+      bottom = cy0 + hh;
+    } else if (edge === 'left') {
+      const hw = clampVal(W0 * 0.5 - dx, MIN_RECT_SIZE * 0.5, maxHw);
+      left = cx0 - hw;
+      right = cx0 + hw;
+    } else if (edge === 'right') {
+      const hw = clampVal(W0 * 0.5 + dx, MIN_RECT_SIZE * 0.5, maxHw);
+      left = cx0 - hw;
+      right = cx0 + hw;
+    }
+    return makeRectCorners(left, right, top, bottom);
+  }
+
+  if (edge === 'top') {
+    top = clampVal(T0 + dy, bounds.minY, B0 - MIN_RECT_SIZE);
+  } else if (edge === 'bottom') {
+    bottom = clampVal(B0 + dy, T0 + MIN_RECT_SIZE, bounds.maxY);
+  } else if (edge === 'left') {
+    left = clampVal(L0 + dx, bounds.minX, R0 - MIN_RECT_SIZE);
+  } else if (edge === 'right') {
+    right = clampVal(R0 + dx, L0 + MIN_RECT_SIZE, bounds.maxX);
+  }
+  return makeRectCorners(left, right, top, bottom);
+}
+
+function applySingleFreeDrag(
+  drag: ActiveDrag,
+  base: [Point2D, Point2D, Point2D, Point2D],
+  bounds: SafeBounds,
+): [Point2D, Point2D, Point2D, Point2D] | null {
+  if (drag.kind === 'corner') {
+    const idx = drag.index;
+    const opp = (idx + 2) % 4;
+    const adjA = (idx + 3) % 4;
+    const adjB = (idx + 1) % 4;
+    const target = clampPoint(
+      {
+        x: drag.currentPointer.x + drag.grabOffset.x,
+        y: drag.currentPointer.y + drag.grabOffset.y,
+      },
+      bounds,
+    );
+
+    if (shiftPressed && altPressed) {
+      // Center-symmetric angle-preserving similarity scaling around quad centroid
+      const c0 = quadCentroid(base);
+      const v0 = subPt(base[idx], c0);
+      const v0Sq = v0.x * v0.x + v0.y * v0.y;
+      const vt = subPt(target, c0);
+      const rawS = v0Sq > 1e-6 ? (vt.x * v0.x + vt.y * v0.y) / v0Sq : 1;
+      return solveMaxValidAlpha(
+        (alpha) => {
+          const s = 1 + alpha * (rawS - 1);
+          if (s <= 0.01) return null;
+          return [
+            { x: c0.x + (base[0].x - c0.x) * s, y: c0.y + (base[0].y - c0.y) * s },
+            { x: c0.x + (base[1].x - c0.x) * s, y: c0.y + (base[1].y - c0.y) * s },
+            { x: c0.x + (base[2].x - c0.x) * s, y: c0.y + (base[2].y - c0.y) * s },
+            { x: c0.x + (base[3].x - c0.x) * s, y: c0.y + (base[3].y - c0.y) * s },
+          ];
+        },
+        bounds,
+        (cand) => sameEdgeDirections(base, cand),
+      );
+    }
+
+    if (shiftPressed) {
+      // Preserve ALL 4 interior angles: opposite vertex O stays fixed while the other 3 vertices move
+      const O = base[opp];
+      const A0 = base[adjA];
+      const B0 = base[adjB];
+      const C0 = base[idx];
+      const dOA = subPt(A0, O);
+      const dOB = subPt(B0, O);
+      const dCA = subPt(A0, C0);
+      const dCB = subPt(B0, C0);
+      return solveMaxValidAlpha(
+        (alpha) => {
+          const Q = lerpPt(C0, target, alpha);
+          const nextA = intersectLines(O, dOA, Q, dCA);
+          const nextB = intersectLines(O, dOB, Q, dCB);
+          if (!nextA || !nextB) return null;
+          const cand = cloneCorners(base);
+          cand[opp] = { ...O };
+          cand[idx] = Q;
+          cand[adjA] = nextA;
+          cand[adjB] = nextB;
+          return cand;
+        },
+        bounds,
+        (cand) => sameEdgeDirections(base, cand),
+      );
+    }
+
+    if (altPressed) {
+      // Center-symmetric synchronized opposite-corner adjustment (+d on dragged corner, -d on opposite)
+      const d = subPt(target, base[idx]);
+      return solveMaxValidAlpha((alpha) => {
+        const cand = cloneCorners(base);
+        cand[idx] = { x: base[idx].x + d.x * alpha, y: base[idx].y + d.y * alpha };
+        cand[opp] = { x: base[opp].x - d.x * alpha, y: base[opp].y - d.y * alpha };
+        return cand;
+      }, bounds);
+    }
+
+    // Standard single-corner free drag
+    const direct = cloneCorners(base);
+    direct[idx] = target;
+    if (isValidQuadInBounds(direct, bounds)) return direct;
+    return solveMaxValidAlpha((alpha) => {
+      const cand = cloneCorners(base);
+      cand[idx] = lerpPt(base[idx], target, alpha);
+      return cand;
+    }, bounds);
+  }
+
+  // Edge drag in free mode
+  const i0 = drag.index;
+  const i1 = (i0 + 1) % 4;
+  const j0 = (i0 + 2) % 4;
+  const j1 = (i0 + 3) % 4;
+  const d = subPt(drag.currentPointer, drag.startPointer);
+
+  if (shiftPressed && altPressed) {
+    // Center-symmetric angle-preserving slide of both grabbed edge and opposite edge along adjacent rays
+    const eDir = subPt(base[i1], base[i0]);
+    const oppDir = subPt(base[j1], base[j0]);
+    const adj0Dir = subPt(base[i0], base[j1]);
+    const adj1Dir = subPt(base[i1], base[j0]);
+    return solveMaxValidAlpha(
+      (alpha) => {
+        const pDrag = { x: base[i0].x + d.x * alpha, y: base[i0].y + d.y * alpha };
+        const pOpp = { x: base[j0].x - d.x * alpha, y: base[j0].y - d.y * alpha };
+        const newI0 = intersectLines(base[j1], adj0Dir, pDrag, eDir);
+        const newI1 = intersectLines(base[j0], adj1Dir, pDrag, eDir);
+        const newJ0 = intersectLines(base[j0], adj1Dir, pOpp, oppDir);
+        const newJ1 = intersectLines(base[j1], adj0Dir, pOpp, oppDir);
+        if (!newI0 || !newI1 || !newJ0 || !newJ1) return null;
+        const cand = cloneCorners(base);
+        cand[i0] = newI0;
+        cand[i1] = newI1;
+        cand[j0] = newJ0;
+        cand[j1] = newJ1;
+        return cand;
+      },
+      bounds,
+      (cand) => sameEdgeDirections(base, cand),
+    );
+  }
+
+  if (shiftPressed) {
+    // Preserve ALL 4 interior angles: opposite edge stays fixed while dragged edge slides along adjacent edge rays
+    const eDir = subPt(base[i1], base[i0]);
+    const adj0Dir = subPt(base[i0], base[j1]);
+    const adj1Dir = subPt(base[i1], base[j0]);
+    return solveMaxValidAlpha(
+      (alpha) => {
+        const pDrag = { x: base[i0].x + d.x * alpha, y: base[i0].y + d.y * alpha };
+        const newI0 = intersectLines(base[j1], adj0Dir, pDrag, eDir);
+        const newI1 = intersectLines(base[j0], adj1Dir, pDrag, eDir);
+        if (!newI0 || !newI1) return null;
+        const cand = cloneCorners(base);
+        cand[i0] = newI0;
+        cand[i1] = newI1;
+        cand[j0] = { ...base[j0] };
+        cand[j1] = { ...base[j1] };
+        return cand;
+      },
+      bounds,
+      (cand) => sameEdgeDirections(base, cand),
+    );
+  }
+
+  if (altPressed) {
+    // Center-symmetric opposite-edge sync (+d on grabbed edge, -d on opposite edge)
+    return solveMaxValidAlpha((alpha) => {
+      const cand = cloneCorners(base);
+      cand[i0] = { x: base[i0].x + d.x * alpha, y: base[i0].y + d.y * alpha };
+      cand[i1] = { x: base[i1].x + d.x * alpha, y: base[i1].y + d.y * alpha };
+      cand[j0] = { x: base[j0].x - d.x * alpha, y: base[j0].y - d.y * alpha };
+      cand[j1] = { x: base[j1].x - d.x * alpha, y: base[j1].y - d.y * alpha };
+      return cand;
+    }, bounds);
+  }
+
+  // Standard free edge translation
+  return solveMaxValidAlpha((alpha) => {
+    const cand = cloneCorners(base);
+    cand[i0] = clampPoint({ x: base[i0].x + d.x * alpha, y: base[i0].y + d.y * alpha }, bounds);
+    cand[i1] = clampPoint({ x: base[i1].x + d.x * alpha, y: base[i1].y + d.y * alpha }, bounds);
+    return cand;
+  }, bounds);
+}
+
+function applyMultiTouchRectDrag(
+  drags: ActiveDrag[],
+  base: [Point2D, Point2D, Point2D, Point2D],
+  bounds: SafeBounds,
+): [Point2D, Point2D, Point2D, Point2D] {
+  const L0 = Math.min(base[0].x, base[3].x);
+  const R0 = Math.max(base[1].x, base[2].x);
+  const T0 = Math.min(base[0].y, base[1].y);
+  const B0 = Math.max(base[2].y, base[3].y);
+
+  const leftVals: number[] = [];
+  const rightVals: number[] = [];
+  const topVals: number[] = [];
+  const bottomVals: number[] = [];
+
+  for (const drag of drags) {
+    if (drag.kind === 'corner') {
+      const tx = clampVal(drag.currentPointer.x + drag.grabOffset.x, bounds.minX, bounds.maxX);
+      const ty = clampVal(drag.currentPointer.y + drag.grabOffset.y, bounds.minY, bounds.maxY);
+      if (drag.index === 0 || drag.index === 3) leftVals.push(tx);
+      if (drag.index === 1 || drag.index === 2) rightVals.push(tx);
+      if (drag.index === 0 || drag.index === 1) topVals.push(ty);
+      if (drag.index === 2 || drag.index === 3) bottomVals.push(ty);
+    } else if (drag.kind === 'edge') {
+      const dx = drag.currentPointer.x - drag.startPointer.x;
+      const dy = drag.currentPointer.y - drag.startPointer.y;
+      const edge = EDGE_NAMES[drag.index];
+      if (edge === 'top') topVals.push(clampVal(T0 + dy, bounds.minY, bounds.maxY));
+      else if (edge === 'bottom') bottomVals.push(clampVal(B0 + dy, bounds.minY, bounds.maxY));
+      else if (edge === 'left') leftVals.push(clampVal(L0 + dx, bounds.minX, bounds.maxX));
+      else if (edge === 'right') rightVals.push(clampVal(R0 + dx, bounds.minX, bounds.maxX));
+    }
+  }
+
+  const avg = (arr: number[], fallback: number) =>
+    arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : fallback;
+
+  let left = avg(leftVals, L0);
+  let right = avg(rightVals, R0);
+  let top = avg(topVals, T0);
+  let bottom = avg(bottomVals, B0);
+
+  if (right - left < MIN_RECT_SIZE) {
+    if (leftVals.length && rightVals.length) {
+      const mid = clampVal((left + right) * 0.5, bounds.minX + MIN_RECT_SIZE * 0.5, bounds.maxX - MIN_RECT_SIZE * 0.5);
+      left = mid - MIN_RECT_SIZE * 0.5;
+      right = mid + MIN_RECT_SIZE * 0.5;
+    } else if (leftVals.length) {
+      left = Math.max(bounds.minX, right - MIN_RECT_SIZE);
+    } else {
+      right = Math.min(bounds.maxX, left + MIN_RECT_SIZE);
+    }
+  }
+
+  if (bottom - top < MIN_RECT_SIZE) {
+    if (topVals.length && bottomVals.length) {
+      const mid = clampVal((top + bottom) * 0.5, bounds.minY + MIN_RECT_SIZE * 0.5, bounds.maxY - MIN_RECT_SIZE * 0.5);
+      top = mid - MIN_RECT_SIZE * 0.5;
+      bottom = mid + MIN_RECT_SIZE * 0.5;
+    } else if (topVals.length) {
+      top = Math.max(bounds.minY, bottom - MIN_RECT_SIZE);
+    } else {
+      bottom = Math.min(bounds.maxY, top + MIN_RECT_SIZE);
+    }
+  }
+
+  return makeRectCorners(left, right, top, bottom);
+}
+
+function applyMultiTouchFreeDrag(
+  drags: ActiveDrag[],
+  base: [Point2D, Point2D, Point2D, Point2D],
+  bounds: SafeBounds,
+): [Point2D, Point2D, Point2D, Point2D] | null {
+  const cornerTargets = new Map<number, Point2D>();
+  const edgeDeltas = new Map<number, Point2D>();
+
+  for (const drag of drags) {
+    if (drag.kind === 'corner') {
+      cornerTargets.set(
+        drag.index,
+        clampPoint(
+          {
+            x: drag.currentPointer.x + drag.grabOffset.x,
+            y: drag.currentPointer.y + drag.grabOffset.y,
+          },
+          bounds,
+        ),
+      );
+    } else if (drag.kind === 'edge') {
+      edgeDeltas.set(drag.index, subPt(drag.currentPointer, drag.startPointer));
+    }
+  }
+
+  const target: [Point2D, Point2D, Point2D, Point2D] = cloneCorners(base);
+  for (let v = 0; v < 4; v++) {
+    const explicit = cornerTargets.get(v);
+    if (explicit) {
+      target[v] = explicit;
+      continue;
+    }
+    const ePrev = (v + 3) % 4;
+    const eNext = v;
+    const dPrev = edgeDeltas.get(ePrev);
+    const dNext = edgeDeltas.get(eNext);
+    if (dPrev && dNext) {
+      const prevDir = subPt(base[v], base[ePrev]);
+      const nextDir = subPt(base[(v + 1) % 4], base[v]);
+      const pPrev = { x: base[v].x + dPrev.x, y: base[v].y + dPrev.y };
+      const pNext = { x: base[v].x + dNext.x, y: base[v].y + dNext.y };
+      const inter = intersectLines(pPrev, prevDir, pNext, nextDir);
+      target[v] = clampPoint(
+        inter ?? { x: base[v].x + (dPrev.x + dNext.x) * 0.5, y: base[v].y + (dPrev.y + dNext.y) * 0.5 },
+        bounds,
+      );
+    } else if (dPrev) {
+      target[v] = clampPoint({ x: base[v].x + dPrev.x, y: base[v].y + dPrev.y }, bounds);
+    } else if (dNext) {
+      target[v] = clampPoint({ x: base[v].x + dNext.x, y: base[v].y + dNext.y }, bounds);
+    }
+  }
+
+  if (isValidQuadInBounds(target, bounds)) return target;
+
+  // Smoothly approach target from current valid quad so concurrent fingers never stall abruptly
+  const startValid = cloneCorners(props.corners);
+  return solveMaxValidAlpha(
+    (alpha) => [
+      lerpPt(startValid[0], target[0], alpha),
+      lerpPt(startValid[1], target[1], alpha),
+      lerpPt(startValid[2], target[2], alpha),
+      lerpPt(startValid[3], target[3], alpha),
+    ],
+    bounds,
+  );
+}
+
+function applyActiveDrags() {
+  if (!hostEl.value || !dragBaselineCorners || activeDrags.size === 0) return;
+  const rect = hostEl.value.getBoundingClientRect();
+  const bounds = getSafeHostBounds(rect);
+  const base = dragBaselineCorners;
+  const drags = Array.from(activeDrags.values());
+
+  if (drags.length === 1 && drags[0].kind === 'whole') {
+    const drag = drags[0];
+    let dx = drag.currentPointer.x - drag.startPointer.x;
+    let dy = drag.currentPointer.y - drag.startPointer.y;
+    const xs = base.map((p) => p.x);
+    const ys = base.map((p) => p.y);
+    dx = clampVal(dx, bounds.minX - Math.min(...xs), bounds.maxX - Math.max(...xs));
+    dy = clampVal(dy, bounds.minY - Math.min(...ys), bounds.maxY - Math.max(...ys));
     emit('update:corners', [
-      { x: left, y: top },
-      { x: right, y: top },
-      { x: right, y: bottom },
-      { x: left, y: bottom },
+      { x: base[0].x + dx, y: base[0].y + dy },
+      { x: base[1].x + dx, y: base[1].y + dy },
+      { x: base[2].x + dx, y: base[2].y + dy },
+      { x: base[3].x + dx, y: base[3].y + dy },
     ]);
     return;
   }
 
-  const next: [Point2D, Point2D, Point2D, Point2D] = [
-    { ...props.corners[0] },
-    { ...props.corners[1] },
-    { ...props.corners[2] },
-    { ...props.corners[3] },
-  ];
-  next[idx] = { x: nx, y: ny };
-  if (isConvexQuad(next)) {
+  const handleDrags = drags.filter((d) => d.kind !== 'whole');
+  if (handleDrags.length === 0) return;
+
+  if (props.quadMode === 'rect') {
+    const next =
+      handleDrags.length === 1
+        ? applySingleRectDrag(handleDrags[0], base, bounds)
+        : applyMultiTouchRectDrag(handleDrags, base, bounds);
+    emit('update:corners', next);
+    return;
+  }
+
+  const next =
+    handleDrags.length === 1
+      ? applySingleFreeDrag(handleDrags[0], base, bounds)
+      : applyMultiTouchFreeDrag(handleDrags, base, bounds);
+  if (next) {
     emit('update:corners', next);
   }
 }
 
-function endHandleDrag(e: PointerEvent) {
-  if (draggingHandleIndex.value === null) return;
-  (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
-  draggingHandleIndex.value = null;
+function safeSetPointerCapture(el: EventTarget | null, pointerId: number) {
+  try {
+    (el as HTMLElement | null)?.setPointerCapture?.(pointerId);
+  } catch {
+    // Non-fatal for synthetic pointers or rapidly cancelled touches
+  }
 }
 
-// --- Unified 4-edge dragging (axis-locked in 'rect' mode, parallel edge slide in 'free' mode) ---
-const EDGE_NAMES: [RectEdge, RectEdge, RectEdge, RectEdge] = ['top', 'right', 'bottom', 'left'];
+function safeReleasePointerCapture(el: EventTarget | null, pointerId: number) {
+  try {
+    (el as HTMLElement | null)?.releasePointerCapture?.(pointerId);
+  } catch {
+    // Ignore if capture was already released
+  }
+}
 
-function startEdgeDrag(edgeIndex: number, e: PointerEvent) {
-  if (!hostEl.value) return;
+function startHandleDrag(index: number, e: PointerEvent) {
+  const ptr = getLocalPointer(e);
+  if (!ptr) return;
   e.preventDefault();
   e.stopPropagation();
-  const rect = hostEl.value.getBoundingClientRect();
-  draggingEdge.value = {
-    edge: EDGE_NAMES[edgeIndex],
-    edgeIndex,
-    start: { x: e.clientX - rect.left, y: e.clientY - rect.top },
-    initialCorners: [
-      { ...props.corners[0] },
-      { ...props.corners[1] },
-      { ...props.corners[2] },
-      { ...props.corners[3] },
-    ],
-  };
-  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+
+  // Ignore duplicate pointer on the same corner
+  for (const d of activeDrags.values()) {
+    if (d.kind === 'corner' && d.index === index) return;
+  }
+  // Cancel any active whole-quad drag when a control point is grabbed
+  for (const [pid, d] of activeDrags.entries()) {
+    if (d.kind === 'whole') activeDrags.delete(pid);
+  }
+
+  shiftPressed = e.shiftKey;
+  altPressed = e.altKey;
+  safeSetPointerCapture(e.currentTarget, e.pointerId);
+
+  if (activeDrags.size === 0) {
+    dragBaselineCorners = cloneCorners(props.corners);
+  } else {
+    resnapshotDrags(props.corners);
+  }
+
+  activeDrags.set(e.pointerId, {
+    pointerId: e.pointerId,
+    kind: 'corner',
+    index,
+    startPointer: { ...ptr },
+    currentPointer: { ...ptr },
+    grabOffset: {
+      x: props.corners[index].x - ptr.x,
+      y: props.corners[index].y - ptr.y,
+    },
+  });
+  syncActiveHandleKeys();
 }
 
-function moveEdgeDrag(e: PointerEvent) {
-  const drag = draggingEdge.value;
-  if (!drag || !hostEl.value) return;
+function startEdgeDrag(edgeIndex: number, e: PointerEvent) {
+  const ptr = getLocalPointer(e);
+  if (!ptr) return;
   e.preventDefault();
-  const rect = hostEl.value.getBoundingClientRect();
-  const bounds = getSafeHostBounds(rect);
-  const nx = Math.max(bounds.minX, Math.min(bounds.maxX, e.clientX - rect.left));
-  const ny = Math.max(bounds.minY, Math.min(bounds.maxY, e.clientY - rect.top));
+  e.stopPropagation();
 
-  if (props.quadMode === 'rect') {
-    let left = Math.min(props.corners[0].x, props.corners[3].x);
-    let right = Math.max(props.corners[1].x, props.corners[2].x);
-    let top = Math.min(props.corners[0].y, props.corners[1].y);
-    let bottom = Math.max(props.corners[2].y, props.corners[3].y);
-
-    if (drag.edge === 'top') {
-      top = Math.min(ny, bottom - MIN_RECT_SIZE);
-    } else if (drag.edge === 'bottom') {
-      bottom = Math.max(ny, top + MIN_RECT_SIZE);
-    } else if (drag.edge === 'left') {
-      left = Math.min(nx, right - MIN_RECT_SIZE);
-    } else if (drag.edge === 'right') {
-      right = Math.max(nx, left + MIN_RECT_SIZE);
-    }
-
-    emit('update:corners', [
-      { x: left, y: top },
-      { x: right, y: top },
-      { x: right, y: bottom },
-      { x: left, y: bottom },
-    ]);
-    return;
+  // Ignore duplicate pointer on the same edge
+  for (const d of activeDrags.values()) {
+    if (d.kind === 'edge' && d.index === edgeIndex) return;
+  }
+  for (const [pid, d] of activeDrags.entries()) {
+    if (d.kind === 'whole') activeDrags.delete(pid);
   }
 
-  // Free mode: translate both endpoints of the grabbed edge together
-  const dx = e.clientX - rect.left - drag.start.x;
-  const dy = e.clientY - rect.top - drag.start.y;
-  const i0 = drag.edgeIndex;
-  const i1 = (drag.edgeIndex + 1) % 4;
-  const next: [Point2D, Point2D, Point2D, Point2D] = [
-    { ...drag.initialCorners[0] },
-    { ...drag.initialCorners[1] },
-    { ...drag.initialCorners[2] },
-    { ...drag.initialCorners[3] },
-  ];
-  next[i0] = {
-    x: Math.max(bounds.minX, Math.min(bounds.maxX, drag.initialCorners[i0].x + dx)),
-    y: Math.max(bounds.minY, Math.min(bounds.maxY, drag.initialCorners[i0].y + dy)),
-  };
-  next[i1] = {
-    x: Math.max(bounds.minX, Math.min(bounds.maxX, drag.initialCorners[i1].x + dx)),
-    y: Math.max(bounds.minY, Math.min(bounds.maxY, drag.initialCorners[i1].y + dy)),
-  };
-  if (isConvexQuad(next)) {
-    emit('update:corners', next);
+  shiftPressed = e.shiftKey;
+  altPressed = e.altKey;
+  safeSetPointerCapture(e.currentTarget, e.pointerId);
+
+  if (activeDrags.size === 0) {
+    dragBaselineCorners = cloneCorners(props.corners);
+  } else {
+    resnapshotDrags(props.corners);
+  }
+
+  activeDrags.set(e.pointerId, {
+    pointerId: e.pointerId,
+    kind: 'edge',
+    index: edgeIndex,
+    startPointer: { ...ptr },
+    currentPointer: { ...ptr },
+    grabOffset: { x: 0, y: 0 },
+  });
+  syncActiveHandleKeys();
+}
+
+function startWholeQuadDrag(e: PointerEvent) {
+  if (!props.calibrating || activeDrags.size > 0) return;
+  const ptr = getLocalPointer(e);
+  if (!ptr || !isPointInQuad(ptr, props.corners)) return;
+
+  e.preventDefault();
+  shiftPressed = e.shiftKey;
+  altPressed = e.altKey;
+  dragBaselineCorners = cloneCorners(props.corners);
+  activeDrags.set(e.pointerId, {
+    pointerId: e.pointerId,
+    kind: 'whole',
+    index: -1,
+    startPointer: { ...ptr },
+    currentPointer: { ...ptr },
+    grabOffset: { x: 0, y: 0 },
+  });
+  safeSetPointerCapture(e.currentTarget, e.pointerId);
+  syncActiveHandleKeys();
+}
+
+function onCalibrationPointerMove(e: PointerEvent) {
+  const drag = activeDrags.get(e.pointerId);
+  if (!drag) return;
+  const ptr = getLocalPointer(e);
+  if (!ptr) return;
+  e.preventDefault();
+  drag.currentPointer = ptr;
+  shiftPressed = e.shiftKey;
+  altPressed = e.altKey;
+  applyActiveDrags();
+}
+
+function onCalibrationPointerEnd(e: PointerEvent) {
+  if (!activeDrags.has(e.pointerId)) return;
+  safeReleasePointerCapture(e.currentTarget, e.pointerId);
+  activeDrags.delete(e.pointerId);
+  syncActiveHandleKeys();
+  if (activeDrags.size === 0) {
+    dragBaselineCorners = null;
+  } else {
+    resnapshotDrags(props.corners);
   }
 }
 
-function endEdgeDrag(e: PointerEvent) {
-  if (!draggingEdge.value) return;
-  (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
-  draggingEdge.value = null;
+function onModifierKeyChange(e: KeyboardEvent) {
+  const changed = shiftPressed !== e.shiftKey || altPressed !== e.altKey;
+  shiftPressed = e.shiftKey;
+  altPressed = e.altKey;
+  if (changed && activeDrags.size === 1) {
+    applyActiveDrags();
+  }
+}
+
+function onWindowBlur() {
+  shiftPressed = false;
+  altPressed = false;
 }
 
 function unitVec(ax: number, ay: number, bx: number, by: number): { ux: number; uy: number; len: number } {
@@ -514,56 +1201,6 @@ const edgeBars = computed(() => {
   });
 });
 
-function startWholeQuadDrag(e: PointerEvent) {
-  if (!props.calibrating || !hostEl.value) return;
-  const rect = hostEl.value.getBoundingClientRect();
-  const pt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-  if (!isPointInQuad(pt, props.corners)) return;
-
-  e.preventDefault();
-  draggingWholeQuad.value = {
-    start: pt,
-    initialCorners: [
-      { ...props.corners[0] },
-      { ...props.corners[1] },
-      { ...props.corners[2] },
-      { ...props.corners[3] },
-    ],
-  };
-  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-}
-
-function moveWholeQuadDrag(e: PointerEvent) {
-  const drag = draggingWholeQuad.value;
-  if (!drag || !hostEl.value) return;
-  e.preventDefault();
-  const rect = hostEl.value.getBoundingClientRect();
-  const bounds = getSafeHostBounds(rect);
-  let dx = e.clientX - rect.left - drag.start.x;
-  let dy = e.clientY - rect.top - drag.start.y;
-  const xs = drag.initialCorners.map((p) => p.x);
-  const ys = drag.initialCorners.map((p) => p.y);
-  const minDx = bounds.minX - Math.min(...xs);
-  const maxDx = bounds.maxX - Math.max(...xs);
-  const minDy = bounds.minY - Math.min(...ys);
-  const maxDy = bounds.maxY - Math.max(...ys);
-  dx = Math.max(minDx, Math.min(maxDx, dx));
-  dy = Math.max(minDy, Math.min(maxDy, dy));
-  const next: [Point2D, Point2D, Point2D, Point2D] = [
-    { x: drag.initialCorners[0].x + dx, y: drag.initialCorners[0].y + dy },
-    { x: drag.initialCorners[1].x + dx, y: drag.initialCorners[1].y + dy },
-    { x: drag.initialCorners[2].x + dx, y: drag.initialCorners[2].y + dy },
-    { x: drag.initialCorners[3].x + dx, y: drag.initialCorners[3].y + dy },
-  ];
-  emit('update:corners', next);
-}
-
-function endWholeQuadDrag(e: PointerEvent) {
-  if (!draggingWholeQuad.value) return;
-  (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
-  draggingWholeQuad.value = null;
-}
-
 const quadPointsSvg = computed(() =>
   props.corners.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' '),
 );
@@ -600,12 +1237,27 @@ onMounted(() => {
   } catch (err) {
     glError.value = err instanceof Error ? err.message : String(err);
   }
+  if (hostEl.value && typeof ResizeObserver !== 'undefined') {
+    hostResizeObserver = new ResizeObserver(() => {
+      handleResize();
+    });
+    hostResizeObserver.observe(hostEl.value);
+  }
   window.addEventListener('resize', handleResize);
+  window.addEventListener('keydown', onModifierKeyChange);
+  window.addEventListener('keyup', onModifierKeyChange);
+  window.addEventListener('blur', onWindowBlur);
 });
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(rafId);
+  hostResizeObserver?.disconnect();
+  hostResizeObserver = null;
   window.removeEventListener('resize', handleResize);
+  window.removeEventListener('keydown', onModifierKeyChange);
+  window.removeEventListener('keyup', onModifierKeyChange);
+  window.removeEventListener('blur', onWindowBlur);
+  clearAllDrags();
   if (unsubscribeBridge) unsubscribeBridge();
   renderer?.destroy();
   renderer = null;
@@ -652,9 +1304,9 @@ defineExpose({
       v-if="calibrating"
       class="ac-quad-svg"
       @pointerdown="startWholeQuadDrag"
-      @pointermove="moveWholeQuadDrag"
-      @pointerup="endWholeQuadDrag"
-      @pointercancel="endWholeQuadDrag"
+      @pointermove="onCalibrationPointerMove"
+      @pointerup="onCalibrationPointerEnd"
+      @pointercancel="onCalibrationPointerEnd"
     >
       <polygon
         v-if="alignTarget === 'grid'"
@@ -701,7 +1353,7 @@ defineExpose({
           :x2="eb.bx2"
           :y2="eb.by2"
           class="ac-gizmo-rim"
-          :class="{ active: draggingEdge?.edgeIndex === eb.idx || hoveredHandle === `e-${eb.idx}` }"
+          :class="{ active: activeHandleKeys.has(`e-${eb.idx}`) || hoveredHandle === `e-${eb.idx}` }"
         />
         <line
           :x1="eb.bx1"
@@ -709,7 +1361,7 @@ defineExpose({
           :x2="eb.bx2"
           :y2="eb.by2"
           class="ac-gizmo-core"
-          :class="{ active: draggingEdge?.edgeIndex === eb.idx || hoveredHandle === `e-${eb.idx}` }"
+          :class="{ active: activeHandleKeys.has(`e-${eb.idx}`) || hoveredHandle === `e-${eb.idx}` }"
         />
         <line
           :x1="eb.x1"
@@ -721,9 +1373,9 @@ defineExpose({
           @pointerenter="hoveredHandle = `e-${eb.idx}`"
           @pointerleave="hoveredHandle === `e-${eb.idx}` && (hoveredHandle = null)"
           @pointerdown="startEdgeDrag(eb.idx, $event)"
-          @pointermove="moveEdgeDrag"
-          @pointerup="endEdgeDrag"
-          @pointercancel="endEdgeDrag"
+          @pointermove="onCalibrationPointerMove"
+          @pointerup="onCalibrationPointerEnd"
+          @pointercancel="onCalibrationPointerEnd"
         />
       </g>
 
@@ -733,12 +1385,12 @@ defineExpose({
           <path
             :d="cb.d"
             class="ac-gizmo-rim"
-            :class="{ active: draggingHandleIndex === cb.idx || hoveredHandle === `c-${cb.idx}` }"
+            :class="{ active: activeHandleKeys.has(`c-${cb.idx}`) || hoveredHandle === `c-${cb.idx}` }"
           />
           <path
             :d="cb.d"
             class="ac-gizmo-core"
-            :class="{ active: draggingHandleIndex === cb.idx || hoveredHandle === `c-${cb.idx}` }"
+            :class="{ active: activeHandleKeys.has(`c-${cb.idx}`) || hoveredHandle === `c-${cb.idx}` }"
           />
           <path
             :d="cb.d"
@@ -747,9 +1399,9 @@ defineExpose({
             @pointerenter="hoveredHandle = `c-${cb.idx}`"
             @pointerleave="hoveredHandle === `c-${cb.idx}` && (hoveredHandle = null)"
             @pointerdown="startHandleDrag(cb.idx, $event)"
-            @pointermove="moveHandleDrag"
-            @pointerup="endHandleDrag"
-            @pointercancel="endHandleDrag"
+            @pointermove="onCalibrationPointerMove"
+            @pointerup="onCalibrationPointerEnd"
+            @pointercancel="onCalibrationPointerEnd"
           />
         </g>
       </template>
@@ -758,9 +1410,9 @@ defineExpose({
           <circle
             :cx="pt.x"
             :cy="pt.y"
-            :r="draggingHandleIndex === idx || hoveredHandle === `c-${idx}` ? 12.5 : 10"
+            :r="activeHandleKeys.has(`c-${idx}`) || hoveredHandle === `c-${idx}` ? 12.5 : 10"
             class="ac-corner-dot"
-            :class="{ active: draggingHandleIndex === idx || hoveredHandle === `c-${idx}` }"
+            :class="{ active: activeHandleKeys.has(`c-${idx}`) || hoveredHandle === `c-${idx}` }"
           />
           <circle :cx="pt.x" :cy="pt.y" r="2.5" class="ac-corner-dot-center" />
           <circle
@@ -771,9 +1423,9 @@ defineExpose({
             @pointerenter="hoveredHandle = `c-${idx}`"
             @pointerleave="hoveredHandle === `c-${idx}` && (hoveredHandle = null)"
             @pointerdown="startHandleDrag(idx, $event)"
-            @pointermove="moveHandleDrag"
-            @pointerup="endHandleDrag"
-            @pointercancel="endHandleDrag"
+            @pointermove="onCalibrationPointerMove"
+            @pointerup="onCalibrationPointerEnd"
+            @pointercancel="onCalibrationPointerEnd"
           />
         </g>
       </template>
@@ -820,6 +1472,7 @@ defineExpose({
   height: 100%;
   overflow: visible;
   pointer-events: none;
+  touch-action: none;
 }
 
 .ac-main-poly {
@@ -829,6 +1482,7 @@ defineExpose({
   stroke-dasharray: 6 4;
   pointer-events: all;
   cursor: move;
+  touch-action: none;
 }
 
 .ac-outer-poly {

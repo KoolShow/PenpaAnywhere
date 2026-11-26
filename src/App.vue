@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import ControlBar, { type BackdropMode } from './components/ControlBar.vue';
+import ControlBar, {
+  type BackdropMode,
+  type UnavailableReasonKey,
+} from './components/ControlBar.vue';
 import PerspectiveOverlay, { type AlignTarget, type QuadMode } from './components/PerspectiveOverlay.vue';
 import PenpaDockWindow from './components/PenpaDockWindow.vue';
 import SettingsDialog from './components/SettingsDialog.vue';
@@ -23,7 +26,10 @@ import {
   setOsClickThrough,
   setOsFullscreenOverlay,
   supportsNativeTransparentOverlay,
+  supportsOverlaySwitch,
   supportsScreenCapture,
+  switchAndroidToImageActivity,
+  switchAndroidToOverlayService,
   type AndroidScreenshotCompositeStatus,
 } from './core/platform';
 import {
@@ -34,6 +40,7 @@ import {
 
 const platform = detectPlatform();
 const canNativeOverlay = supportsNativeTransparentOverlay(platform);
+const canSwitchOverlay = supportsOverlaySwitch(platform);
 const canScreenCapture = supportsScreenCapture();
 const savedState = loadPersistedState();
 
@@ -48,13 +55,20 @@ const VALID_BLEND_MODES: ReadonlySet<BlendRenderMode> = new Set([
 
 // Default mode: transparent overlay on Tauri/Android-overlay; image upload on pure web / android app
 const backdropMode = ref<BackdropMode>(canNativeOverlay ? 'overlay' : 'image');
-const blendMode = ref<BlendRenderMode>(
-  savedState.blendMode && VALID_BLEND_MODES.has(savedState.blendMode)
-    ? savedState.blendMode
-    : canNativeOverlay
-      ? 'alpha-luma'
-      : 'multiply',
-);
+
+function resolveInitialBlendMode(): BlendRenderMode {
+  let mode: BlendRenderMode =
+    savedState.blendMode && VALID_BLEND_MODES.has(savedState.blendMode)
+      ? savedState.blendMode
+      : 'alpha-minrgb';
+  if (canNativeOverlay) {
+    if (mode === 'multiply') mode = 'alpha-minrgb';
+    else if (mode === 'multiply-inv') mode = 'alpha-minrgb-inv';
+  }
+  return mode;
+}
+
+const blendMode = ref<BlendRenderMode>(resolveInitialBlendMode());
 const calibrating = ref(savedState.calibrating ?? true);
 const alignTarget = ref<AlignTarget>(savedState.alignTarget ?? 'grid');
 const quadMode = ref<QuadMode>(savedState.quadMode ?? 'rect');
@@ -64,8 +78,11 @@ const opacity = ref(
     : 1.0,
 );
 const dockVisible = ref(savedState.dockVisible ?? true);
+const canvasVisible = ref(savedState.canvasVisible ?? true);
+const showUnavailableOptions = ref(savedState.showUnavailableOptions ?? false);
 const clickThrough = ref(false);
 const settingsOpen = ref(false);
+const unavailableReasonKey = ref<UnavailableReasonKey | null>(null);
 const hotkeyRecording = ref(false);
 const screenshotPromptOpen = ref(false);
 const screenshotPromptFile = ref('');
@@ -149,6 +166,50 @@ const corners = ref<[Point2D, Point2D, Point2D, Point2D]>(loadInitialCorners());
 const outerQuad = ref<[Point2D, Point2D, Point2D, Point2D]>(corners.value);
 const barRect = ref({ x: 0, y: 0, w: 0, h: 0 });
 const dockRect = ref({ x: 0, y: 0, w: 0, h: 0 });
+let lastViewport = { w: window.innerWidth || 1280, h: window.innerHeight || 800 };
+
+function rescaleCornersOnResize() {
+  const nw = window.innerWidth;
+  const nh = window.innerHeight;
+  if (nw < 120 || nh < 120) return;
+  const ow = lastViewport.w;
+  const oh = lastViewport.h;
+  if (nw === ow && nh === oh) return;
+  lastViewport = { w: nw, h: nh };
+
+  const sx = nw / Math.max(1, ow);
+  const sy = nh / Math.max(1, oh);
+  const safe = safeAreaInsets.value;
+  const minX = safe.left + 8;
+  const minY = safe.top + 8;
+  const maxX = Math.max(minX + 48, nw - safe.right - 8);
+  const maxY = Math.max(minY + 48, nh - safe.bottom - 8);
+
+  const cur = corners.value;
+  if (quadMode.value === 'rect') {
+    let left = Math.max(minX, Math.min(maxX - 48, Math.min(cur[0].x, cur[3].x) * sx));
+    let right = Math.max(left + 48, Math.min(maxX, Math.max(cur[1].x, cur[2].x) * sx));
+    let top = Math.max(minY, Math.min(maxY - 48, Math.min(cur[0].y, cur[1].y) * sy));
+    let bottom = Math.max(top + 48, Math.min(maxY, Math.max(cur[2].y, cur[3].y) * sy));
+    if (right - left < 48) left = Math.max(minX, right - 48);
+    if (bottom - top < 48) top = Math.max(minY, bottom - 48);
+    corners.value = [
+      { x: left, y: top },
+      { x: right, y: top },
+      { x: right, y: bottom },
+      { x: left, y: bottom },
+    ];
+    return;
+  }
+
+  const scaled: [Point2D, Point2D, Point2D, Point2D] = [
+    { x: Math.max(minX, Math.min(maxX, cur[0].x * sx)), y: Math.max(minY, Math.min(maxY, cur[0].y * sy)) },
+    { x: Math.max(minX, Math.min(maxX, cur[1].x * sx)), y: Math.max(minY, Math.min(maxY, cur[1].y * sy)) },
+    { x: Math.max(minX, Math.min(maxX, cur[2].x * sx)), y: Math.max(minY, Math.min(maxY, cur[2].y * sy)) },
+    { x: Math.max(minX, Math.min(maxX, cur[3].x * sx)), y: Math.max(minY, Math.min(maxY, cur[3].y * sy)) },
+  ];
+  corners.value = isConvexQuad(scaled) ? scaled : makeDefaultCorners();
+}
 
 watch(
   [
@@ -158,6 +219,8 @@ watch(
     opacity,
     calibrating,
     dockVisible,
+    canvasVisible,
+    showUnavailableOptions,
     corners,
     customCssEnabled,
     customCss,
@@ -179,6 +242,8 @@ watch(
       opacity: opacity.value,
       calibrating: calibrating.value,
       dockVisible: dockVisible.value,
+      canvasVisible: canvasVisible.value,
+      showUnavailableOptions: showUnavailableOptions.value,
       cornersNorm,
       customCssEnabled: customCssEnabled.value,
       customCss: customCss.value,
@@ -240,10 +305,49 @@ const hasDomBackdrop = computed(() => {
   return false;
 });
 
+const unavailableDialogInfo = computed<{ title: string; body: string } | null>(() => {
+  const key = unavailableReasonKey.value;
+  if (!key) return null;
+  const u = messages.value.unavailable;
+  switch (key) {
+    case 'multiplyOverlay':
+      return { title: u.multiplyOverlayTitle, body: u.multiplyOverlayBody };
+    case 'overlayWeb':
+      return { title: u.overlayWebTitle, body: u.overlayWebBody };
+    case 'screenUnsupported':
+      return { title: u.screenUnsupportedTitle, body: u.screenUnsupportedBody };
+    case 'clickThroughUnavailable':
+      return { title: u.clickThroughUnavailableTitle, body: u.clickThroughUnavailableBody };
+    case 'androidShotUnavailable':
+      return { title: u.androidShotUnavailableTitle, body: u.androidShotUnavailableBody };
+    case 'dynamicColorUnavailable':
+      return { title: u.dynamicColorUnavailableTitle, body: u.dynamicColorUnavailableBody };
+  }
+});
+
+function handleUnavailableClick(key: UnavailableReasonKey) {
+  unavailableReasonKey.value = key;
+}
+
+function handleBackdropModeUpdate(next: BackdropMode) {
+  if (next === backdropMode.value) return;
+  if (platform === 'android-overlay' && next === 'image') {
+    flushAllStateNow();
+    if (switchAndroidToImageActivity()) return;
+  }
+  if (platform === 'android-app' && next === 'overlay') {
+    flushAllStateNow();
+    if (switchAndroidToOverlayService()) return;
+  }
+  backdropMode.value = next;
+}
+
 watch(backdropMode, async (mode) => {
   if (mode === 'overlay') {
     if (blendMode.value === 'multiply') {
-      blendMode.value = 'alpha-luma';
+      blendMode.value = 'alpha-minrgb';
+    } else if (blendMode.value === 'multiply-inv') {
+      blendMode.value = 'alpha-minrgb-inv';
     }
     await setOsFullscreenOverlay(true);
   } else {
@@ -263,6 +367,7 @@ watch(clickThrough, async (val) => {
 // Sync interactive regions to Windows (Tauri 2) and Android (OverlayService TouchProxy windows)
 // so all transparent areas outside control bar, Penpa dock, and board quad pass touches through!
 async function syncOverlayHitRegions() {
+  const modalBlocking = settingsOpen.value || screenshotPromptOpen.value || !!unavailableReasonKey.value;
   if (platform === 'tauri') {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
@@ -271,11 +376,11 @@ async function syncOverlayHitRegions() {
           ? dockRect.value
           : { x: 0, y: 0, w: 0, h: 0 };
       await invoke('update_hit_regions', {
-        enabled: backdropMode.value === 'overlay' && !settingsOpen.value,
-        forceClickThrough: backdropMode.value === 'overlay' && clickThrough.value && !settingsOpen.value,
+        enabled: backdropMode.value === 'overlay' && !modalBlocking,
+        forceClickThrough: backdropMode.value === 'overlay' && clickThrough.value && !modalBlocking,
         barRect: barRect.value,
         dockRect: dock,
-        quad: outerQuad.value,
+        quad: canvasVisible.value ? outerQuad.value : [],
       });
     } catch {
       // Non-fatal in web/dev fallback
@@ -284,53 +389,50 @@ async function syncOverlayHitRegions() {
   }
 
   if (platform === 'android-overlay' && window.AndroidOverlay?.updateHitRegions) {
-    // Compute padded bounding box covering both corners (handles) and outerQuad
-    const allPts = [...corners.value, ...outerQuad.value];
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const p of allPts) {
-      if (p.x < minX) minX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y > maxY) maxY = p.y;
+    let boardRect = { x: 0, y: 0, w: 0, h: 0 };
+    let androidHandlePts: Point2D[] = [];
+    if (canvasVisible.value) {
+      // Compute padded bounding box covering both corners (handles) and outerQuad
+      const allPts = [...corners.value, ...outerQuad.value];
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const p of allPts) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+      }
+      const pad = calibrating.value ? 26 : 10;
+      if (isFinite(minX) && maxX > minX && maxY > minY) {
+        boardRect = {
+          x: Math.max(0, minX - pad),
+          y: Math.max(0, minY - pad),
+          w: maxX - minX + pad * 2,
+          h: maxY - minY + pad * 2,
+        };
+      }
+      const c = corners.value;
+      androidHandlePts = [
+        ...c,
+        { x: (c[0].x + c[1].x) * 0.5, y: (c[0].y + c[1].y) * 0.5 },
+        { x: (c[1].x + c[2].x) * 0.5, y: (c[1].y + c[2].y) * 0.5 },
+        { x: (c[2].x + c[3].x) * 0.5, y: (c[2].y + c[3].y) * 0.5 },
+        { x: (c[3].x + c[0].x) * 0.5, y: (c[3].y + c[0].y) * 0.5 },
+      ];
     }
-    const pad = calibrating.value ? 26 : 10;
-    const boardRect =
-      isFinite(minX) && maxX > minX && maxY > minY
-        ? {
-            x: Math.max(0, minX - pad),
-            y: Math.max(0, minY - pad),
-            w: maxX - minX + pad * 2,
-            h: maxY - minY + pad * 2,
-          }
-        : { x: 0, y: 0, w: 0, h: 0 };
-
-    const c = corners.value;
-    const androidHandlePts: Point2D[] = [
-      ...c,
-      { x: (c[0].x + c[1].x) * 0.5, y: (c[0].y + c[1].y) * 0.5 },
-      { x: (c[1].x + c[2].x) * 0.5, y: (c[1].y + c[2].y) * 0.5 },
-      { x: (c[2].x + c[3].x) * 0.5, y: (c[2].y + c[3].y) * 0.5 },
-      { x: (c[3].x + c[0].x) * 0.5, y: (c[3].y + c[0].y) * 0.5 },
-    ];
 
     const payload = {
-      passthroughEnabled:
-        backdropMode.value === 'overlay' && !settingsOpen.value && !screenshotPromptOpen.value,
-      forceClickThrough:
-        backdropMode.value === 'overlay' &&
-        clickThrough.value &&
-        !settingsOpen.value &&
-        !screenshotPromptOpen.value,
-      calibrating: calibrating.value,
+      passthroughEnabled: backdropMode.value === 'overlay' && !modalBlocking,
+      forceClickThrough: backdropMode.value === 'overlay' && clickThrough.value && !modalBlocking,
+      calibrating: calibrating.value && canvasVisible.value,
       viewportW: window.innerWidth || 1,
       viewportH: window.innerHeight || 1,
       barRect: barRect.value,
       dockRect: dockVisible.value ? dockRect.value : { x: 0, y: 0, w: 0, h: 0 },
       boardRect,
-      quad: outerQuad.value,
+      quad: canvasVisible.value ? outerQuad.value : [],
       corners: androidHandlePts,
     };
     try {
@@ -353,8 +455,10 @@ watch(
     clickThrough,
     settingsOpen,
     screenshotPromptOpen,
+    unavailableReasonKey,
     calibrating,
     dockVisible,
+    canvasVisible,
     barRect,
     dockRect,
     corners,
@@ -511,7 +615,13 @@ function onWindowKey(type: 'keydown' | 'keyup', e: KeyboardEvent) {
     }
   }
 
-  if (settingsOpen.value) return;
+  if (type === 'keydown' && e.code === 'Escape' && unavailableReasonKey.value) {
+    e.preventDefault();
+    unavailableReasonKey.value = null;
+    return;
+  }
+
+  if (settingsOpen.value || unavailableReasonKey.value) return;
 
   const activeTag = (document.activeElement?.tagName || '').toLowerCase();
   if (activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select') return;
@@ -546,6 +656,7 @@ onMounted(async () => {
   window.addEventListener('paste', onPaste);
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('resize', rescaleCornersOnResize);
   window.addEventListener('pagehide', flushAllStateNow);
   window.addEventListener('beforeunload', flushAllStateNow);
   window.addEventListener('penpaanywhere-md3-updated', syncPenpaThemeAndCss);
@@ -560,8 +671,8 @@ onMounted(async () => {
   };
   window.__PENPAANYWHERE_FLUSH_STORAGE__ = flushAllStateNow;
   window.__PENPAANYWHERE_CAPTURE_OVERLAY__ = () => ({
-    active: backdropMode.value === 'overlay',
-    dataUrl: overlayRef.value?.captureOverlayPng() ?? '',
+    active: backdropMode.value === 'overlay' && canvasVisible.value,
+    dataUrl: canvasVisible.value ? (overlayRef.value?.captureOverlayPng() ?? '') : '',
   });
   window.__PENPAANYWHERE_ON_SCREENSHOT_PROMPT__ = (fileName: string) => {
     screenshotPromptFile.value = fileName || '';
@@ -595,6 +706,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('paste', onPaste);
   window.removeEventListener('keydown', onKeyDown);
   window.removeEventListener('keyup', onKeyUp);
+  window.removeEventListener('resize', rescaleCornersOnResize);
   window.removeEventListener('pagehide', flushAllStateNow);
   window.removeEventListener('beforeunload', flushAllStateNow);
   window.removeEventListener('penpaanywhere-md3-updated', syncPenpaThemeAndCss);
@@ -669,10 +781,12 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <!-- WebGL2 4-point Perspective Overlay Canvas (Multiply / Alpha=1-Luma) -->
+    <!-- WebGL2 4-point Perspective Overlay Canvas (Multiply / Alpha=1-Luma / Color-to-Alpha) -->
     <PerspectiveOverlay
+      v-show="canvasVisible"
       ref="overlayRef"
       v-model:corners="corners"
+      :visible="canvasVisible"
       :bridge="bridge"
       :blend-mode="blendMode"
       :has-dom-backdrop="hasDomBackdrop"
@@ -692,21 +806,26 @@ onBeforeUnmount(() => {
 
     <!-- Top MD3 Floating Control Bar -->
     <ControlBar
-      v-model:backdrop-mode="backdropMode"
       v-model:blend-mode="blendMode"
       v-model:calibrating="calibrating"
       v-model:align-target="alignTarget"
       v-model:opacity="opacity"
       v-model:dock-visible="dockVisible"
+      v-model:canvas-visible="canvasVisible"
       v-model:click-through="clickThrough"
+      :backdrop-mode="backdropMode"
       :quad-mode="quadMode"
       :platform="platform"
       :can-native-overlay="canNativeOverlay"
+      :can-switch-overlay="canSwitchOverlay"
       :can-screen-capture="canScreenCapture"
+      :show-unavailable-options="showUnavailableOptions"
       :hotkey-label="hotkeyLabel"
       :has-screen-stream="!!screenStream"
       :has-image="!!imageUrl"
+      @update:backdrop-mode="handleBackdropModeUpdate"
       @update:quad-mode="handleQuadModeChange"
+      @unavailable-click="handleUnavailableClick"
       @pick-image="triggerImagePicker"
       @start-screen-capture="startScreenCapture"
       @stop-screen-capture="stopScreenCapture"
@@ -715,19 +834,43 @@ onBeforeUnmount(() => {
       @bounds-change="(r) => (barRect = r)"
     />
 
-    <!-- Settings Modal (Language + Hotkey + Custom CSS Injection + Android Screenshot Compatibility) -->
+    <!-- Settings Modal (Language + Theme + Dynamic Color + Show Unavailable + Hotkey + Custom CSS + Links) -->
     <SettingsDialog
       v-model:open="settingsOpen"
       v-model:custom-css-enabled="customCssEnabled"
       v-model:custom-css="customCss"
       v-model:toggle-hotkey="toggleHotkey"
+      v-model:show-unavailable-options="showUnavailableOptions"
       :platform="platform"
       :android-screenshot-status="androidScreenshotStatus"
+      @unavailable-click="handleUnavailableClick"
       @toggle-android-screenshot-composite="handleToggleAndroidScreenshotComposite"
       @request-android-all-files="handleRequestAndroidAllFiles"
       @recording-change="(r) => (hotkeyRecording = r)"
       @sync-penpa-language="handleSyncPenpaLanguage"
     />
+
+    <!-- Unavailable Option Explanation Dialog -->
+    <div
+      v-if="unavailableDialogInfo"
+      class="ac-prompt-backdrop ac-unavailable-backdrop"
+      @pointerdown.self="unavailableReasonKey = null"
+    >
+      <section
+        class="ac-prompt-card"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="messages.unavailable.ariaLabel"
+      >
+        <div class="ac-prompt-title">{{ unavailableDialogInfo.title }}</div>
+        <p class="ac-prompt-body">{{ unavailableDialogInfo.body }}</p>
+        <div class="ac-prompt-actions">
+          <button class="ac-btn active" @click="unavailableReasonKey = null">
+            {{ messages.unavailable.ok }}
+          </button>
+        </div>
+      </section>
+    </div>
 
     <!-- First-time Android Screenshot Auto-Composite Prompt -->
     <div
@@ -771,8 +914,11 @@ onBeforeUnmount(() => {
   padding: calc(16px + var(--ac-safe-top, 0px)) calc(16px + var(--ac-safe-right, 0px))
     calc(16px + var(--ac-safe-bottom, 0px)) calc(16px + var(--ac-safe-left, 0px));
   background: color-mix(in srgb, var(--md-sys-color-scrim) 52%, transparent);
-  backdrop-filter: blur(4px);
   pointer-events: auto;
+}
+
+.ac-unavailable-backdrop {
+  z-index: 105;
 }
 
 .ac-prompt-card {

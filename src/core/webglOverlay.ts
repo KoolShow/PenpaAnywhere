@@ -147,6 +147,8 @@ export class WebGLPerspectiveRenderer {
   private uWhiteThreshold: WebGLUniformLocation | null;
   private lastUploadedVersion = -1;
   private hasTexture = false;
+  private viewportW = 0;
+  private viewportH = 0;
 
   constructor(private canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', {
@@ -214,14 +216,25 @@ export class WebGLPerspectiveRenderer {
     return prog;
   }
 
-  resize(cssWidth: number, cssHeight: number, dpr: number) {
+  resize(cssWidth: number, cssHeight: number, dpr: number): boolean {
+    if (!Number.isFinite(cssWidth) || !Number.isFinite(cssHeight) || cssWidth < 1 || cssHeight < 1) {
+      return false;
+    }
     const w = Math.max(1, Math.round(cssWidth * dpr));
     const h = Math.max(1, Math.round(cssHeight * dpr));
+    let changed = false;
     if (this.canvas.width !== w || this.canvas.height !== h) {
       this.canvas.width = w;
       this.canvas.height = h;
+      changed = true;
     }
-    this.gl.viewport(0, 0, w, h);
+    if (changed || this.viewportW !== w || this.viewportH !== h) {
+      this.gl.viewport(0, 0, w, h);
+      this.viewportW = w;
+      this.viewportH = h;
+      changed = true;
+    }
+    return changed;
   }
 
   uploadSourceIfNeeded(sourceCanvas: HTMLCanvasElement, version: number): boolean {

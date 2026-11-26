@@ -27,6 +27,17 @@ body,
   touch-action: none;
 }
 
+:root,
+:root[data-color-scheme="dark"] {
+  --ac-checker-a: #1e222a;
+  --ac-checker-b: #13161c;
+}
+
+:root[data-color-scheme="light"] {
+  --ac-checker-a: #d8dde6;
+  --ac-checker-b: #eef1f6;
+}
+
 .ac-root {
   position: relative;
   width: 100vw;
@@ -38,11 +49,11 @@ body,
 
 .ac-root.has-backdrop {
   background:
-    linear-gradient(45deg, #d8dde6 25%, transparent 25%),
-    linear-gradient(-45deg, #d8dde6 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, #d8dde6 75%),
-    linear-gradient(-45deg, transparent 75%, #d8dde6 75%),
-    #eef1f6;
+    linear-gradient(45deg, var(--ac-checker-a) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--ac-checker-a) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--ac-checker-a) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--ac-checker-a) 75%),
+    var(--ac-checker-b);
   background-size: 24px 24px;
   background-position: 0 0, 0 12px, 12px -12px, -12px 0;
 }
@@ -128,6 +139,12 @@ body,
   background: var(--md-sys-color-secondary-container);
   color: var(--md-sys-color-on-secondary-container);
   border-color: transparent;
+}
+
+.ac-btn.unavailable {
+  opacity: 0.48;
+  border-style: dashed;
+  cursor: help;
 }
 
 .ac-select {

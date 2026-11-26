@@ -19,6 +19,8 @@ export interface PersistedDockState {
   collapsed: boolean;
 }
 
+export type ThemeMode = 'auto' | 'light' | 'dark';
+
 export interface PersistedAppState {
   blendMode?: BlendRenderMode;
   alignTarget?: 'grid' | 'canvas';
@@ -26,6 +28,7 @@ export interface PersistedAppState {
   opacity?: number;
   calibrating?: boolean;
   dockVisible?: boolean;
+  canvasVisible?: boolean;
   cornersNorm?: [Point2D, Point2D, Point2D, Point2D];
   bar?: PersistedBarState;
   dock?: PersistedDockState;
@@ -33,6 +36,10 @@ export interface PersistedAppState {
   customCss?: string;
   toggleHotkey?: HotkeyBinding | null;
   locale?: AppLocale;
+  themeMode?: ThemeMode;
+  dynamicColor?: boolean;
+  customHue?: number;
+  showUnavailableOptions?: boolean;
 }
 
 const STORAGE_KEY = 'penpaanywhere:ui_state_v1';

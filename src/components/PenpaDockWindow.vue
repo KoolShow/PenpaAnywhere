@@ -289,16 +289,41 @@ onBeforeUnmount(() => {
           <button
             class="ac-icon-btn"
             :title="collapsed ? messages.dock.expand : messages.dock.collapse"
+            :aria-label="collapsed ? messages.dock.expand : messages.dock.collapse"
             @click="toggleCollapsed"
           >
-            {{ collapsed ? '▢' : '—' }}
+            <svg
+              v-if="collapsed"
+              class="ac-mat-icon"
+              viewBox="0 -960 960 960"
+              aria-hidden="true"
+            >
+              <path
+                d="M440-440H240q-17 0-28.5-11.5T200-480q0-17 11.5-28.5T240-520h200v-200q0-17 11.5-28.5T480-760q17 0 28.5 11.5T520-720v200h200q17 0 28.5 11.5T760-480q0 17-11.5 28.5T720-440H520v200q0 17-11.5 28.5T480-200q-17 0-28.5-11.5T440-240v-200Z"
+              />
+            </svg>
+            <svg
+              v-else
+              class="ac-mat-icon"
+              viewBox="0 -960 960 960"
+              aria-hidden="true"
+            >
+              <path
+                d="M240-440q-17 0-28.5-11.5T200-480q0-17 11.5-28.5T240-520h480q17 0 28.5 11.5T760-480q0 17-11.5 28.5T720-440H240Z"
+              />
+            </svg>
           </button>
           <button
             class="ac-icon-btn"
             :title="messages.dock.hide"
+            :aria-label="messages.dock.hide"
             @click="emit('update:visible', false)"
           >
-            ✕
+            <svg class="ac-mat-icon" viewBox="0 -960 960 960" aria-hidden="true">
+              <path
+                d="m480-424 196 196q11 11 28 11t28-11q11-11 11-28t-11-28L536-480l196-196q11-11 11-28t-11-28q-11-11-28-11t-28 11L480-536 284-732q-11-11-28-11t-28 11q-11 11-11 28t11 28l196 196-196 196q-11 11-11 28t11 28q11 11 28 11t28-11l196-196Z"
+              />
+            </svg>
           </button>
         </div>
       </div>
@@ -452,16 +477,23 @@ onBeforeUnmount(() => {
 .ac-icon-btn {
   width: 24px;
   height: 24px;
+  padding: 0;
   flex-shrink: 0;
   border: none;
   border-radius: 6px;
   background: transparent;
   color: var(--md-sys-color-on-surface);
   cursor: pointer;
-  font-size: 12px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+.ac-mat-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+  fill: currentColor;
 }
 
 @media (hover: hover) {

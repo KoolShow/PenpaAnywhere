@@ -7,11 +7,24 @@ import {
   type HotkeyBinding,
 } from '../core/hotkey';
 import { DEFAULT_PENPA_MD3_CSS } from '../core/defaultPenpaCss';
+import HueRingPicker from './HueRingPicker.vue';
+import type { UnavailableReasonKey } from './ControlBar.vue';
 import {
+  openExternalLink,
   setAndroidKeyboardFocusable,
   type AndroidScreenshotCompositeStatus,
   type RuntimePlatform,
 } from '../core/platform';
+import {
+  customHue,
+  dynamicColorEnabled,
+  dynamicColorSupported,
+  setCustomHue,
+  setDynamicColorEnabled,
+  setThemeMode,
+  themeMode,
+} from '../core/theme';
+import type { ThemeMode } from '../core/storage';
 import {
   currentLocale,
   formatMessage,
@@ -21,12 +34,16 @@ import {
   type AppLocale,
 } from '../core/i18n';
 
+const GITHUB_REPO_URL = 'https://github.com/KoolShow/PenpaAnywhere';
+const GITHUB_ISSUES_URL = 'https://github.com/KoolShow/PenpaAnywhere/issues';
+
 const props = defineProps<{
   open: boolean;
   platform: RuntimePlatform;
   customCssEnabled: boolean;
   customCss: string;
   toggleHotkey: HotkeyBinding | null;
+  showUnavailableOptions: boolean;
   androidScreenshotStatus?: AndroidScreenshotCompositeStatus | null;
 }>();
 
@@ -35,11 +52,35 @@ const emit = defineEmits<{
   (e: 'update:customCssEnabled', v: boolean): void;
   (e: 'update:customCss', v: string): void;
   (e: 'update:toggleHotkey', v: HotkeyBinding | null): void;
+  (e: 'update:showUnavailableOptions', v: boolean): void;
+  (e: 'unavailable-click', key: UnavailableReasonKey): void;
   (e: 'toggle-android-screenshot-composite', enabled: boolean): void;
   (e: 'request-android-all-files'): void;
   (e: 'recording-change', recording: boolean): void;
   (e: 'sync-penpa-language', locale: AppLocale): void;
 }>();
+
+const themeModeOptions = computed<Array<{ value: ThemeMode; label: string }>>(() => [
+  { value: 'auto', label: messages.value.settings.themeAuto },
+  { value: 'light', label: messages.value.settings.themeLight },
+  { value: 'dark', label: messages.value.settings.themeDark },
+]);
+
+function handleDynamicColorToggle() {
+  if (!dynamicColorSupported.value) {
+    emit('unavailable-click', 'dynamicColorUnavailable');
+    return;
+  }
+  setDynamicColorEnabled(!dynamicColorEnabled.value);
+}
+
+function handleAndroidShotUnavailable() {
+  emit('unavailable-click', 'androidShotUnavailable');
+}
+
+function handleOpenExternal(url: string) {
+  void openExternalLink(url);
+}
 
 type RecordHintState =
   | null
@@ -234,10 +275,7 @@ onBeforeUnmount(() => {
         <!-- Section 0: Interface Language (CN / EN / JP) -->
         <div class="ac-setting-section">
           <div class="ac-setting-row">
-            <div>
-              <div class="ac-setting-label">{{ messages.settings.languageLabel }}</div>
-              <div class="ac-setting-desc">{{ messages.settings.languageDesc }}</div>
-            </div>
+            <div class="ac-setting-label">{{ messages.settings.languageLabel }}</div>
             <div class="ac-lang-segmented" role="group" :aria-label="messages.settings.languageLabel">
               <button
                 v-for="opt in LOCALE_OPTIONS"
@@ -261,19 +299,75 @@ onBeforeUnmount(() => {
 
         <div class="ac-divider" />
 
-        <!-- Section 1: Click-through Toggle Hotkey -->
+        <!-- Section 0.5: Appearance (Light / Dark / Auto) & Dynamic Color + Hue Ring -->
+        <div class="ac-setting-section">
+          <div class="ac-setting-row">
+            <div class="ac-setting-label">{{ messages.settings.themeLabel }}</div>
+            <div class="ac-lang-segmented" role="group" :aria-label="messages.settings.themeLabel">
+              <button
+                v-for="opt in themeModeOptions"
+                :key="opt.value"
+                class="ac-lang-seg-btn"
+                :class="{ active: themeMode === opt.value }"
+                @click="setThemeMode(opt.value)"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+          </div>
+
+          <div
+            v-if="dynamicColorSupported || showUnavailableOptions"
+            class="ac-setting-row"
+          >
+            <div class="ac-setting-label">{{ messages.settings.dynamicColorLabel }}</div>
+            <button
+              class="ac-btn"
+              :class="{
+                active: dynamicColorSupported && dynamicColorEnabled,
+                unavailable: !dynamicColorSupported,
+              }"
+              @click="handleDynamicColorToggle"
+            >
+              {{
+                dynamicColorSupported && dynamicColorEnabled
+                  ? messages.settings.enabled
+                  : messages.settings.disabled
+              }}
+            </button>
+          </div>
+
+          <div v-if="!dynamicColorEnabled || !dynamicColorSupported" class="ac-setting-row ac-hue-row">
+            <div class="ac-setting-label">{{ messages.settings.hueLabel }}</div>
+            <HueRingPicker :model-value="customHue" @update:model-value="setCustomHue" />
+          </div>
+        </div>
+
+        <div class="ac-divider" />
+
+        <!-- Section 0.8: Show Unavailable Options -->
         <div class="ac-setting-section">
           <div class="ac-setting-row">
             <div>
-              <div class="ac-setting-label">{{ messages.settings.hotkeyLabel }}</div>
-              <div class="ac-setting-desc">
-                {{
-                  platform === 'tauri'
-                    ? messages.settings.hotkeyDescTauri
-                    : messages.settings.hotkeyDescOther
-                }}
-              </div>
+              <div class="ac-setting-label">{{ messages.settings.showUnavailableLabel }}</div>
+              <div class="ac-setting-desc">{{ messages.settings.showUnavailableDesc }}</div>
             </div>
+            <button
+              class="ac-btn"
+              :class="{ active: showUnavailableOptions }"
+              @click="emit('update:showUnavailableOptions', !showUnavailableOptions)"
+            >
+              {{ showUnavailableOptions ? messages.settings.enabled : messages.settings.disabled }}
+            </button>
+          </div>
+        </div>
+
+        <div class="ac-divider" />
+
+        <!-- Section 1: Click-through Toggle Hotkey -->
+        <div class="ac-setting-section">
+          <div class="ac-setting-row">
+            <div class="ac-setting-label">{{ messages.settings.hotkeyLabel }}</div>
             <span class="ac-hotkey-pill" :class="{ recording }">
               {{ recording ? messages.settings.hotkeyRecordingPill : hotkeyText }}
             </span>
@@ -299,7 +393,7 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- Android Compatibility Section: Auto-Composite Overlay onto System Screenshots -->
-        <template v-if="platform === 'android-overlay'">
+        <template v-if="platform === 'android-overlay' || showUnavailableOptions">
           <div class="ac-divider" />
           <div class="ac-setting-section">
             <div class="ac-setting-row">
@@ -308,6 +402,7 @@ onBeforeUnmount(() => {
                 <div class="ac-setting-desc">{{ messages.settings.androidShotDesc }}</div>
               </div>
               <button
+                v-if="platform === 'android-overlay'"
                 class="ac-btn"
                 :class="{ active: !!androidScreenshotStatus?.enabled }"
                 @click="emit('toggle-android-screenshot-composite', !androidScreenshotStatus?.enabled)"
@@ -318,8 +413,15 @@ onBeforeUnmount(() => {
                     : messages.settings.disabled
                 }}
               </button>
+              <button
+                v-else
+                class="ac-btn unavailable"
+                @click="handleAndroidShotUnavailable"
+              >
+                {{ messages.settings.disabled }}
+              </button>
             </div>
-            <div v-if="androidScreenshotStatus" class="ac-setting-actions">
+            <div v-if="platform === 'android-overlay' && androidScreenshotStatus" class="ac-setting-actions">
               <span class="ac-setting-desc">
                 <template v-if="androidScreenshotStatus.enabled">
                   {{
@@ -389,6 +491,23 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
+
+        <div class="ac-divider" />
+
+        <!-- Section 3: About & External Links (GitHub & Issues) -->
+        <div class="ac-setting-section">
+          <div class="ac-setting-row">
+            <div class="ac-setting-label">{{ messages.settings.linksLabel }}</div>
+            <div class="ac-setting-actions">
+              <button class="ac-btn tonal" @click="handleOpenExternal(GITHUB_REPO_URL)">
+                {{ messages.settings.githubLink }} ↗
+              </button>
+              <button class="ac-btn" @click="handleOpenExternal(GITHUB_ISSUES_URL)">
+                {{ messages.settings.issueLink }} ↗
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
   </div>
@@ -405,7 +524,6 @@ onBeforeUnmount(() => {
   padding: calc(16px + var(--ac-safe-top, 0px)) calc(16px + var(--ac-safe-right, 0px))
     calc(16px + var(--ac-safe-bottom, 0px)) calc(16px + var(--ac-safe-left, 0px));
   background: color-mix(in srgb, var(--md-sys-color-scrim) 52%, transparent);
-  backdrop-filter: blur(4px);
   pointer-events: auto;
 }
 
@@ -462,6 +580,11 @@ onBeforeUnmount(() => {
 .ac-setting-row > div:first-child {
   flex: 1 1 220px;
   min-width: 0;
+}
+
+.ac-hue-row {
+  padding-top: 4px;
+  align-items: center;
 }
 
 .ac-lang-segmented {

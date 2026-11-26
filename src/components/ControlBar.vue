@@ -8,10 +8,18 @@ import { safeAreaInsets } from '../core/safeArea';
 import { currentLocale, messages } from '../core/i18n';
 
 export type BackdropMode = 'overlay' | 'image' | 'screen';
+export type UnavailableReasonKey =
+  | 'multiplyOverlay'
+  | 'overlayWeb'
+  | 'screenUnsupported'
+  | 'clickThroughUnavailable'
+  | 'androidShotUnavailable'
+  | 'dynamicColorUnavailable';
 
 const props = defineProps<{
   platform: RuntimePlatform;
   canNativeOverlay: boolean;
+  canSwitchOverlay: boolean;
   canScreenCapture: boolean;
   backdropMode: BackdropMode;
   blendMode: BlendRenderMode;
@@ -20,7 +28,9 @@ const props = defineProps<{
   quadMode: QuadMode;
   opacity: number;
   dockVisible: boolean;
+  canvasVisible: boolean;
   clickThrough: boolean;
+  showUnavailableOptions: boolean;
   hotkeyLabel?: string;
   hasScreenStream: boolean;
   hasImage: boolean;
@@ -34,7 +44,9 @@ const emit = defineEmits<{
   (e: 'update:quadMode', v: QuadMode): void;
   (e: 'update:opacity', v: number): void;
   (e: 'update:dockVisible', v: boolean): void;
+  (e: 'update:canvasVisible', v: boolean): void;
   (e: 'update:clickThrough', v: boolean): void;
+  (e: 'unavailable-click', key: UnavailableReasonKey): void;
   (e: 'pick-image'): void;
   (e: 'start-screen-capture'): void;
   (e: 'stop-screen-capture'): void;
@@ -106,21 +118,36 @@ const alignOptions = computed<Array<{ value: AlignTarget; label: string }>>(() =
   { value: 'canvas', label: messages.value.bar.alignCanvas },
 ]);
 
-const blendOptions = computed<Array<{ value: BlendRenderMode; label: string }>>(() => [
-  { value: 'multiply', label: messages.value.bar.blendMultiply },
-  { value: 'multiply-inv', label: messages.value.bar.blendMultiplyInv },
-  { value: 'alpha-luma', label: messages.value.bar.blendAlphaLuma },
-  { value: 'alpha-luma-inv', label: messages.value.bar.blendAlphaLumaInv },
-  { value: 'alpha-minrgb', label: messages.value.bar.blendAlphaMinRgb },
-  { value: 'alpha-minrgb-inv', label: messages.value.bar.blendAlphaMinRgbInv },
-]);
+const blendOptions = computed<Array<{ value: BlendRenderMode; label: string; unavailable: boolean }>>(() => {
+  const isOverlay = props.backdropMode === 'overlay';
+  return [
+    { value: 'multiply', label: messages.value.bar.blendMultiply, unavailable: isOverlay },
+    { value: 'multiply-inv', label: messages.value.bar.blendMultiplyInv, unavailable: isOverlay },
+    { value: 'alpha-luma', label: messages.value.bar.blendAlphaLuma, unavailable: false },
+    { value: 'alpha-luma-inv', label: messages.value.bar.blendAlphaLumaInv, unavailable: false },
+    { value: 'alpha-minrgb', label: messages.value.bar.blendAlphaMinRgb, unavailable: false },
+    { value: 'alpha-minrgb-inv', label: messages.value.bar.blendAlphaMinRgbInv, unavailable: false },
+  ];
+});
+
+const visibleBlendOptions = computed(() =>
+  blendOptions.value.filter((opt) => !opt.unavailable || props.showUnavailableOptions),
+);
+
+const clickThroughAvailable = computed(
+  () => props.canNativeOverlay && props.backdropMode === 'overlay',
+);
+
+const showClickThroughSlot = computed(
+  () => clickThroughAvailable.value || (!compact.value && props.showUnavailableOptions),
+);
 
 const currentAlignLabel = computed(
   () => alignOptions.value.find((o) => o.value === props.alignTarget)?.label ?? messages.value.bar.alignGrid,
 );
 
 const currentBlendLabel = computed(
-  () => blendOptions.value.find((o) => o.value === props.blendMode)?.label ?? messages.value.bar.blendAlphaLuma,
+  () => blendOptions.value.find((o) => o.value === props.blendMode)?.label ?? messages.value.bar.blendAlphaMinRgb,
 );
 
 const passthroughTooltip = computed(() => {
@@ -157,10 +184,41 @@ function selectAlign(val: AlignTarget) {
   requestAnimationFrame(reportBounds);
 }
 
-function selectBlend(val: BlendRenderMode) {
-  emit('update:blendMode', val);
+function selectBlend(opt: { value: BlendRenderMode; unavailable: boolean }) {
+  if (opt.unavailable) {
+    openMenu.value = null;
+    emit('unavailable-click', 'multiplyOverlay');
+    requestAnimationFrame(reportBounds);
+    return;
+  }
+  emit('update:blendMode', opt.value);
   openMenu.value = null;
   requestAnimationFrame(reportBounds);
+}
+
+function handleOverlayModeClick() {
+  if (!props.canSwitchOverlay) {
+    emit('unavailable-click', 'overlayWeb');
+    return;
+  }
+  emit('update:backdropMode', 'overlay');
+}
+
+function handleScreenModeClick() {
+  if (!props.canScreenCapture) {
+    emit('unavailable-click', 'screenUnsupported');
+    return;
+  }
+  emit('update:backdropMode', 'screen');
+  if (!props.hasScreenStream) emit('start-screen-capture');
+}
+
+function handleClickThroughBtn() {
+  if (!clickThroughAvailable.value) {
+    emit('unavailable-click', 'clickThroughUnavailable');
+    return;
+  }
+  emit('update:clickThrough', !props.clickThrough);
 }
 
 function onGlobalPointerDown(e: PointerEvent) {
@@ -286,10 +344,10 @@ onBeforeUnmount(() => {
           <!-- Category 1: Backdrop Mode (Capsule Segmented Selector) -->
           <div class="ac-segmented" role="group" :aria-label="messages.bar.backdropGroupAria">
             <button
-              v-if="canNativeOverlay"
+              v-if="canSwitchOverlay || showUnavailableOptions"
               class="ac-seg-btn"
-              :class="{ active: backdropMode === 'overlay' }"
-              @click="emit('update:backdropMode', 'overlay')"
+              :class="{ active: backdropMode === 'overlay', unavailable: !canSwitchOverlay }"
+              @click="handleOverlayModeClick"
             >
               {{ messages.bar.modeOverlay }}
             </button>
@@ -301,13 +359,10 @@ onBeforeUnmount(() => {
               {{ messages.bar.modeImage }}
             </button>
             <button
-              v-if="canScreenCapture"
+              v-if="canScreenCapture || showUnavailableOptions"
               class="ac-seg-btn"
-              :class="{ active: backdropMode === 'screen' }"
-              @click="
-                emit('update:backdropMode', 'screen');
-                if (!hasScreenStream) emit('start-screen-capture');
-              "
+              :class="{ active: backdropMode === 'screen', unavailable: !canScreenCapture }"
+              @click="handleScreenModeClick"
             >
               {{ messages.bar.modeScreen }}
             </button>
@@ -343,40 +398,55 @@ onBeforeUnmount(() => {
 
           <span class="ac-sep" aria-hidden="true" />
 
-          <!-- Category 2: Interaction & Dock -->
+          <!-- Category 2: Interaction, Dock & Canvas Toggles -->
           <button
             class="ac-btn"
             :class="{ active: calibrating }"
+            :title="messages.bar.adjustTitle"
             @click="emit('update:calibrating', !calibrating)"
           >
-            {{ calibrating ? messages.bar.toDraw : messages.bar.toAlign }}
+            {{ messages.bar.adjust }}
           </button>
 
           <button
             class="ac-btn ac-gap-left"
             :class="{ active: dockVisible }"
+            :title="messages.bar.toolsTitle"
             @click="emit('update:dockVisible', !dockVisible)"
           >
-            {{ dockVisible ? messages.bar.hideTools : messages.bar.showTools }}
+            {{ messages.bar.tools }}
           </button>
+        </div>
+      </div>
 
-          <div
-            v-if="canNativeOverlay"
-            class="ac-anim-slot"
-            :class="{ closed: backdropMode !== 'overlay' }"
-            :inert="backdropMode !== 'overlay'"
+      <!-- Keep Canvas & Click-Through buttons visible even when the toolbar is collapsed -->
+      <button
+        class="ac-btn ac-gap-left"
+        :class="{ active: canvasVisible }"
+        :title="messages.bar.canvasTitle"
+        @click="emit('update:canvasVisible', !canvasVisible)"
+      >
+        {{ messages.bar.canvas }}
+      </button>
+
+      <div
+        v-if="canNativeOverlay || showUnavailableOptions"
+        class="ac-anim-slot"
+        :class="{ closed: !showClickThroughSlot }"
+        :inert="!showClickThroughSlot"
+      >
+        <div class="ac-anim-inner ac-gap-left">
+          <button
+            class="ac-btn"
+            :class="{
+              danger: clickThroughAvailable && clickThrough,
+              unavailable: !clickThroughAvailable,
+            }"
+            :title="passthroughTooltip"
+            @click="handleClickThroughBtn"
           >
-            <div class="ac-anim-inner ac-gap-left">
-              <button
-                class="ac-btn"
-                :class="{ danger: clickThrough }"
-                :title="passthroughTooltip"
-                @click="emit('update:clickThrough', !clickThrough)"
-              >
-                {{ clickThrough ? messages.bar.passthroughOn : messages.bar.passthroughOff }}
-              </button>
-            </div>
-          </div>
+            {{ clickThroughAvailable && clickThrough ? messages.bar.passthroughOn : messages.bar.passthroughOff }}
+          </button>
         </div>
       </div>
     </div>
@@ -496,11 +566,11 @@ onBeforeUnmount(() => {
 
         <div v-else-if="openMenu === 'blend'" class="ac-popover-row">
           <button
-            v-for="opt in blendOptions"
+            v-for="opt in visibleBlendOptions"
             :key="opt.value"
             class="ac-btn"
-            :class="{ active: blendMode === opt.value }"
-            @click="selectBlend(opt.value)"
+            :class="{ active: !opt.unavailable && blendMode === opt.value, unavailable: opt.unavailable }"
+            @click="selectBlend(opt)"
           >
             {{ opt.label }}
           </button>
@@ -645,6 +715,11 @@ onBeforeUnmount(() => {
   background: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
   font-weight: 600;
+}
+
+.ac-seg-btn.unavailable {
+  opacity: 0.45;
+  cursor: help;
 }
 
 .ac-popover-row {
