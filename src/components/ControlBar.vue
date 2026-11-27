@@ -14,7 +14,8 @@ export type UnavailableReasonKey =
   | 'screenUnsupported'
   | 'clickThroughUnavailable'
   | 'androidShotUnavailable'
-  | 'dynamicColorUnavailable';
+  | 'dynamicColorUnavailable'
+  | 'penpaCloneUnsupported';
 
 const props = defineProps<{
   platform: RuntimePlatform;

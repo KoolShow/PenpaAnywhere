@@ -120,6 +120,62 @@
     return origWinAddEventListener(type, listener, options);
   };
 
+  function getUnsupportedTitle() {
+    var lang = '';
+    try {
+      lang = (typeof UserSettings !== 'undefined' && UserSettings.app_language) || cookieStore.app_language || '';
+    } catch (_) {}
+    if (lang === 'EN') return 'Not supported yet';
+    if (lang === 'JP') return '現在サポートされていません';
+    return '暂不支持';
+  }
+
+  function notifyCloneUnsupported() {
+    try {
+      if (
+        window.parent &&
+        window.parent !== window &&
+        typeof window.parent.__PENPAANYWHERE_ON_UNAVAILABLE__ === 'function'
+      ) {
+        window.parent.__PENPAANYWHERE_ON_UNAVAILABLE__('penpaCloneUnsupported');
+      }
+    } catch (_) {}
+  }
+
+  function disableDuplicateControl() {
+    var btn = document.getElementById('duplicate');
+    if (btn) {
+      btn.removeAttribute('onclick');
+      btn.setAttribute('aria-disabled', 'true');
+      btn.classList.add('ac-penpa-disabled');
+      btn.title = getUnsupportedTitle();
+      if (!btn.__acCloneDisabledBound) {
+        btn.__acCloneDisabledBound = true;
+        btn.addEventListener(
+          'click',
+          function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            notifyCloneUnsupported();
+          },
+          true
+        );
+      }
+    }
+    if (typeof window.duplicate === 'function' && !window.duplicate.__acPatched) {
+      var origDup = window.duplicate;
+      var wrappedDup = function (inPlace) {
+        if (inPlace) {
+          return origDup.apply(this, arguments);
+        }
+        notifyCloneUnsupported();
+      };
+      wrappedDup.__acPatched = true;
+      window.duplicate = wrappedDup;
+    }
+  }
+
   var frameVersion = 1;
   var listeners = new Set();
   var patchedProtos = new WeakSet();
@@ -210,6 +266,7 @@
   });
 
   function tryPatchPuzzleProto() {
+    disableDuplicateControl();
     if (typeof window.Puzzle === 'function' && window.Puzzle.prototype) {
       if (!patchedProtos.has(window.Puzzle.prototype)) {
         patchedProtos.add(window.Puzzle.prototype);
@@ -647,6 +704,7 @@
       try {
         if (typeof UserSettings !== 'undefined') {
           UserSettings.app_language = lang;
+          disableDuplicateControl();
           return;
         }
       } catch (_) {}
@@ -657,6 +715,7 @@
           opt.dispatchEvent(new Event('change', { bubbles: true }));
         }
       } catch (_) {}
+      disableDuplicateControl();
     },
     subscribe: function (fn) {
       listeners.add(fn);

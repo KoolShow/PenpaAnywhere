@@ -322,6 +322,8 @@ const unavailableDialogInfo = computed<{ title: string; body: string } | null>((
       return { title: u.androidShotUnavailableTitle, body: u.androidShotUnavailableBody };
     case 'dynamicColorUnavailable':
       return { title: u.dynamicColorUnavailableTitle, body: u.dynamicColorUnavailableBody };
+    case 'penpaCloneUnsupported':
+      return { title: u.penpaCloneUnsupportedTitle, body: u.penpaCloneUnsupportedBody };
   }
 });
 
@@ -680,6 +682,11 @@ onMounted(async () => {
   };
   window.__PENPAANYWHERE_ON_SCREENSHOT_STATUS__ = (status: AndroidScreenshotCompositeStatus) => {
     androidScreenshotStatus.value = status;
+  };
+  window.__PENPAANYWHERE_ON_UNAVAILABLE__ = (key: string) => {
+    if (key === 'penpaCloneUnsupported') {
+      handleUnavailableClick(key);
+    }
   };
 
   // Listen to Tauri global shortcut event even when window is click-through

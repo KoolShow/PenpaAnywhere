@@ -144,6 +144,8 @@ const MESSAGES = {
       androidShotUnavailableBody: '该兼容选项仅用于解决部分 Android 系统截屏不包含悬浮窗的问题；桌面端、Web 端与普通图片模式无需此项。',
       dynamicColorUnavailableTitle: '系统动态配色在 Web 浏览器中不可用',
       dynamicColorUnavailableBody: 'Web 浏览器出于隐私与防指纹保护无法读取操作系统强调色。你可以直接使用下方的色环自定义主题色相。',
+      penpaCloneUnsupportedTitle: '复制功能暂不支持',
+      penpaCloneUnsupportedBody: '暂不支持。',
     },
     screenshotPrompt: {
       ariaLabel: '截图合成提示',
@@ -288,6 +290,8 @@ const MESSAGES = {
       androidShotUnavailableBody: 'This compatibility option only addresses Android ROMs whose system screenshots omit floating overlays. Desktop, Web, and Image Activity modes do not need it.',
       dynamicColorUnavailableTitle: 'System Dynamic Color is unavailable on Web',
       dynamicColorUnavailableBody: 'Browsers restrict reading custom OS accent colors for anti-fingerprinting. Use the Hue ring below to pick any theme color directly.',
+      penpaCloneUnsupportedTitle: 'Clone is currently unsupported',
+      penpaCloneUnsupportedBody: 'Not supported yet.',
     },
     screenshotPrompt: {
       ariaLabel: 'Screenshot Composite Prompt',
@@ -432,6 +436,8 @@ const MESSAGES = {
       androidShotUnavailableBody: '一部 Android 端末でシステムスクショにオーバーレイが写らない問題への互換機能です。PC・Web・画像モードでは不要です。',
       dynamicColorUnavailableTitle: 'Web ブラウザでは OS ダイナミックカラーを利用できません',
       dynamicColorUnavailableBody: 'ブラウザのプライバシー保護により OS アクセントカラーを読み取れません。下の色相環から好きなテーマ色を選択してください。',
+      penpaCloneUnsupportedTitle: '複製機能は現在未対応です',
+      penpaCloneUnsupportedBody: '現在サポートされていません。',
     },
     screenshotPrompt: {
       ariaLabel: 'スクショ合成の確認',

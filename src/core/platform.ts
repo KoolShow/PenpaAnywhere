@@ -48,6 +48,7 @@ declare global {
     __PENPAANYWHERE_CAPTURE_OVERLAY__?: () => { active: boolean; dataUrl: string };
     __PENPAANYWHERE_ON_SCREENSHOT_PROMPT__?: (fileName: string) => void;
     __PENPAANYWHERE_ON_SCREENSHOT_STATUS__?: (status: AndroidScreenshotCompositeStatus) => void;
+    __PENPAANYWHERE_ON_UNAVAILABLE__?: (key: string) => void;
   }
 }
 

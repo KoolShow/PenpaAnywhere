@@ -50,11 +50,11 @@ body {
   padding-bottom: 4px !important;
 }
 
-/* Ensure modals and float-key fit inside the floating tool window */
-.modal {
-  z-index: 9999 !important;
-}
-
-#float-key {
-  z-index: 5000 !important;
+/* Clone (#duplicate) button is disabled in PenpaAnywhere (not supported yet) */
+#duplicate.ac-penpa-disabled,
+#duplicate.ac-penpa-disabled:hover,
+#duplicate.ac-penpa-disabled:active {
+  opacity: 0.42 !important;
+  border-style: dashed !important;
+  cursor: not-allowed !important;
 }
