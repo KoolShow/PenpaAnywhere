@@ -267,7 +267,7 @@ class OverlayService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         overlayContext = createOverlayUiContext()
-        val bundleJson = Md3DynamicColorProvider.exportDualTokensJson(overlayContext)
+        val bundleJson = Md3DynamicColorProvider.exportDualTokensJson(overlayContext, newConfig)
         mainHandler.post {
             webView?.evaluateJavascript(
                 "window.__PENPAANYWHERE_APPLY_ANDROID_THEME_BUNDLE__ && window.__PENPAANYWHERE_APPLY_ANDROID_THEME_BUNDLE__($bundleJson);",

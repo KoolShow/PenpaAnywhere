@@ -78,11 +78,14 @@ export function supportsOsDynamicColor(platform: RuntimePlatform): boolean {
   return platform === 'tauri' || platform === 'android-overlay' || platform === 'android-app';
 }
 
-export async function setOsWindowTheme(dark: boolean): Promise<void> {
+export async function setOsWindowTheme(
+  mode: 'auto' | 'dark' | 'light',
+  dark: boolean,
+): Promise<void> {
   if (detectPlatform() !== 'tauri') return;
   try {
     const { invoke } = await import('@tauri-apps/api/core');
-    await invoke('set_window_theme', { dark });
+    await invoke('set_window_theme', { mode, dark });
   } catch {
     // non-fatal
   }

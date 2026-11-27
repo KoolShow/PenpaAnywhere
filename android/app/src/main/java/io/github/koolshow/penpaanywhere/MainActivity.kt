@@ -128,12 +128,16 @@ class MainActivity : AppCompatActivity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        val bundleJson = Md3DynamicColorProvider.exportDualTokensJson(this)
-        inAppWebView?.post {
-            inAppWebView?.evaluateJavascript(
-                "window.__PENPAANYWHERE_APPLY_ANDROID_THEME_BUNDLE__ && window.__PENPAANYWHERE_APPLY_ANDROID_THEME_BUNDLE__($bundleJson);",
-                null,
-            )
+        val bundleJson = Md3DynamicColorProvider.exportDualTokensJson(this, newConfig)
+        if (inAppWebView != null) {
+            inAppWebView?.post {
+                inAppWebView?.evaluateJavascript(
+                    "window.__PENPAANYWHERE_APPLY_ANDROID_THEME_BUNDLE__ && window.__PENPAANYWHERE_APPLY_ANDROID_THEME_BUNDLE__($bundleJson);",
+                    null,
+                )
+            }
+        } else {
+            showLauncherUi()
         }
     }
 

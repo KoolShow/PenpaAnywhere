@@ -24,8 +24,9 @@ object Md3DynamicColorProvider {
 
     fun isDynamicColorActive(): Boolean = DynamicColors.isDynamicColorAvailable()
 
-    fun isSystemDarkMode(context: Context): Boolean {
-        val mask = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+    fun isSystemDarkMode(context: Context, configOverride: Configuration? = null): Boolean {
+        val cfg = configOverride ?: context.resources.configuration
+        val mask = cfg.uiMode and Configuration.UI_MODE_NIGHT_MASK
         return mask == Configuration.UI_MODE_NIGHT_YES
     }
 
@@ -120,13 +121,13 @@ object Md3DynamicColorProvider {
         return buildTokensObject(ctx, light = false).toString()
     }
 
-    fun exportDualTokensJson(context: Context): String {
+    fun exportDualTokensJson(context: Context, configOverride: Configuration? = null): String {
         val darkCtx = wrapWithDynamicTheme(context, light = false)
         val lightCtx = wrapWithDynamicTheme(context, light = true)
         val root = JSONObject()
         root.put("dark", buildTokensObject(darkCtx, light = false))
         root.put("light", buildTokensObject(lightCtx, light = true))
-        root.put("systemDark", isSystemDarkMode(context))
+        root.put("systemDark", isSystemDarkMode(context, configOverride))
         root.put("available", isDynamicColorActive())
         return root.toString()
     }

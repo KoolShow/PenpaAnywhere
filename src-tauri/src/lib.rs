@@ -18,31 +18,11 @@ struct Point2D {
     y: f64,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-struct HotkeyConfig {
-    ctrl: bool,
-    shift: bool,
-    alt: bool,
-    meta: bool,
-    code: String,
-}
-
-impl Default for HotkeyConfig {
-    fn default() -> Self {
-        Self {
-            ctrl: true,
-            shift: true,
-            alt: false,
-            meta: false,
-            code: "KeyT".to_string(),
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 struct HitState {
     is_overlay_mode: bool,
     always_on_top: bool,
+    window_theme_mode: String,
     window_is_dark: bool,
     auto_passthrough: bool,
     force_click_through: bool,
@@ -53,7 +33,6 @@ struct HitState {
     ui_rects: Vec<HitRect>,
     quads: Vec<Vec<Point2D>>,
     last_ignore: Option<bool>,
-    toggle_hotkey: Option<HotkeyConfig>,
     saved_normal_bounds: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
 }
 
@@ -160,13 +139,30 @@ fn set_always_on_top(
         .map_err(|e| e.to_string())
 }
 
+fn apply_window_theme(window: &WebviewWindow, mode: &str, dark: bool, is_overlay: bool) {
+    let target = match mode {
+        "dark" => Some(Theme::Dark),
+        "light" => Some(Theme::Light),
+        _ => None,
+    };
+    let _ = window.set_theme(target);
+    if !is_overlay {
+        let bg = if dark {
+            Color(17, 19, 24, 255)
+        } else {
+            Color(248, 249, 252, 255)
+        };
+        let _ = window.set_background_color(Some(bg));
+    }
+}
+
 #[tauri::command]
 fn set_overlay_window_mode(
     window: WebviewWindow,
     state: State<'_, AppOverlayState>,
     overlay: bool,
 ) -> Result<(), String> {
-    let (was_overlay, saved_bounds, is_dark, always_on_top) = {
+    let (was_overlay, saved_bounds, theme_mode, is_dark, always_on_top) = {
         let mut guard = state
             .0
             .lock()
@@ -180,7 +176,13 @@ fn set_overlay_window_mode(
         } else {
             guard.last_ignore = None;
         }
-        (prev, guard.saved_normal_bounds, guard.window_is_dark, guard.always_on_top)
+        (
+            prev,
+            guard.saved_normal_bounds,
+            guard.window_theme_mode.clone(),
+            guard.window_is_dark,
+            guard.always_on_top,
+        )
     };
 
     if !overlay {
@@ -188,13 +190,7 @@ fn set_overlay_window_mode(
         window
             .set_always_on_top(always_on_top)
             .map_err(|e| e.to_string())?;
-        let bg = if is_dark {
-            Color(17, 19, 24, 255)
-        } else {
-            Color(248, 249, 252, 255)
-        };
-        let _ = window.set_background_color(Some(bg));
-        let _ = window.set_theme(Some(if is_dark { Theme::Dark } else { Theme::Light }));
+        apply_window_theme(&window, &theme_mode, is_dark, false);
         let _ = window.set_decorations(true);
         let _ = window.set_resizable(true);
         let _ = window.set_maximizable(true);
@@ -287,37 +283,24 @@ fn set_drag_active(state: State<'_, AppOverlayState>, active: bool) -> Result<()
 }
 
 #[tauri::command]
-fn set_toggle_hotkey(
-    state: State<'_, AppOverlayState>,
-    hotkey: Option<HotkeyConfig>,
-) -> Result<(), String> {
-    if let Ok(mut guard) = state.0.lock() {
-        guard.toggle_hotkey = hotkey.filter(|h| !h.code.is_empty());
-    }
-    Ok(())
-}
-
-#[tauri::command]
 fn set_window_theme(
     window: WebviewWindow,
     state: State<'_, AppOverlayState>,
+    mode: String,
     dark: bool,
 ) -> Result<(), String> {
+    let normalized = match mode.as_str() {
+        "dark" | "light" => mode,
+        _ => "auto".to_string(),
+    };
     let is_overlay = if let Ok(mut guard) = state.0.lock() {
+        guard.window_theme_mode = normalized.clone();
         guard.window_is_dark = dark;
         guard.is_overlay_mode
     } else {
         true
     };
-    let _ = window.set_theme(Some(if dark { Theme::Dark } else { Theme::Light }));
-    if !is_overlay {
-        let bg = if dark {
-            Color(17, 19, 24, 255)
-        } else {
-            Color(248, 249, 252, 255)
-        };
-        let _ = window.set_background_color(Some(bg));
-    }
+    apply_window_theme(&window, &normalized, dark, is_overlay);
     Ok(())
 }
 
@@ -505,6 +488,123 @@ fn read_macos_accent_hex() -> Option<String> {
     }
 }
 
+#[cfg(windows)]
+fn read_windows_apps_dark() -> Option<bool> {
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
+    };
+
+    let subkey: Vec<u16> =
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize\0"
+            .encode_utf16()
+            .collect();
+    let val_name: Vec<u16> = "AppsUseLightTheme\0".encode_utf16().collect();
+    let mut raw: u32 = 0;
+    let mut size: u32 = std::mem::size_of::<u32>() as u32;
+
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            val_name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut raw as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    if status == 0 {
+        return Some(raw == 0);
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_apps_dark() -> Option<bool> {
+    use std::ffi::{c_char, c_void, CStr};
+
+    type CFTypeRef = *const c_void;
+    type CFStringRef = *const c_void;
+    type CFAllocatorRef = *const c_void;
+    type CFTypeID = usize;
+
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFPreferencesAnyApplication: CFStringRef;
+        fn CFStringCreateWithCString(
+            alloc: CFAllocatorRef,
+            c_str: *const c_char,
+            encoding: u32,
+        ) -> CFStringRef;
+        fn CFPreferencesAppSynchronize(application_id: CFStringRef) -> bool;
+        fn CFPreferencesCopyAppValue(key: CFStringRef, application_id: CFStringRef) -> CFTypeRef;
+        fn CFGetTypeID(cf: CFTypeRef) -> CFTypeID;
+        fn CFStringGetTypeID() -> CFTypeID;
+        fn CFStringGetCString(
+            the_string: CFStringRef,
+            buffer: *mut c_char,
+            buffer_size: isize,
+            encoding: u32,
+        ) -> bool;
+        fn CFRelease(cf: CFTypeRef);
+    }
+
+    unsafe {
+        let key_cstr = b"AppleInterfaceStyle\0";
+        let key = CFStringCreateWithCString(
+            std::ptr::null(),
+            key_cstr.as_ptr().cast(),
+            K_CF_STRING_ENCODING_UTF8,
+        );
+        if key.is_null() {
+            return None;
+        }
+        let _ = CFPreferencesAppSynchronize(kCFPreferencesAnyApplication);
+        let val = CFPreferencesCopyAppValue(key, kCFPreferencesAnyApplication);
+        CFRelease(key);
+        if val.is_null() {
+            // macOS omits AppleInterfaceStyle when in Light mode
+            return Some(false);
+        }
+        let mut is_dark = false;
+        if CFGetTypeID(val) == CFStringGetTypeID() {
+            let mut buf = [0u8; 32];
+            if CFStringGetCString(
+                val,
+                buf.as_mut_ptr().cast(),
+                buf.len() as isize,
+                K_CF_STRING_ENCODING_UTF8,
+            ) {
+                if let Ok(s) = CStr::from_ptr(buf.as_ptr().cast()).to_str() {
+                    is_dark = s.trim().eq_ignore_ascii_case("Dark");
+                }
+            }
+        }
+        CFRelease(val);
+        Some(is_dark)
+    }
+}
+
+#[tauri::command]
+fn get_system_theme(window: WebviewWindow) -> String {
+    #[cfg(windows)]
+    let is_dark = read_windows_apps_dark()
+        .unwrap_or_else(|| matches!(window.theme(), Ok(Theme::Dark)));
+    #[cfg(target_os = "macos")]
+    let is_dark = read_macos_apps_dark()
+        .unwrap_or_else(|| matches!(window.theme(), Ok(Theme::Dark)));
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let is_dark = matches!(window.theme(), Ok(Theme::Dark));
+
+    if is_dark {
+        "dark".to_string()
+    } else {
+        "light".to_string()
+    }
+}
+
 #[tauri::command]
 fn get_system_accent_color() -> Option<String> {
     #[cfg(windows)]
@@ -555,56 +655,137 @@ fn fit_normal_window_to_monitor(window: &WebviewWindow) {
 }
 
 #[cfg(windows)]
-fn code_to_windows_vk(code: &str) -> Option<i32> {
-    if let Some(rest) = code.strip_prefix("Key") {
-        let bytes = rest.as_bytes();
-        if bytes.len() == 1 && bytes[0].is_ascii_uppercase() {
-            return Some(bytes[0] as i32);
-        }
-    }
-    if let Some(rest) = code.strip_prefix("Digit") {
-        let bytes = rest.as_bytes();
-        if bytes.len() == 1 && bytes[0].is_ascii_digit() {
-            return Some(bytes[0] as i32);
-        }
-    }
-    if let Some(rest) = code.strip_prefix("Numpad") {
-        let bytes = rest.as_bytes();
-        if bytes.len() == 1 && bytes[0].is_ascii_digit() {
-            return Some(0x60 + (bytes[0] - b'0') as i32);
-        }
-    }
-    if let Some(rest) = code.strip_prefix('F') {
-        if let Ok(n) = rest.parse::<i32>() {
-            if (1..=12).contains(&n) {
-                return Some(0x6F + n);
+fn spawn_windows_theme_watchers(window: WebviewWindow, state: Arc<Mutex<HitState>>) {
+    use std::thread;
+    use std::time::Duration;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_NOTIFY,
+        REG_NOTIFY_CHANGE_LAST_SET,
+    };
+
+    // 1. Zero-polling watcher for Windows DWM AccentColor changes
+    let win_accent = window.clone();
+    thread::spawn(move || {
+        let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\DWM\0"
+            .encode_utf16()
+            .collect();
+        let mut prev_accent = read_windows_accent_hex();
+        loop {
+            let mut hkey: HKEY = std::ptr::null_mut();
+            let open_status = unsafe {
+                RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    subkey.as_ptr(),
+                    0,
+                    KEY_NOTIFY,
+                    &mut hkey,
+                )
+            };
+            if open_status != 0 || hkey.is_null() {
+                thread::sleep(Duration::from_secs(5));
+                continue;
             }
+            loop {
+                // Blocks in kernel until a value under HKCU\Software\Microsoft\Windows\DWM changes (0% CPU)
+                let status = unsafe {
+                    RegNotifyChangeKeyValue(
+                        hkey,
+                        0,
+                        REG_NOTIFY_CHANGE_LAST_SET,
+                        std::ptr::null_mut(),
+                        0,
+                    )
+                };
+                if status != 0 {
+                    break;
+                }
+                let current = read_windows_accent_hex();
+                if current != prev_accent {
+                    prev_accent = current.clone();
+                    let _ = win_accent.emit("system-accent-changed", current);
+                }
+            }
+            unsafe {
+                RegCloseKey(hkey);
+            }
+            thread::sleep(Duration::from_secs(1));
         }
-    }
-    match code {
-        "Backquote" => Some(0xC0),
-        "Minus" => Some(0xBD),
-        "Equal" => Some(0xBB),
-        "BracketLeft" => Some(0xDB),
-        "BracketRight" => Some(0xDD),
-        "Backslash" => Some(0xDC),
-        "Semicolon" => Some(0xBA),
-        "Quote" => Some(0xDE),
-        "Comma" => Some(0xBC),
-        "Period" => Some(0xBE),
-        "Slash" => Some(0xBF),
-        "Space" => Some(0x20),
-        "Tab" => Some(0x09),
-        "Insert" => Some(0x2D),
-        "Delete" => Some(0x2E),
-        "Home" => Some(0x24),
-        "End" => Some(0x23),
-        "PageUp" => Some(0x21),
-        "PageDown" => Some(0x22),
-        "Pause" => Some(0x13),
-        "ScrollLock" => Some(0x91),
-        _ => None,
-    }
+    });
+
+    // 2. Zero-polling watcher for Windows AppsUseLightTheme (Auto Dark/Light mode)
+    let win_theme = window;
+    thread::spawn(move || {
+        let subkey: Vec<u16> =
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize\0"
+                .encode_utf16()
+                .collect();
+        let mut prev_dark = read_windows_apps_dark();
+        loop {
+            let mut hkey: HKEY = std::ptr::null_mut();
+            let open_status = unsafe {
+                RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    subkey.as_ptr(),
+                    0,
+                    KEY_NOTIFY,
+                    &mut hkey,
+                )
+            };
+            if open_status != 0 || hkey.is_null() {
+                thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+            loop {
+                // Blocks in kernel until a value under Themes\Personalize changes (0% CPU)
+                let status = unsafe {
+                    RegNotifyChangeKeyValue(
+                        hkey,
+                        0,
+                        REG_NOTIFY_CHANGE_LAST_SET,
+                        std::ptr::null_mut(),
+                        0,
+                    )
+                };
+                if status != 0 {
+                    break;
+                }
+                let current = read_windows_apps_dark();
+                if current != prev_dark {
+                    prev_dark = current;
+                    if let Some(is_dark) = current {
+                        let (is_auto, is_overlay) = if let Ok(mut guard) = state.lock() {
+                            let auto_mode = guard.window_theme_mode == "auto";
+                            if auto_mode {
+                                guard.window_is_dark = is_dark;
+                            }
+                            (auto_mode, guard.is_overlay_mode)
+                        } else {
+                            (true, true)
+                        };
+                        if is_auto && !is_overlay {
+                            let w = win_theme.clone();
+                            let _ = win_theme.run_on_main_thread(move || {
+                                let bg = if is_dark {
+                                    Color(17, 19, 24, 255)
+                                } else {
+                                    Color(248, 249, 252, 255)
+                                };
+                                let _ = w.set_background_color(Some(bg));
+                            });
+                        }
+                        let _ = win_theme.emit(
+                            "system-theme-changed",
+                            if is_dark { "dark" } else { "light" },
+                        );
+                    }
+                }
+            }
+            unsafe {
+                RegCloseKey(hkey);
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
 }
 
 #[cfg(windows)]
@@ -613,32 +794,16 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
     use std::time::Duration;
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_CONTROL, VK_LBUTTON, VK_LWIN, VK_MBUTTON, VK_MENU, VK_RBUTTON,
-        VK_RWIN, VK_SHIFT,
+        GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
     thread::spawn(move || {
-        let mut prev_hotkey_down = false;
-        let mut prev_accent = read_windows_accent_hex();
-        let mut accent_tick: u32 = 0;
         let mut last_emitted_cursor: (f64, f64) = (-10000.0, -10000.0);
         loop {
             thread::sleep(Duration::from_millis(12));
 
-            // Poll Windows system accent color every ~2s so theme changes apply live
-            accent_tick = accent_tick.wrapping_add(1);
-            if accent_tick % 160 == 0 {
-                let current = read_windows_accent_hex();
-                if current != prev_accent {
-                    prev_accent = current.clone();
-                    if let Some(hex) = current {
-                        let _ = window.emit("system-accent-changed", hex);
-                    }
-                }
-            }
-
-            let (initialized, auto_enabled, force_ct, drag_active, bar_rect, dock_rect, ui_rects, quads, last_ignore, toggle_hotkey) = {
+            let (initialized, auto_enabled, force_ct, drag_active, bar_rect, dock_rect, ui_rects, quads, last_ignore) = {
                 let Ok(guard) = state.lock() else {
                     continue;
                 };
@@ -652,45 +817,8 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
                     guard.ui_rects.clone(),
                     guard.quads.clone(),
                     guard.last_ignore,
-                    guard.toggle_hotkey.clone(),
                 )
             };
-
-            let hotkey_down = if let Some(ref hk) = toggle_hotkey {
-                if let Some(vk) = code_to_windows_vk(&hk.code) {
-                    unsafe {
-                        let key_down = (GetAsyncKeyState(vk) as u16 & 0x8000) != 0;
-                        let ctrl_down = (GetAsyncKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0;
-                        let shift_down = (GetAsyncKeyState(VK_SHIFT as i32) as u16 & 0x8000) != 0;
-                        let alt_down = (GetAsyncKeyState(VK_MENU as i32) as u16 & 0x8000) != 0;
-                        let meta_down = (GetAsyncKeyState(VK_LWIN as i32) as u16 & 0x8000) != 0
-                            || (GetAsyncKeyState(VK_RWIN as i32) as u16 & 0x8000) != 0;
-                        key_down
-                            && ctrl_down == hk.ctrl
-                            && shift_down == hk.shift
-                            && alt_down == hk.alt
-                            && meta_down == hk.meta
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if hotkey_down && !prev_hotkey_down && auto_enabled {
-                let next_force = if let Ok(mut guard) = state.lock() {
-                    guard.force_click_through = !guard.force_click_through;
-                    guard.last_ignore = None;
-                    Some(guard.force_click_through)
-                } else {
-                    None
-                };
-                if let Some(val) = next_force {
-                    let _ = window.emit("click-through-toggled", val);
-                }
-            }
-            prev_hotkey_down = hotkey_down;
 
             if !auto_enabled || !initialized {
                 continue;
@@ -757,86 +885,177 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
 }
 
 #[cfg(target_os = "macos")]
-fn code_to_macos_keycode(code: &str) -> Option<u16> {
-    match code {
-        "KeyA" => Some(0),
-        "KeyS" => Some(1),
-        "KeyD" => Some(2),
-        "KeyF" => Some(3),
-        "KeyH" => Some(4),
-        "KeyG" => Some(5),
-        "KeyZ" => Some(6),
-        "KeyX" => Some(7),
-        "KeyC" => Some(8),
-        "KeyV" => Some(9),
-        "KeyB" => Some(11),
-        "KeyQ" => Some(12),
-        "KeyW" => Some(13),
-        "KeyE" => Some(14),
-        "KeyR" => Some(15),
-        "KeyY" => Some(16),
-        "KeyT" => Some(17),
-        "Digit1" => Some(18),
-        "Digit2" => Some(19),
-        "Digit3" => Some(20),
-        "Digit4" => Some(21),
-        "Digit6" => Some(22),
-        "Digit5" => Some(23),
-        "Equal" => Some(24),
-        "Digit9" => Some(25),
-        "Digit7" => Some(26),
-        "Minus" => Some(27),
-        "Digit8" => Some(28),
-        "Digit0" => Some(29),
-        "BracketRight" => Some(30),
-        "KeyO" => Some(31),
-        "KeyU" => Some(32),
-        "BracketLeft" => Some(33),
-        "KeyI" => Some(34),
-        "KeyP" => Some(35),
-        "KeyL" => Some(37),
-        "KeyJ" => Some(38),
-        "Quote" => Some(39),
-        "KeyK" => Some(40),
-        "Semicolon" => Some(41),
-        "Backslash" => Some(42),
-        "Comma" => Some(43),
-        "Slash" => Some(44),
-        "KeyN" => Some(45),
-        "KeyM" => Some(46),
-        "Period" => Some(47),
-        "Tab" => Some(48),
-        "Space" => Some(49),
-        "Backquote" => Some(50),
-        "Delete" => Some(117),
-        "Home" => Some(115),
-        "End" => Some(119),
-        "PageUp" => Some(116),
-        "PageDown" => Some(121),
-        "F1" => Some(122),
-        "F2" => Some(120),
-        "F3" => Some(99),
-        "F4" => Some(118),
-        "F5" => Some(96),
-        "F6" => Some(97),
-        "F7" => Some(98),
-        "F8" => Some(100),
-        "F9" => Some(101),
-        "F10" => Some(109),
-        "F11" => Some(103),
-        "F12" => Some(111),
-        "Numpad0" => Some(82),
-        "Numpad1" => Some(83),
-        "Numpad2" => Some(84),
-        "Numpad3" => Some(85),
-        "Numpad4" => Some(86),
-        "Numpad5" => Some(87),
-        "Numpad6" => Some(88),
-        "Numpad7" => Some(89),
-        "Numpad8" => Some(91),
-        "Numpad9" => Some(92),
-        _ => None,
+fn spawn_macos_theme_watcher(window: WebviewWindow, state: Arc<Mutex<HitState>>) {
+    use std::ffi::{c_char, c_void};
+    use std::thread;
+
+    type CFNotificationCenterRef = *const c_void;
+    type CFStringRef = *const c_void;
+    type CFDictionaryRef = *const c_void;
+    type CFAllocatorRef = *const c_void;
+    type CFNotificationCallback = extern "C" fn(
+        center: CFNotificationCenterRef,
+        observer: *mut c_void,
+        name: CFStringRef,
+        object: *const c_void,
+        user_info: CFDictionaryRef,
+    );
+
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    const K_CF_NOTIFICATION_SUSPENSION_BEHAVIOR_DELIVER_IMMEDIATELY: isize = 4;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFNotificationCenterGetDistributedCenter() -> CFNotificationCenterRef;
+        fn CFNotificationCenterAddObserver(
+            center: CFNotificationCenterRef,
+            observer: *const c_void,
+            callback: CFNotificationCallback,
+            name: CFStringRef,
+            object: *const c_void,
+            suspension_behavior: isize,
+        );
+        fn CFStringCreateWithCString(
+            alloc: CFAllocatorRef,
+            c_str: *const c_char,
+            encoding: u32,
+        ) -> CFStringRef;
+        fn CFRelease(cf: *const c_void);
+        fn CFRunLoopRun();
     }
+
+    struct MacThemeObserverCtx {
+        window: WebviewWindow,
+        state: Arc<Mutex<HitState>>,
+        last_accent: Mutex<Option<String>>,
+        last_dark: Mutex<Option<bool>>,
+    }
+
+    extern "C" fn on_accent_changed(
+        _center: CFNotificationCenterRef,
+        observer: *mut c_void,
+        _name: CFStringRef,
+        _object: *const c_void,
+        _user_info: CFDictionaryRef,
+    ) {
+        if observer.is_null() {
+            return;
+        }
+        let ctx = unsafe { &*(observer as *const MacThemeObserverCtx) };
+        let current = read_macos_accent_hex();
+        let changed = if let Ok(mut prev) = ctx.last_accent.lock() {
+            if *prev != current {
+                *prev = current.clone();
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if changed {
+            let _ = ctx.window.emit("system-accent-changed", current);
+        }
+    }
+
+    extern "C" fn on_interface_theme_changed(
+        _center: CFNotificationCenterRef,
+        observer: *mut c_void,
+        _name: CFStringRef,
+        _object: *const c_void,
+        _user_info: CFDictionaryRef,
+    ) {
+        if observer.is_null() {
+            return;
+        }
+        let ctx = unsafe { &*(observer as *const MacThemeObserverCtx) };
+        let current = read_macos_apps_dark();
+        let changed = if let Ok(mut prev) = ctx.last_dark.lock() {
+            if *prev != current {
+                *prev = current;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if changed {
+            if let Some(is_dark) = current {
+                let (is_auto, is_overlay) = if let Ok(mut guard) = ctx.state.lock() {
+                    let auto_mode = guard.window_theme_mode == "auto";
+                    if auto_mode {
+                        guard.window_is_dark = is_dark;
+                    }
+                    (auto_mode, guard.is_overlay_mode)
+                } else {
+                    (true, true)
+                };
+                if is_auto && !is_overlay {
+                    let w = ctx.window.clone();
+                    let _ = ctx.window.run_on_main_thread(move || {
+                        let bg = if is_dark {
+                            Color(17, 19, 24, 255)
+                        } else {
+                            Color(248, 249, 252, 255)
+                        };
+                        let _ = w.set_background_color(Some(bg));
+                    });
+                }
+                let _ = ctx
+                    .window
+                    .emit("system-theme-changed", if is_dark { "dark" } else { "light" });
+            }
+        }
+    }
+
+    thread::spawn(move || {
+        let ctx = Box::into_raw(Box::new(MacThemeObserverCtx {
+            window,
+            state,
+            last_accent: Mutex::new(read_macos_accent_hex()),
+            last_dark: Mutex::new(read_macos_apps_dark()),
+        }));
+        unsafe {
+            let center = CFNotificationCenterGetDistributedCenter();
+            if center.is_null() {
+                return;
+            }
+            let accent_name = CFStringCreateWithCString(
+                std::ptr::null(),
+                b"AppleColorPreferencesChangedNotification\0".as_ptr().cast(),
+                K_CF_STRING_ENCODING_UTF8,
+            );
+            if !accent_name.is_null() {
+                CFNotificationCenterAddObserver(
+                    center,
+                    ctx.cast(),
+                    on_accent_changed,
+                    accent_name,
+                    std::ptr::null(),
+                    K_CF_NOTIFICATION_SUSPENSION_BEHAVIOR_DELIVER_IMMEDIATELY,
+                );
+                CFRelease(accent_name);
+            }
+            let theme_name = CFStringCreateWithCString(
+                std::ptr::null(),
+                b"AppleInterfaceThemeChangedNotification\0".as_ptr().cast(),
+                K_CF_STRING_ENCODING_UTF8,
+            );
+            if !theme_name.is_null() {
+                CFNotificationCenterAddObserver(
+                    center,
+                    ctx.cast(),
+                    on_interface_theme_changed,
+                    theme_name,
+                    std::ptr::null(),
+                    K_CF_NOTIFICATION_SUSPENSION_BEHAVIOR_DELIVER_IMMEDIATELY,
+                );
+                CFRelease(theme_name);
+            }
+            CFRunLoopRun();
+        }
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -857,7 +1076,6 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
         fn CGEventCreate(source: *const c_void) -> *const c_void;
         fn CGEventGetLocation(event: *const c_void) -> CGPoint;
         fn CGEventSourceButtonState(state_id: i32, button: u32) -> bool;
-        fn CGEventSourceKeyState(state_id: i32, key: u16) -> bool;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -866,34 +1084,13 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
     }
 
     const K_COMBINED_SESSION_STATE: i32 = 0;
-    const KEY_CMD_L: u16 = 55;
-    const KEY_CMD_R: u16 = 54;
-    const KEY_SHIFT_L: u16 = 56;
-    const KEY_SHIFT_R: u16 = 60;
-    const KEY_OPT_L: u16 = 58;
-    const KEY_OPT_R: u16 = 61;
-    const KEY_CTRL_L: u16 = 59;
-    const KEY_CTRL_R: u16 = 62;
 
     thread::spawn(move || {
-        let mut prev_hotkey_down = false;
-        let mut prev_accent = read_macos_accent_hex();
-        let mut accent_tick: u32 = 0;
         let mut last_emitted_cursor: (f64, f64) = (-10000.0, -10000.0);
         loop {
             thread::sleep(Duration::from_millis(25));
 
-            // Poll macOS system accent color via CoreFoundation every ~2s so theme changes apply live
-            accent_tick = accent_tick.wrapping_add(1);
-            if accent_tick % 80 == 0 {
-                let current = read_macos_accent_hex();
-                if current != prev_accent {
-                    prev_accent = current.clone();
-                    let _ = window.emit("system-accent-changed", current);
-                }
-            }
-
-            let (initialized, auto_enabled, force_ct, bar_rect, dock_rect, ui_rects, quads, last_ignore, toggle_hotkey) = {
+            let (initialized, auto_enabled, force_ct, bar_rect, dock_rect, ui_rects, quads, last_ignore) = {
                 let Ok(guard) = state.lock() else {
                     continue;
                 };
@@ -906,48 +1103,8 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
                     guard.ui_rects.clone(),
                     guard.quads.clone(),
                     guard.last_ignore,
-                    guard.toggle_hotkey.clone(),
                 )
             };
-
-            let hotkey_down = if let Some(ref hk) = toggle_hotkey {
-                if let Some(kc) = code_to_macos_keycode(&hk.code) {
-                    unsafe {
-                        let key_down = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, kc);
-                        let ctrl_down = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_CTRL_L)
-                            || CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_CTRL_R);
-                        let shift_down = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_SHIFT_L)
-                            || CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_SHIFT_R);
-                        let alt_down = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_OPT_L)
-                            || CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_OPT_R);
-                        let meta_down = CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_CMD_L)
-                            || CGEventSourceKeyState(K_COMBINED_SESSION_STATE, KEY_CMD_R);
-                        key_down
-                            && ctrl_down == hk.ctrl
-                            && shift_down == hk.shift
-                            && alt_down == hk.alt
-                            && meta_down == hk.meta
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if hotkey_down && !prev_hotkey_down && auto_enabled {
-                let next_force = if let Ok(mut guard) = state.lock() {
-                    guard.force_click_through = !guard.force_click_through;
-                    guard.last_ignore = None;
-                    Some(guard.force_click_through)
-                } else {
-                    None
-                };
-                if let Some(val) = next_force {
-                    let _ = window.emit("click-through-toggled", val);
-                }
-            }
-            prev_hotkey_down = hotkey_down;
 
             if !auto_enabled || !initialized {
                 continue;
@@ -1017,10 +1174,10 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
 pub fn run() {
     let shared_state = Arc::new(Mutex::new(HitState {
         is_overlay_mode: true,
+        window_theme_mode: "auto".to_string(),
         window_is_dark: true,
         auto_passthrough: true,
         initialized: false,
-        toggle_hotkey: Some(HotkeyConfig::default()),
         ..Default::default()
     }));
 
@@ -1036,8 +1193,8 @@ pub fn run() {
             open_external_url,
             update_hit_regions,
             set_drag_active,
+            get_system_theme,
             get_system_accent_color,
-            set_toggle_hotkey,
             close_app,
             is_debug_build,
             toggle_devtools
@@ -1054,8 +1211,8 @@ pub fn run() {
 
                 let win_for_evt = window.clone();
                 let state_for_evt = Arc::clone(&state_for_setup);
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::ScaleFactorChanged { .. } = event {
+                window.on_window_event(move |event| match event {
+                    tauri::WindowEvent::ScaleFactorChanged { .. } => {
                         let is_overlay = state_for_evt
                             .lock()
                             .map(|g| g.is_overlay_mode)
@@ -1064,16 +1221,145 @@ pub fn run() {
                             fit_overlay_window_to_monitor(&win_for_evt);
                         }
                     }
+                    tauri::WindowEvent::ThemeChanged(theme) => {
+                        let is_dark = matches!(theme, Theme::Dark);
+                        let (is_auto, is_overlay) = if let Ok(mut guard) = state_for_evt.lock() {
+                            let auto_mode = guard.window_theme_mode == "auto";
+                            if auto_mode {
+                                guard.window_is_dark = is_dark;
+                            }
+                            (auto_mode, guard.is_overlay_mode)
+                        } else {
+                            (true, true)
+                        };
+                        if is_auto && !is_overlay {
+                            let bg = if is_dark {
+                                Color(17, 19, 24, 255)
+                            } else {
+                                Color(248, 249, 252, 255)
+                            };
+                            let _ = win_for_evt.set_background_color(Some(bg));
+                        }
+                        let _ = win_for_evt.emit(
+                            "system-theme-changed",
+                            if is_dark { "dark" } else { "light" },
+                        );
+                    }
+                    _ => {}
                 });
 
                 #[cfg(windows)]
-                spawn_windows_overlay_poller(window, state_for_setup);
+                {
+                    spawn_windows_theme_watchers(window.clone(), Arc::clone(&state_for_setup));
+                    spawn_windows_overlay_poller(window, state_for_setup);
+                }
 
                 #[cfg(target_os = "macos")]
-                spawn_macos_overlay_poller(window, state_for_setup);
+                {
+                    spawn_macos_theme_watcher(window.clone(), Arc::clone(&state_for_setup));
+                    spawn_macos_overlay_poller(window, state_for_setup);
+                }
             }
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running PenpaAnywhere Tauri application");
+}
+
+#[cfg(all(test, windows))]
+mod windows_theme_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyW, RegDeleteTreeW, RegNotifyChangeKeyValue, RegOpenKeyExW,
+        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_NOTIFY, REG_DWORD,
+        REG_NOTIFY_CHANGE_LAST_SET,
+    };
+
+    #[test]
+    fn reads_real_windows_theme_and_accent() {
+        let dark = read_windows_apps_dark();
+        let accent = read_windows_accent_hex();
+        println!("REAL_WINDOWS_REG: dark={dark:?}, accent={accent:?}");
+        assert!(dark.is_some(), "AppsUseLightTheme should be readable on Windows");
+        if let Some(ref hex) = accent {
+            assert_eq!(hex.len(), 7);
+            assert!(hex.starts_with('#'));
+        }
+    }
+
+    #[test]
+    fn reg_notify_wakes_immediately_without_polling() {
+        let subkey: Vec<u16> = "Software\\PenpaAnywhereRegNotifyTest\0"
+            .encode_utf16()
+            .collect();
+        let val_name: Vec<u16> = "TestDword\0".encode_utf16().collect();
+
+        let mut hkey: HKEY = std::ptr::null_mut();
+        let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, subkey.as_ptr(), &mut hkey) };
+        assert_eq!(status, 0, "RegCreateKeyW failed");
+
+        let (tx, rx) = mpsc::channel();
+        let subkey_watch = subkey.clone();
+        let watcher = thread::spawn(move || {
+            let mut watch_key: HKEY = std::ptr::null_mut();
+            let open = unsafe {
+                RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    subkey_watch.as_ptr(),
+                    0,
+                    KEY_NOTIFY,
+                    &mut watch_key,
+                )
+            };
+            assert_eq!(open, 0);
+            tx.send("ready").unwrap();
+            let notify_status = unsafe {
+                RegNotifyChangeKeyValue(
+                    watch_key,
+                    0,
+                    REG_NOTIFY_CHANGE_LAST_SET,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            unsafe {
+                RegCloseKey(watch_key);
+            }
+            tx.send(if notify_status == 0 { "notified" } else { "err" })
+                .unwrap();
+        });
+
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), "ready");
+        // Give watcher 40ms to enter kernel wait
+        thread::sleep(Duration::from_millis(40));
+
+        let t0 = Instant::now();
+        let new_val: u32 = 42;
+        let set_status = unsafe {
+            RegSetValueExW(
+                hkey,
+                val_name.as_ptr(),
+                0,
+                REG_DWORD,
+                (&new_val as *const u32).cast(),
+                std::mem::size_of::<u32>() as u32,
+            )
+        };
+        assert_eq!(set_status, 0);
+
+        let evt = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let elapsed_ms = t0.elapsed().as_millis();
+        println!("REG_NOTIFY_EVENT={evt} elapsed_ms={elapsed_ms}");
+        assert_eq!(evt, "notified");
+        assert!(elapsed_ms < 500, "RegNotifyChangeKeyValue should wake almost instantly");
+
+        watcher.join().unwrap();
+        unsafe {
+            RegCloseKey(hkey);
+            RegDeleteTreeW(HKEY_CURRENT_USER, subkey.as_ptr());
+        }
+    }
 }

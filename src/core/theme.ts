@@ -305,10 +305,81 @@ export function applyMd3Tokens(raw: Record<string, string> | string | null | und
   return applied > 0;
 }
 
+function parseCssColorToHex(raw: string): string | null {
+  const s = raw.trim().toLowerCase();
+  if (!s || s === 'transparent') return null;
+
+  // rgb(r, g, b) / rgba(r, g, b, a) / rgb(r g b / a)
+  const rgbMatch = s.match(
+    /^rgba?\(\s*([\d.]+)\s*[,\s]\s*([\d.]+)\s*[,\s]\s*([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/,
+  );
+  if (rgbMatch) {
+    const alphaRaw = rgbMatch[4];
+    if (alphaRaw !== undefined) {
+      const a = alphaRaw.endsWith('%') ? parseFloat(alphaRaw) / 100 : parseFloat(alphaRaw);
+      if (!Number.isFinite(a) || a <= 0.01) return null;
+    }
+    const r = Math.round(Math.max(0, Math.min(255, parseFloat(rgbMatch[1]))));
+    const g = Math.round(Math.max(0, Math.min(255, parseFloat(rgbMatch[2]))));
+    const b = Math.round(Math.max(0, Math.min(255, parseFloat(rgbMatch[3]))));
+    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`.toUpperCase();
+  }
+
+  // color(srgb r g b [/ a])
+  const srgbMatch = s.match(
+    /^color\(\s*srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+%?))?\s*\)$/,
+  );
+  if (srgbMatch) {
+    const alphaRaw = srgbMatch[4];
+    if (alphaRaw !== undefined) {
+      const a = alphaRaw.endsWith('%') ? parseFloat(alphaRaw) / 100 : parseFloat(alphaRaw);
+      if (!Number.isFinite(a) || a <= 0.01) return null;
+    }
+    const r = Math.round(Math.max(0, Math.min(1, parseFloat(srgbMatch[1]))) * 255);
+    const g = Math.round(Math.max(0, Math.min(1, parseFloat(srgbMatch[2]))) * 255);
+    const b = Math.round(Math.max(0, Math.min(1, parseFloat(srgbMatch[3]))) * 255);
+    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`.toUpperCase();
+  }
+
+  return null;
+}
+
+/**
+ * Best-effort zero-polling probe of the CSS Color 4 `AccentColor` system color on Web browsers.
+ * Returns null when unsupported or unresolved.
+ */
+export function probeWebAccentColor(): string | null {
+  if (
+    typeof window === 'undefined' ||
+    typeof document === 'undefined' ||
+    !document.documentElement ||
+    typeof CSS === 'undefined' ||
+    typeof CSS.supports !== 'function'
+  ) {
+    return null;
+  }
+  if (!CSS.supports('color', 'AccentColor')) {
+    return null;
+  }
+  const probe = document.createElement('span');
+  probe.style.cssText =
+    'position:fixed;top:-9999px;left:-9999px;width:0;height:0;opacity:0;pointer-events:none;background-color:AccentColor;';
+  if (!probe.style.backgroundColor) {
+    return null;
+  }
+  document.documentElement.appendChild(probe);
+  const computed = window.getComputedStyle(probe).backgroundColor;
+  probe.remove();
+  return parseCssColorToHex(computed);
+}
+
 // Reactive theme state
 const saved = loadPersistedState();
 const initialPlatform = detectPlatform();
-const osDynamicSupported = ref(supportsOsDynamicColor(initialPlatform));
+const initialWebAccent = initialPlatform === 'web' ? probeWebAccentColor() : null;
+const osDynamicSupported = ref(
+  supportsOsDynamicColor(initialPlatform) || initialWebAccent !== null,
+);
 
 function detectBrowserPrefersDark(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true;
@@ -331,7 +402,7 @@ export const customHue = ref<number>(
 export const dynamicColorSupported = computed(() => osDynamicSupported.value);
 
 const systemPrefersDark = ref<boolean>(detectBrowserPrefersDark());
-let osAccentHex: string | null = null;
+let osAccentHex: string | null = initialWebAccent;
 let androidThemeBundle: AndroidThemeBundle | null = null;
 let legacyAndroidDarkTokens: Record<string, string> | null = null;
 
@@ -366,7 +437,7 @@ export function recomputeAndApplyTheme(): void {
   if (tokens) {
     applyMd3Tokens(tokens);
   }
-  void setOsWindowTheme(scheme === 'dark');
+  void setOsWindowTheme(themeMode.value, scheme === 'dark');
 }
 
 export function setThemeMode(mode: ThemeMode): void {
@@ -374,6 +445,23 @@ export function setThemeMode(mode: ThemeMode): void {
   themeMode.value = mode;
   patchPersistedState({ themeMode: mode });
   recomputeAndApplyTheme();
+  if (mode === 'auto' && detectPlatform() === 'tauri') {
+    void (async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const sys = await invoke<string>('get_system_theme');
+        const isDark = sys === 'dark';
+        if (systemPrefersDark.value !== isDark) {
+          systemPrefersDark.value = isDark;
+          if (themeMode.value === 'auto') {
+            recomputeAndApplyTheme();
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+    })();
+  }
 }
 
 export function setDynamicColorEnabled(enabled: boolean): void {
@@ -423,17 +511,51 @@ function ingestAndroidBundle(raw: AndroidThemeBundle | string | null | undefined
 export function initDynamicThemeBridge(): void {
   if (typeof window === 'undefined') return;
 
-  // Listen to browser / OS prefers-color-scheme changes
-  if (typeof window.matchMedia === 'function') {
+  const platform = detectPlatform();
+
+  function refreshWebAccent(reapplyIfChanged = true) {
+    if (platform !== 'web') return;
+    const probed = probeWebAccentColor();
+    const prevSupported = osDynamicSupported.value;
+    const prevAccent = osAccentHex;
+    if (probed) {
+      osAccentHex = probed;
+      osDynamicSupported.value = true;
+      if (!prevSupported && saved.dynamicColor === undefined) {
+        dynamicColorEnabled.value = true;
+      }
+    } else if (!prevSupported) {
+      osAccentHex = null;
+    }
+    if (reapplyIfChanged && (osAccentHex !== prevAccent || osDynamicSupported.value !== prevSupported)) {
+      recomputeAndApplyTheme();
+    }
+  }
+
+  // Listen to browser prefers-color-scheme changes (authoritative on Web;
+  // Tauri and Android receive authoritative native OS theme events to avoid
+  // synthetic matchMedia echoes from manual window theme overrides).
+  if (platform === 'web' && typeof window.matchMedia === 'function') {
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     systemPrefersDark.value = mq.matches;
     const onSchemeChange = (ev: MediaQueryListEvent) => {
       systemPrefersDark.value = ev.matches;
-      if (themeMode.value === 'auto') {
+      refreshWebAccent(false);
+      if (themeMode.value === 'auto' || (dynamicColorEnabled.value && osDynamicSupported.value)) {
         recomputeAndApplyTheme();
       }
     };
     mq.addEventListener?.('change', onSchemeChange);
+  }
+
+  if (platform === 'web') {
+    refreshWebAccent(false);
+    window.addEventListener('focus', () => refreshWebAccent(true));
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        refreshWebAccent(true);
+      }
+    });
   }
 
   window.__PENPAANYWHERE_APPLY_ANDROID_THEME_BUNDLE__ = (bundle) => {
@@ -472,21 +594,44 @@ export function initDynamicThemeBridge(): void {
   // Apply initial theme immediately before async Tauri call resolves
   recomputeAndApplyTheme();
 
-  // 2. Windows / macOS (Tauri 2): read OS accent color & listen for live changes
-  if (detectPlatform() === 'tauri') {
+  // 2. Windows / macOS (Tauri 2): zero-polling OS dark mode + accent color sync
+  if (platform === 'tauri') {
     void (async () => {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
-        const accent = await invoke<string | null>('get_system_accent_color');
+        const [sysTheme, accent] = await Promise.all([
+          invoke<string>('get_system_theme').catch(() => null),
+          invoke<string | null>('get_system_accent_color').catch(() => null),
+        ]);
+        if (sysTheme === 'dark' || sysTheme === 'light') {
+          systemPrefersDark.value = sysTheme === 'dark';
+        }
         osAccentHex = accent && accent.trim() ? accent : null;
         recomputeAndApplyTheme();
+
         const { listen } = await import('@tauri-apps/api/event');
-        await listen<string | null>('system-accent-changed', (ev) => {
-          osAccentHex = ev.payload && ev.payload.trim() ? ev.payload : null;
-          recomputeAndApplyTheme();
-        });
+        await Promise.all([
+          listen<string>('system-theme-changed', (ev) => {
+            if (ev.payload === 'dark' || ev.payload === 'light') {
+              const nextDark = ev.payload === 'dark';
+              if (systemPrefersDark.value !== nextDark) {
+                systemPrefersDark.value = nextDark;
+                if (themeMode.value === 'auto') {
+                  recomputeAndApplyTheme();
+                }
+              }
+            }
+          }),
+          listen<string | null>('system-accent-changed', (ev) => {
+            const nextAccent = ev.payload && ev.payload.trim() ? ev.payload : null;
+            if (osAccentHex !== nextAccent) {
+              osAccentHex = nextAccent;
+              recomputeAndApplyTheme();
+            }
+          }),
+        ]);
       } catch (err) {
-        console.warn('[PenpaAnywhere] Failed to load Tauri system accent color:', err);
+        console.warn('[PenpaAnywhere] Failed to sync Tauri OS theme/accent:', err);
       }
     })();
   }
