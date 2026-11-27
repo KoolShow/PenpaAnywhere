@@ -10,6 +10,17 @@ button:focus:not(:focus-visible),
   outline: none;
 }
 
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+body.ac-dragging iframe {
+  pointer-events: none !important;
+}
+
 html,
 body,
 #app {
@@ -20,7 +31,7 @@ body,
   overflow: hidden;
   /* Critical: keep root completely transparent for Windows Tauri & Android WebView overlay */
   background: transparent !important;
-  font-family: 'Segoe UI', Roboto, 'Noto Sans SC', system-ui, -apple-system, sans-serif;
+  font-family: 'Microsoft YaHei UI', 'Noto Sans SC', 'PingFang SC', 'Segoe UI', Roboto, system-ui, -apple-system, sans-serif;
   color: var(--md-sys-color-on-surface);
   user-select: none;
   -webkit-user-select: none;
@@ -47,57 +58,7 @@ body,
   isolation: isolate;
 }
 
-.ac-root.has-backdrop {
-  background:
-    linear-gradient(45deg, var(--ac-checker-a) 25%, transparent 25%),
-    linear-gradient(-45deg, var(--ac-checker-a) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, var(--ac-checker-a) 75%),
-    linear-gradient(-45deg, transparent 75%, var(--ac-checker-a) 75%),
-    var(--ac-checker-b);
-  background-size: 24px 24px;
-  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
-}
-
-.ac-backdrop-stage {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.ac-backdrop-media {
-  max-width: 100%;
-  max-height: 100%;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  display: block;
-}
-
-.ac-backdrop-placeholder {
-  position: fixed;
-  bottom: 24px;
-  right: 24px;
-  z-index: 35;
-  pointer-events: auto;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
-  max-width: 340px;
-  padding: 16px 20px;
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--md-sys-color-surface-container) 94%, transparent);
-  border: 1px solid var(--md-sys-color-outline-variant);
-  color: var(--md-sys-color-on-surface-variant);
-  text-align: left;
-  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.38);
-}
-
+/* Toggle button (切换式): full-pill with subtle outline, turns primary-container when active */
 .ac-btn {
   display: inline-flex;
   align-items: center;
@@ -108,18 +69,20 @@ body,
   border-radius: 999px;
   border: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface-container-high);
-  color: var(--md-sys-color-on-surface);
+  color: var(--md-sys-color-on-surface-variant);
   font-size: 12px;
   font-weight: 500;
+  line-height: 1;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.08s ease;
 }
 
 @media (hover: hover) {
   .ac-btn:hover {
     background: var(--md-sys-color-surface-container-highest);
     border-color: var(--md-sys-color-outline);
+    color: var(--md-sys-color-on-surface);
   }
 }
 
@@ -127,6 +90,7 @@ body,
   background: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
   border-color: var(--md-sys-color-primary);
+  font-weight: 600;
 }
 
 .ac-btn.danger {
@@ -141,9 +105,64 @@ body,
   border-color: transparent;
 }
 
+/* Trigger / Action button (触发式): borderless rounded-rect with tactile press feedback */
+.ac-btn.action {
+  border-radius: 10px;
+  border-color: transparent;
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+}
+
+@media (hover: hover) {
+  .ac-btn.action:hover {
+    background: color-mix(in srgb, var(--md-sys-color-on-surface) 14%, var(--md-sys-color-surface-container-highest));
+    border-color: transparent;
+  }
+}
+
+.ac-btn.action:active {
+  transform: scale(0.96);
+}
+
+.ac-btn.action.primary {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  font-weight: 600;
+}
+
+@media (hover: hover) {
+  .ac-btn.action.primary:hover {
+    background: color-mix(in srgb, var(--md-sys-color-on-primary) 10%, var(--md-sys-color-primary));
+  }
+}
+
+.ac-btn.action.tonal {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+
+@media (hover: hover) {
+  .ac-btn.action.tonal:hover {
+    background: color-mix(in srgb, var(--md-sys-color-on-secondary-container) 12%, var(--md-sys-color-secondary-container));
+  }
+}
+
+.ac-btn.action.danger {
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+  border-color: transparent;
+}
+
+@media (hover: hover) {
+  .ac-btn.action.danger:hover {
+    background: color-mix(in srgb, var(--md-sys-color-on-error-container) 12%, var(--md-sys-color-error-container));
+  }
+}
+
 .ac-btn.unavailable {
   opacity: 0.48;
   border-style: dashed;
+  border-color: var(--md-sys-color-outline-variant);
   cursor: help;
 }
 

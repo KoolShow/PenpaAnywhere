@@ -43,6 +43,7 @@ const props = defineProps<{
   customCssEnabled: boolean;
   customCss: string;
   toggleHotkey: HotkeyBinding | null;
+  overlayFullCanvas: boolean;
   showUnavailableOptions: boolean;
   androidScreenshotStatus?: AndroidScreenshotCompositeStatus | null;
 }>();
@@ -52,12 +53,12 @@ const emit = defineEmits<{
   (e: 'update:customCssEnabled', v: boolean): void;
   (e: 'update:customCss', v: string): void;
   (e: 'update:toggleHotkey', v: HotkeyBinding | null): void;
+  (e: 'update:overlayFullCanvas', v: boolean): void;
   (e: 'update:showUnavailableOptions', v: boolean): void;
   (e: 'unavailable-click', key: UnavailableReasonKey): void;
   (e: 'toggle-android-screenshot-composite', enabled: boolean): void;
   (e: 'request-android-all-files'): void;
   (e: 'recording-change', recording: boolean): void;
-  (e: 'sync-penpa-language', locale: AppLocale): void;
 }>();
 
 const themeModeOptions = computed<Array<{ value: ThemeMode; label: string }>>(() => [
@@ -89,7 +90,6 @@ type RecordHintState =
 
 const recording = ref(false);
 const recordStatus = ref<RecordHintState>(null);
-const syncedPenpaLocale = ref<AppLocale | null>(null);
 const cssDraft = ref(props.customCss);
 
 const recordHintText = computed(() => {
@@ -112,14 +112,6 @@ const recordHintText = computed(() => {
   }
 });
 
-const langSyncedHint = computed(() => {
-  if (!syncedPenpaLocale.value) return '';
-  const opt = LOCALE_OPTIONS.find((o) => o.value === syncedPenpaLocale.value);
-  return formatMessage(messages.value.settings.syncedToPenpa, {
-    lang: opt?.label ?? syncedPenpaLocale.value,
-  });
-});
-
 watch(
   () => props.customCss,
   (val) => {
@@ -138,7 +130,6 @@ watch(
     } else {
       cssDraft.value = props.customCss;
       recordStatus.value = null;
-      syncedPenpaLocale.value = null;
     }
   },
 );
@@ -149,12 +140,6 @@ const hotkeyText = computed(() =>
 
 function selectLanguage(loc: AppLocale) {
   setLocale(loc);
-  syncedPenpaLocale.value = null;
-}
-
-function handleSyncPenpaLanguage() {
-  emit('sync-penpa-language', currentLocale.value);
-  syncedPenpaLocale.value = currentLocale.value;
 }
 
 function closeDialog() {
@@ -268,11 +253,11 @@ onBeforeUnmount(() => {
     >
       <header class="ac-settings-header">
         <div class="ac-settings-title">{{ messages.settings.title }}</div>
-        <button class="ac-btn" @click="closeDialog">{{ messages.settings.close }}</button>
+        <button class="ac-btn action" @click="closeDialog">{{ messages.settings.close }}</button>
       </header>
 
       <div class="ac-settings-body">
-        <!-- Section 0: Interface Language (CN / EN / JP) -->
+        <!-- Section 0: Interface Language (CN / EN / JP) - Auto one-way syncs to Penpa+ -->
         <div class="ac-setting-section">
           <div class="ac-setting-row">
             <div class="ac-setting-label">{{ messages.settings.languageLabel }}</div>
@@ -287,13 +272,6 @@ onBeforeUnmount(() => {
                 {{ opt.label }}
               </button>
             </div>
-          </div>
-
-          <div class="ac-setting-actions">
-            <button class="ac-btn tonal" @click="handleSyncPenpaLanguage">
-              {{ messages.settings.syncToPenpa }}
-            </button>
-            <span v-if="langSyncedHint" class="ac-setting-hint">{{ langSyncedHint }}</span>
           </div>
         </div>
 
@@ -322,18 +300,27 @@ onBeforeUnmount(() => {
           >
             <div class="ac-setting-label">{{ messages.settings.dynamicColorLabel }}</div>
             <button
-              class="ac-btn"
+              type="button"
+              role="switch"
+              class="ac-md3-switch"
+              :aria-checked="dynamicColorSupported && dynamicColorEnabled"
+              :aria-label="messages.settings.dynamicColorLabel"
               :class="{
-                active: dynamicColorSupported && dynamicColorEnabled,
+                checked: dynamicColorSupported && dynamicColorEnabled,
                 unavailable: !dynamicColorSupported,
               }"
               @click="handleDynamicColorToggle"
             >
-              {{
-                dynamicColorSupported && dynamicColorEnabled
-                  ? messages.settings.enabled
-                  : messages.settings.disabled
-              }}
+              <span class="ac-md3-switch-thumb">
+                <svg
+                  v-if="dynamicColorSupported && dynamicColorEnabled"
+                  class="ac-md3-switch-check"
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path d="M6.4 11.4 3.2 8.2l1.1-1.1 2.1 2.1 5.3-5.3 1.1 1.1-6.4 6.4Z" />
+                </svg>
+              </span>
             </button>
           </div>
 
@@ -345,19 +332,59 @@ onBeforeUnmount(() => {
 
         <div class="ac-divider" />
 
-        <!-- Section 0.8: Show Unavailable Options -->
+        <!-- Section 0.8: Workspace & Visibility Options -->
         <div class="ac-setting-section">
+          <div class="ac-setting-row">
+            <div>
+              <div class="ac-setting-label">{{ messages.settings.overlayFullCanvasLabel }}</div>
+              <div class="ac-setting-desc">{{ messages.settings.overlayFullCanvasDesc }}</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              class="ac-md3-switch"
+              :aria-checked="overlayFullCanvas"
+              :aria-label="messages.settings.overlayFullCanvasLabel"
+              :class="{ checked: overlayFullCanvas }"
+              @click="emit('update:overlayFullCanvas', !overlayFullCanvas)"
+            >
+              <span class="ac-md3-switch-thumb">
+                <svg
+                  v-if="overlayFullCanvas"
+                  class="ac-md3-switch-check"
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path d="M6.4 11.4 3.2 8.2l1.1-1.1 2.1 2.1 5.3-5.3 1.1 1.1-6.4 6.4Z" />
+                </svg>
+              </span>
+            </button>
+          </div>
+
           <div class="ac-setting-row">
             <div>
               <div class="ac-setting-label">{{ messages.settings.showUnavailableLabel }}</div>
               <div class="ac-setting-desc">{{ messages.settings.showUnavailableDesc }}</div>
             </div>
             <button
-              class="ac-btn"
-              :class="{ active: showUnavailableOptions }"
+              type="button"
+              role="switch"
+              class="ac-md3-switch"
+              :aria-checked="showUnavailableOptions"
+              :aria-label="messages.settings.showUnavailableLabel"
+              :class="{ checked: showUnavailableOptions }"
               @click="emit('update:showUnavailableOptions', !showUnavailableOptions)"
             >
-              {{ showUnavailableOptions ? messages.settings.enabled : messages.settings.disabled }}
+              <span class="ac-md3-switch-thumb">
+                <svg
+                  v-if="showUnavailableOptions"
+                  class="ac-md3-switch-check"
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path d="M6.4 11.4 3.2 8.2l1.1-1.1 2.1 2.1 5.3-5.3 1.1 1.1-6.4 6.4Z" />
+                </svg>
+              </span>
             </button>
           </div>
         </div>
@@ -381,10 +408,10 @@ onBeforeUnmount(() => {
             >
               {{ recording ? messages.settings.hotkeyCancelBtn : messages.settings.hotkeyRecordBtn }}
             </button>
-            <button class="ac-btn" @click="resetDefaultHotkey">
+            <button class="ac-btn action" @click="resetDefaultHotkey">
               {{ messages.settings.hotkeyResetBtn }}
             </button>
-            <button class="ac-btn" @click="clearHotkey">
+            <button class="ac-btn action" @click="clearHotkey">
               {{ messages.settings.hotkeyClearBtn }}
             </button>
           </div>
@@ -403,22 +430,35 @@ onBeforeUnmount(() => {
               </div>
               <button
                 v-if="platform === 'android-overlay'"
-                class="ac-btn"
-                :class="{ active: !!androidScreenshotStatus?.enabled }"
+                type="button"
+                role="switch"
+                class="ac-md3-switch"
+                :aria-checked="!!androidScreenshotStatus?.enabled"
+                :aria-label="messages.settings.androidShotLabel"
+                :class="{ checked: !!androidScreenshotStatus?.enabled }"
                 @click="emit('toggle-android-screenshot-composite', !androidScreenshotStatus?.enabled)"
               >
-                {{
-                  androidScreenshotStatus?.enabled
-                    ? messages.settings.enabled
-                    : messages.settings.disabled
-                }}
+                <span class="ac-md3-switch-thumb">
+                  <svg
+                    v-if="androidScreenshotStatus?.enabled"
+                    class="ac-md3-switch-check"
+                    viewBox="0 0 16 16"
+                    aria-hidden="true"
+                  >
+                    <path d="M6.4 11.4 3.2 8.2l1.1-1.1 2.1 2.1 5.3-5.3 1.1 1.1-6.4 6.4Z" />
+                  </svg>
+                </span>
               </button>
               <button
                 v-else
-                class="ac-btn unavailable"
+                type="button"
+                role="switch"
+                class="ac-md3-switch unavailable"
+                aria-checked="false"
+                :aria-label="messages.settings.androidShotLabel"
                 @click="handleAndroidShotUnavailable"
               >
-                {{ messages.settings.disabled }}
+                <span class="ac-md3-switch-thumb" />
               </button>
             </div>
             <div v-if="platform === 'android-overlay' && androidScreenshotStatus" class="ac-setting-actions">
@@ -439,7 +479,7 @@ onBeforeUnmount(() => {
               </span>
               <button
                 v-if="androidScreenshotStatus.enabled && !androidScreenshotStatus.hasWritePermission"
-                class="ac-btn tonal"
+                class="ac-btn action tonal"
                 @click="emit('request-android-all-files')"
               >
                 {{ messages.settings.grantPermission }}
@@ -462,11 +502,24 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <button
-              class="ac-btn"
-              :class="{ active: customCssEnabled }"
+              type="button"
+              role="switch"
+              class="ac-md3-switch"
+              :aria-checked="customCssEnabled"
+              :aria-label="messages.settings.cssLabel"
+              :class="{ checked: customCssEnabled }"
               @click="emit('update:customCssEnabled', !customCssEnabled)"
             >
-              {{ customCssEnabled ? messages.settings.cssEnabled : messages.settings.disabled }}
+              <span class="ac-md3-switch-thumb">
+                <svg
+                  v-if="customCssEnabled"
+                  class="ac-md3-switch-check"
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path d="M6.4 11.4 3.2 8.2l1.1-1.1 2.1 2.1 5.3-5.3 1.1 1.1-6.4 6.4Z" />
+                </svg>
+              </span>
             </button>
           </div>
 
@@ -483,10 +536,10 @@ onBeforeUnmount(() => {
           />
 
           <div class="ac-setting-actions">
-            <button class="ac-btn tonal" @click="resetDefaultCss">
+            <button class="ac-btn action tonal" @click="resetDefaultCss">
               {{ messages.settings.cssResetDefault }}
             </button>
-            <button class="ac-btn" @click="clearCss">
+            <button class="ac-btn action" @click="clearCss">
               {{ messages.settings.cssClear }}
             </button>
           </div>
@@ -499,10 +552,10 @@ onBeforeUnmount(() => {
           <div class="ac-setting-row">
             <div class="ac-setting-label">{{ messages.settings.linksLabel }}</div>
             <div class="ac-setting-actions">
-              <button class="ac-btn tonal" @click="handleOpenExternal(GITHUB_REPO_URL)">
+              <button class="ac-btn action tonal" @click="handleOpenExternal(GITHUB_REPO_URL)">
                 {{ messages.settings.githubLink }} ↗
               </button>
-              <button class="ac-btn" @click="handleOpenExternal(GITHUB_ISSUES_URL)">
+              <button class="ac-btn action" @click="handleOpenExternal(GITHUB_ISSUES_URL)">
                 {{ messages.settings.issueLink }} ↗
               </button>
             </div>
@@ -517,7 +570,7 @@ onBeforeUnmount(() => {
 .ac-settings-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 90;
+  z-index: 1200;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -610,6 +663,7 @@ onBeforeUnmount(() => {
   color: var(--md-sys-color-on-surface-variant);
   font-size: 12px;
   font-weight: 500;
+  line-height: 1;
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.15s ease, color 0.15s ease;
@@ -630,6 +684,81 @@ onBeforeUnmount(() => {
   background: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
   font-weight: 600;
+}
+
+/* Authentic Material Design 3 Switch */
+.ac-md3-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  width: 48px;
+  height: 28px;
+  padding: 0;
+  border-radius: 999px;
+  border: 2px solid var(--md-sys-color-outline);
+  background: var(--md-sys-color-surface-container-highest);
+  cursor: pointer;
+  transition:
+    background-color 0.18s cubic-bezier(0.2, 0, 0, 1),
+    border-color 0.18s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ac-md3-switch-thumb {
+  position: absolute;
+  left: 5px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--md-sys-color-outline);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    transform 0.2s cubic-bezier(0.2, 0, 0, 1),
+    width 0.18s cubic-bezier(0.2, 0, 0, 1),
+    height 0.18s cubic-bezier(0.2, 0, 0, 1),
+    background-color 0.18s cubic-bezier(0.2, 0, 0, 1),
+    box-shadow 0.15s ease;
+}
+
+@media (hover: hover) {
+  .ac-md3-switch:hover .ac-md3-switch-thumb {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--md-sys-color-on-surface) 10%, transparent);
+  }
+  .ac-md3-switch.checked:hover .ac-md3-switch-thumb {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--md-sys-color-primary) 16%, transparent);
+  }
+}
+
+.ac-md3-switch:active .ac-md3-switch-thumb {
+  width: 20px;
+  height: 20px;
+}
+
+.ac-md3-switch.checked {
+  background: var(--md-sys-color-primary);
+  border-color: var(--md-sys-color-primary);
+}
+
+.ac-md3-switch.checked .ac-md3-switch-thumb {
+  width: 20px;
+  height: 20px;
+  transform: translateX(17px);
+  background: var(--md-sys-color-on-primary);
+}
+
+.ac-md3-switch-check {
+  width: 13px;
+  height: 13px;
+  fill: var(--md-sys-color-on-primary-container);
+  display: block;
+}
+
+.ac-md3-switch.unavailable {
+  opacity: 0.45;
+  border-style: dashed;
+  cursor: help;
 }
 
 .ac-setting-label {
@@ -654,11 +783,16 @@ onBeforeUnmount(() => {
 }
 
 .ac-hotkey-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
-  padding: 4px 10px;
+  height: 26px;
+  padding: 0 10px;
   border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
+  line-height: 1;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   background: var(--md-sys-color-surface-container-highest);
   border: 1px solid var(--md-sys-color-outline-variant);

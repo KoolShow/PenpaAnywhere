@@ -1,19 +1,63 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { getPenpaBridge, type PenpaIframeBridge } from '../core/penpaBridge';
+import type { BlendRenderMode } from '../core/webglOverlay';
+import type { WorkspaceMode } from '../core/world';
+import type { UnavailableReasonKey } from './ControlBar.vue';
 import { loadPersistedState, patchPersistedState } from '../core/storage';
 import { safeAreaInsets } from '../core/safeArea';
 import { messages } from '../core/i18n';
+import { beginGlobalDrag, endGlobalDrag, tryCapturePointer, tryReleasePointer } from '../core/dragGuard';
 
 const props = defineProps<{
   visible: boolean;
+  title?: string;
+  backdropMode: WorkspaceMode;
+  blendMode: BlendRenderMode;
+  boardOpacity: number;
+  showUnavailableOptions: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: 'bridge-ready', bridge: PenpaIframeBridge): void;
   (e: 'update:visible', value: boolean): void;
+  (e: 'update:blendMode', value: BlendRenderMode): void;
+  (e: 'update:boardOpacity', value: number): void;
+  (e: 'unavailable-click', key: UnavailableReasonKey): void;
   (e: 'bounds-change', rect: { x: number; y: number; w: number; h: number }): void;
 }>();
+
+const blendMenuOpen = ref(false);
+
+const blendOptions = computed<Array<{ value: BlendRenderMode; label: string; unavailable: boolean }>>(() => {
+  const isOverlay = props.backdropMode === 'overlay';
+  return [
+    { value: 'multiply', label: messages.value.bar.blendMultiply, unavailable: isOverlay },
+    { value: 'multiply-inv', label: messages.value.bar.blendMultiplyInv, unavailable: isOverlay },
+    { value: 'alpha-luma', label: messages.value.bar.blendAlphaLuma, unavailable: false },
+    { value: 'alpha-luma-inv', label: messages.value.bar.blendAlphaLumaInv, unavailable: false },
+    { value: 'alpha-minrgb', label: messages.value.bar.blendAlphaMinRgb, unavailable: false },
+    { value: 'alpha-minrgb-inv', label: messages.value.bar.blendAlphaMinRgbInv, unavailable: false },
+  ];
+});
+
+const visibleBlendOptions = computed(() =>
+  blendOptions.value.filter((opt) => !opt.unavailable || props.showUnavailableOptions),
+);
+
+const currentBlendLabel = computed(
+  () => blendOptions.value.find((o) => o.value === props.blendMode)?.label ?? messages.value.bar.blendAlphaMinRgb,
+);
+
+function selectBlend(opt: { value: BlendRenderMode; unavailable: boolean }) {
+  if (opt.unavailable) {
+    blendMenuOpen.value = false;
+    emit('unavailable-click', 'multiplyOverlay');
+    return;
+  }
+  emit('update:blendMode', opt.value);
+  blendMenuOpen.value = false;
+}
 
 const savedDock = loadPersistedState().dock;
 const hasSavedDock = !!savedDock;
@@ -65,8 +109,6 @@ function persistDockState() {
   });
 }
 
-let dragMode: 'move' | 'resize' | null = null;
-let dragStart = { x: 0, y: 0, origX: 0, origY: 0, origW: 0, origH: 0 };
 let pollTimer = 0;
 
 function emitBounds() {
@@ -110,10 +152,31 @@ function clampPosition(isInitial = false) {
   emitBounds();
 }
 
+let dragMode: 'move' | 'resize' | null = null;
+let dragPointerId: number | null = null;
+let dragCapturedEl: Element | null = null;
+let dragStart = { x: 0, y: 0, origX: 0, origY: 0, origW: 0, origH: 0 };
+
+function finishDockDrag(persist: boolean) {
+  if (!dragMode) return;
+  if (dragPointerId !== null) {
+    tryReleasePointer(dragCapturedEl, dragPointerId);
+  }
+  dragMode = null;
+  dragPointerId = null;
+  dragCapturedEl = null;
+  isInteracting.value = false;
+  endGlobalDrag();
+  if (persist) persistDockState();
+}
+
 function startMove(e: PointerEvent) {
   if ((e.target as HTMLElement).closest('button, input')) return;
+  if (e.button !== 0 && e.pointerType === 'mouse') return;
   e.preventDefault();
+  if (dragMode) finishDockDrag(false);
   dragMode = 'move';
+  dragPointerId = e.pointerId;
   isInteracting.value = true;
   dragStart = {
     x: e.clientX,
@@ -123,13 +186,17 @@ function startMove(e: PointerEvent) {
     origW: size.value.w,
     origH: size.value.h,
   };
-  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  dragCapturedEl = tryCapturePointer(e.currentTarget as HTMLElement, e.pointerId);
+  beginGlobalDrag();
 }
 
 function startResize(e: PointerEvent) {
+  if (e.button !== 0 && e.pointerType === 'mouse') return;
   e.preventDefault();
   e.stopPropagation();
+  if (dragMode) finishDockDrag(false);
   dragMode = 'resize';
+  dragPointerId = e.pointerId;
   isInteracting.value = true;
   dragStart = {
     x: e.clientX,
@@ -139,11 +206,12 @@ function startResize(e: PointerEvent) {
     origW: size.value.w,
     origH: size.value.h,
   };
-  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  dragCapturedEl = tryCapturePointer(e.currentTarget as HTMLElement, e.pointerId);
+  beginGlobalDrag();
 }
 
 function onDragMove(e: PointerEvent) {
-  if (!dragMode) return;
+  if (!dragMode || (dragPointerId !== null && e.pointerId !== dragPointerId)) return;
   e.preventDefault();
   const safe = safeAreaInsets.value;
   const minX = safe.left + 4;
@@ -166,11 +234,12 @@ function onDragMove(e: PointerEvent) {
 }
 
 function onDragEnd(e: PointerEvent) {
-  if (!dragMode) return;
-  (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
-  dragMode = null;
-  isInteracting.value = false;
-  persistDockState();
+  if (!dragMode || (dragPointerId !== null && e.pointerId !== dragPointerId)) return;
+  finishDockDrag(true);
+}
+
+function onWindowDockBlur() {
+  finishDockDrag(true);
 }
 
 function toggleCollapsed() {
@@ -208,6 +277,10 @@ function onWindowResize() {
 
 onMounted(() => {
   clampPosition(true);
+  window.addEventListener('pointermove', onDragMove);
+  window.addEventListener('pointerup', onDragEnd);
+  window.addEventListener('pointercancel', onDragEnd);
+  window.addEventListener('blur', onWindowDockBlur);
   window.addEventListener('resize', onWindowResize);
 });
 
@@ -231,6 +304,11 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  finishDockDrag(false);
+  window.removeEventListener('pointermove', onDragMove);
+  window.removeEventListener('pointerup', onDragEnd);
+  window.removeEventListener('pointercancel', onDragEnd);
+  window.removeEventListener('blur', onWindowDockBlur);
   window.removeEventListener('resize', onWindowResize);
   if (pollTimer) window.clearInterval(pollTimer);
 });
@@ -252,13 +330,10 @@ onBeforeUnmount(() => {
     <header
       class="ac-dock-header"
       @pointerdown="startMove"
-      @pointermove="onDragMove"
-      @pointerup="onDragEnd"
-      @pointercancel="onDragEnd"
     >
       <div class="ac-dock-title">
         <span class="ac-dot" :class="{ ready: readyState }" />
-        <span>Penpa+</span>
+        <span>{{ title || 'Penpa+' }}</span>
       </div>
       <div class="ac-dock-actions">
         <div class="ac-dock-sliders" :class="{ closed: collapsed }" :inert="collapsed">
@@ -329,6 +404,44 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
+    <!-- Per-grid render settings sub-bar (Blend mode & Board opacity, isolated per Penpa+ instance) -->
+    <div v-if="!collapsed" class="ac-dock-render-bar">
+      <div class="ac-dock-render-row">
+        <button
+          class="ac-btn ac-dock-blend-btn"
+          :class="{ active: blendMenuOpen }"
+          :title="messages.dock.boardBlendTitle"
+          @click="blendMenuOpen = !blendMenuOpen"
+        >
+          {{ currentBlendLabel }}
+        </button>
+
+        <label class="ac-board-opacity-box" :title="messages.dock.boardOpacityTitle">
+          <span>{{ messages.dock.boardOpacity }} {{ Math.round(boardOpacity * 100) }}%</span>
+          <input
+            type="range"
+            min="0.1"
+            max="1"
+            step="0.02"
+            :value="boardOpacity"
+            @input="emit('update:boardOpacity', parseFloat(($event.target as HTMLInputElement).value))"
+          />
+        </label>
+      </div>
+
+      <div v-if="blendMenuOpen" class="ac-dock-blend-popover">
+        <button
+          v-for="opt in visibleBlendOptions"
+          :key="opt.value"
+          class="ac-btn"
+          :class="{ active: !opt.unavailable && blendMode === opt.value, unavailable: opt.unavailable }"
+          @click="selectBlend(opt)"
+        >
+          {{ opt.label }}
+        </button>
+      </div>
+    </div>
+
     <div class="ac-dock-body" :inert="collapsed">
       <iframe
         ref="iframeEl"
@@ -342,9 +455,6 @@ onBeforeUnmount(() => {
         class="ac-resize-handle"
         :title="messages.dock.resizeTitle"
         @pointerdown="startResize"
-        @pointermove="onDragMove"
-        @pointerup="onDragEnd"
-        @pointercancel="onDragEnd"
       />
     </div>
   </section>
@@ -353,7 +463,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .ac-dock {
   position: fixed;
-  z-index: 40;
+  z-index: 1100;
   display: flex;
   flex-direction: column;
   border-radius: 14px;
@@ -400,6 +510,7 @@ onBeforeUnmount(() => {
   flex-shrink: 1;
   font-size: 12px;
   font-weight: 600;
+  line-height: 1;
   color: var(--md-sys-color-on-surface);
   white-space: nowrap;
   overflow: hidden;
@@ -464,6 +575,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 4px;
   font-size: 11px;
+  line-height: 1;
   color: var(--md-sys-color-on-surface-variant);
   flex-shrink: 1;
   min-width: 0;
@@ -471,6 +583,7 @@ onBeforeUnmount(() => {
 
 .ac-mini-slider input {
   width: 48px;
+  margin: 0;
   accent-color: var(--md-sys-color-primary);
 }
 
@@ -510,6 +623,62 @@ onBeforeUnmount(() => {
   background: var(--md-sys-color-surface-container);
   opacity: 1;
   transition: opacity 0.18s ease;
+}
+
+.ac-dock-render-bar {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 5px 10px;
+  background: var(--md-sys-color-surface-container-low);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.ac-dock-render-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ac-dock-blend-btn {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+.ac-board-opacity-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+}
+
+.ac-board-opacity-box input {
+  width: 78px;
+  margin: 0;
+  accent-color: var(--md-sys-color-primary);
+  touch-action: pan-x;
+}
+
+.ac-dock-blend-popover {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.ac-dock-blend-popover .ac-btn {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 11px;
 }
 
 .ac-dock.collapsed .ac-dock-body {
