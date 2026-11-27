@@ -18,9 +18,11 @@ import {
   type MediaCrop,
   type QuadMode,
   type ResizeHandle,
+  type SelectableTarget,
   type WorldElement,
 } from '../core/canvasItems';
 import type { GridBoundsNormalized } from '../core/penpaBridge';
+import type { ButtonDisplayMode } from '../core/storage';
 import {
   viewportToWorld,
   worldQuadToViewport,
@@ -28,6 +30,7 @@ import {
 } from '../core/world';
 import { safeAreaInsets } from '../core/safeArea';
 import { messages } from '../core/i18n';
+import MdActionBtn from './MdActionBtn.vue';
 import { beginGlobalDrag, endGlobalDrag, tryCapturePointer, tryReleasePointer } from '../core/dragGuard';
 
 type RectEdge = 'top' | 'right' | 'bottom' | 'left';
@@ -65,11 +68,12 @@ interface SafeBounds {
 }
 
 const props = defineProps<{
-  element: WorldElement | null;
-  hoveredLockedElement: WorldElement | null;
+  selectedTargets: SelectableTarget[];
+  hoveredLockedTarget: SelectableTarget | null;
   viewportTransform: WorldViewportTransform;
   worldBoundedToViewport: boolean;
   showLayerOrderActions: boolean;
+  buttonDisplayMode: ButtonDisplayMode;
   cropDraft: CropDraft | null;
   gridBounds?: GridBoundsNormalized;
 }>();
@@ -82,6 +86,10 @@ const emit = defineEmits<{
   (e: 'update-crop-draft', draft: CropDraft): void;
   (e: 'commit-crop'): void;
   (e: 'cancel-crop'): void;
+  (e: 'group-selected'): void;
+  (e: 'ungroup-target', id: string): void;
+  (e: 'toggle-passthrough', id: string): void;
+  (e: 'toggle-dock', id: string): void;
   (e: 'bring-front', id: string): void;
   (e: 'send-back', id: string): void;
   (e: 'remove-element', id: string): void;
@@ -103,27 +111,70 @@ let dragBaselineCorners: [Point2D, Point2D, Point2D, Point2D] | null = null;
 let shiftPressed = false;
 let altPressed = false;
 
-const isLocked = computed(() => !!props.element?.locked);
+const isMultiSelect = computed(() => props.selectedTargets.length >= 2);
+const singleTarget = computed<SelectableTarget | null>(() =>
+  props.selectedTargets.length === 1 ? props.selectedTargets[0] : null,
+);
+const singleElement = computed<WorldElement | null>(() =>
+  singleTarget.value && singleTarget.value.kind !== 'group' ? singleTarget.value : null,
+);
+const isGroupTarget = computed(() => singleTarget.value?.kind === 'group');
+const isLocked = computed(() => !!singleTarget.value?.locked);
 const activeCropDraft = computed<CropDraft | null>(() =>
-  props.element && !isLocked.value && props.cropDraft && props.cropDraft.elementId === props.element.id
+  singleElement.value &&
+  !isLocked.value &&
+  props.cropDraft &&
+  props.cropDraft.elementId === singleElement.value.id
     ? props.cropDraft
     : null,
 );
 const isCropping = computed(() => !!activeCropDraft.value);
-const isFreeQuad = computed(() => !!props.element && props.element.quadMode === 'free' && !isCropping.value);
+const isFreeQuad = computed(
+  () => !!singleElement.value && singleElement.value.quadMode === 'free' && !isCropping.value,
+);
+
+function targetHasGrid(t: SelectableTarget | null): boolean {
+  if (!t) return false;
+  return t.kind === 'grid' || (t.kind === 'group' && t.hasGrid);
+}
+
+function targetDockVisible(t: SelectableTarget | null): boolean {
+  if (!t) return false;
+  return (t.kind === 'grid' || t.kind === 'group') && t.dockVisible;
+}
 
 const displayWorldCorners = computed<[Point2D, Point2D, Point2D, Point2D] | null>(() => {
-  const el = props.element;
-  if (!el) return null;
+  const t = singleTarget.value;
+  if (!t) return null;
   if (activeCropDraft.value) {
     return rectToQuad(activeCropDraft.value.croppedRect);
   }
-  return el.corners;
+  return t.corners;
 });
 
 const viewportCorners = computed<[Point2D, Point2D, Point2D, Point2D] | null>(() => {
   if (!displayWorldCorners.value) return null;
   return worldQuadToViewport(displayWorldCorners.value, props.viewportTransform);
+});
+
+const multiSelectPolys = computed(() => {
+  if (!isMultiSelect.value) return [];
+  return props.selectedTargets.map((t) => {
+    const vp = worldQuadToViewport(t.corners, props.viewportTransform);
+    return {
+      id: t.id,
+      locked: t.locked,
+      points: vp.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' '),
+    };
+  });
+});
+
+const multiSelectViewportQuad = computed<[Point2D, Point2D, Point2D, Point2D] | null>(() => {
+  if (!isMultiSelect.value) return null;
+  // Anchor multi-select floating toolbar beside the LAST clicked target rather than the combined center
+  const lastTarget = props.selectedTargets[props.selectedTargets.length - 1];
+  if (!lastTarget) return null;
+  return worldQuadToViewport(lastTarget.corners, props.viewportTransform);
 });
 
 const quadPointsSvg = computed(() => {
@@ -255,15 +306,15 @@ function computeFloatingToolbarPos(
 }
 
 const floatingToolbarStyle = computed(() => {
-  const c = viewportCorners.value;
+  const c = isMultiSelect.value ? multiSelectViewportQuad.value : viewportCorners.value;
   if (!c) return null;
-  return computeFloatingToolbarPos(c, toolbarEl.value, 300);
+  return computeFloatingToolbarPos(c, toolbarEl.value, isMultiSelect.value ? 120 : 320);
 });
 
-const distinctHoveredLocked = computed<WorldElement | null>(() => {
-  const h = props.hoveredLockedElement;
+const distinctHoveredLocked = computed<SelectableTarget | null>(() => {
+  const h = props.hoveredLockedTarget;
   if (!h || !h.locked || !h.visible) return null;
-  if (props.element && props.element.id === h.id && floatingToolbarStyle.value) return null;
+  if (singleTarget.value && singleTarget.value.id === h.id && floatingToolbarStyle.value) return null;
   return h;
 });
 
@@ -275,7 +326,7 @@ const hoverToolbarStyle = computed(() => {
 });
 
 function reportToolbarBounds() {
-  if (!props.element || !toolbarEl.value) {
+  if (props.selectedTargets.length === 0 || !toolbarEl.value) {
     emit('toolbar-bounds-change', { x: 0, y: 0, w: 0, h: 0 });
   } else {
     const r = toolbarEl.value.getBoundingClientRect();
@@ -292,10 +343,11 @@ function reportToolbarBounds() {
 
 watch(
   [
-    () => props.element,
-    () => props.hoveredLockedElement,
+    () => props.selectedTargets,
+    () => props.hoveredLockedTarget,
     () => props.viewportTransform,
     () => props.cropDraft,
+    () => props.buttonDisplayMode,
   ],
   () => {
     requestAnimationFrame(reportToolbarBounds);
@@ -304,7 +356,8 @@ watch(
 );
 
 watch(
-  () => `${props.element?.id ?? ''}|${props.element?.quadMode ?? ''}|${isLocked.value}|${isCropping.value}`,
+  () =>
+    `${props.selectedTargets.map((t) => t.id).join(',')}|${singleElement.value?.quadMode ?? ''}|${isLocked.value}|${isCropping.value}`,
   () => {
     hoveredHandle.value = null;
     clearAllDrags();
@@ -909,7 +962,7 @@ function applyMultiTouchFreeDrag(
 }
 
 function applyActiveQuadDrags() {
-  const el = props.element;
+  const el = singleElement.value;
   if (!el || !dragBaselineCorners || activeQuadDrags.size === 0) return;
   const bounds = getSafeWorldBounds();
   const base = dragBaselineCorners;
@@ -935,7 +988,7 @@ function applyActiveQuadDrags() {
 
 // --- Unified Handle Drag Starters (ONE path for Grid, Image, Screen!) ---
 function startHandleDrag(kind: 'corner' | 'edge', idx: number, e: PointerEvent) {
-  const el = props.element;
+  const el = singleElement.value;
   if (!el || el.locked) return;
   if (e.button !== 0 && e.pointerType === 'mouse') return;
   e.preventDefault();
@@ -991,7 +1044,7 @@ function onGizmoPointerMove(e: PointerEvent) {
     return;
   }
 
-  if (activeCropDrag && e.pointerId === activeCropDrag.pointerId && props.element) {
+  if (activeCropDrag && e.pointerId === activeCropDrag.pointerId && singleElement.value) {
     e.preventDefault();
     const z = props.viewportTransform.zoom || 1;
     const dxWorld = (e.clientX - activeCropDrag.startClient.x) / z;
@@ -1019,8 +1072,8 @@ function onGizmoPointerEnd(e: PointerEvent) {
     syncActiveHandleKeys();
     if (activeQuadDrags.size === 0) {
       dragBaselineCorners = null;
-    } else if (props.element) {
-      resnapshotQuadDrags(props.element.corners);
+    } else if (singleElement.value) {
+      resnapshotQuadDrags(singleElement.value.corners);
     }
     return;
   }
@@ -1062,36 +1115,36 @@ function handleCropGridMargins() {
   });
 }
 
-function handleToggleLockFor(el: WorldElement | null) {
-  if (!el) return;
-  if (el.locked) {
-    emit('unlock-element', el.id);
+function handleToggleLockFor(t: SelectableTarget | null) {
+  if (!t) return;
+  if (t.locked) {
+    emit('unlock-element', t.id);
   } else {
     if (isCropping.value) emit('cancel-crop');
-    emit('lock-element', el.id);
+    emit('lock-element', t.id);
   }
 }
 
-function handleTogglePassThroughFor(el: WorldElement | null) {
-  if (!el || !el.locked) return;
-  emit('update-element', el.id, { passThrough: !el.passThrough });
+function handleTogglePassThroughFor(t: SelectableTarget | null) {
+  if (!t || !t.locked) return;
+  emit('toggle-passthrough', t.id);
 }
 
-function handleToggleDockFor(el: WorldElement | null) {
-  if (!el || el.kind !== 'grid') return;
-  emit('update-element', el.id, { dockVisible: !el.dockVisible });
+function handleToggleDockFor(t: SelectableTarget | null) {
+  if (!targetHasGrid(t) || !t) return;
+  emit('toggle-dock', t.id);
 }
 
 function handleToggleLock() {
-  handleToggleLockFor(props.element);
+  handleToggleLockFor(singleTarget.value);
 }
 
 function handleTogglePassThrough() {
-  handleTogglePassThroughFor(props.element);
+  handleTogglePassThroughFor(singleTarget.value);
 }
 
 function handleToggleDock() {
-  handleToggleDockFor(props.element);
+  handleToggleDockFor(singleTarget.value);
 }
 
 function onModifierKeyChange(e: KeyboardEvent) {
@@ -1156,9 +1209,20 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div v-if="(element && viewportCorners) || distinctHoveredLocked" class="ac-gizmo-layer">
-    <!-- Unified SVG Gizmo (non-blocking visual border + interactive 8 corner/edge handles; identical for ALL elements) -->
-    <svg v-if="element && viewportCorners" class="ac-gizmo-svg">
+  <div v-if="(singleTarget && viewportCorners) || isMultiSelect || distinctHoveredLocked" class="ac-gizmo-layer">
+    <!-- Multi-selection outlines (Ctrl/Cmd + click multiple targets) -->
+    <svg v-if="isMultiSelect" class="ac-gizmo-svg">
+      <polygon
+        v-for="mp in multiSelectPolys"
+        :key="mp.id"
+        :points="mp.points"
+        class="ac-main-poly multi-selected"
+        :class="{ locked: mp.locked }"
+      />
+    </svg>
+
+    <!-- Single-target SVG Gizmo (non-blocking visual border + interactive 8 corner/edge handles for non-group elements) -->
+    <svg v-else-if="singleTarget && viewportCorners" class="ac-gizmo-svg">
       <!-- Pure visual boundary outline (pointer-events: none so higher-z sibling elements ALWAYS stay clickable!) -->
       <polygon
         :points="quadPointsSvg"
@@ -1166,7 +1230,7 @@ onBeforeUnmount(() => {
         :class="{ locked: isLocked, cropping: isCropping }"
       />
 
-      <!-- Optical center reticle for ALL unlocked elements -->
+      <!-- Optical center reticle for unlocked single elements & groups -->
       <g v-if="!isLocked && !isCropping && quadCenter" class="ac-center-reticle" aria-hidden="true">
         <line :x1="quadCenter.x" :y1="quadCenter.y - 16" :x2="quadCenter.x" :y2="quadCenter.y - 5.5" />
         <line :x1="quadCenter.x" :y1="quadCenter.y + 5.5" :x2="quadCenter.x" :y2="quadCenter.y + 16" />
@@ -1176,8 +1240,8 @@ onBeforeUnmount(() => {
         <circle :cx="quadCenter.x" :cy="quadCenter.y" r="1.6" class="ac-reticle-dot" />
       </g>
 
-      <!-- Unified Interactive Edge Midpoint Bars & Corner Handles (only when unlocked) -->
-      <template v-if="!isLocked">
+      <!-- Unified Interactive Edge Midpoint Bars & Corner Handles (ONLY for unlocked non-group elements!) -->
+      <template v-if="!isLocked && !isGroupTarget">
         <g v-for="eb in edgeBars" :key="eb.edge">
           <line
             :x1="eb.bx1"
@@ -1270,45 +1334,71 @@ onBeforeUnmount(() => {
       </template>
     </svg>
 
-    <!-- Unified MD3 Floating Context Toolbar for ALL World Elements -->
+    <!-- Unified MD3 Floating Context Toolbar (Multi-Select / Group / Element / Crop / Locked) -->
     <div
-      v-if="element && floatingToolbarStyle"
+      v-if="(isMultiSelect || singleTarget) && floatingToolbarStyle"
       ref="toolbarEl"
       class="ac-element-toolbar"
-      :class="{ 'locked-toolbar': isLocked }"
-      :data-element-id="element.id"
+      :class="{ 'locked-toolbar': !isMultiSelect && isLocked }"
+      :data-element-id="singleTarget ? singleTarget.id : 'multi'"
       :style="floatingToolbarStyle"
       @pointerdown.stop
     >
       <div class="ac-toolbar-main">
-        <!-- State 1: Locked -> PassThrough (+ Tools for grid) + Unlock on far right -->
-        <template v-if="isLocked">
-          <button
-            class="ac-btn"
-            :class="{ danger: element.passThrough }"
-            :title="messages.bar.passthroughTitle"
-            @click="handleTogglePassThrough"
-          >
-            {{ element.passThrough ? messages.bar.passthroughOn : messages.bar.passthroughOff }}
-          </button>
-          <button
-            v-if="element.kind === 'grid'"
-            class="ac-btn"
-            :class="{ active: element.dockVisible }"
-            :title="messages.bar.toolsTitle"
-            @click="handleToggleDock"
-          >
-            {{ messages.bar.tools }}
-          </button>
-          <button class="ac-btn active" @click="handleToggleLock">
-            {{ messages.stage.unlock }}
-          </button>
+        <!-- State 0: Multi-Selection -> Group button -->
+        <template v-if="isMultiSelect">
+          <MdActionBtn
+            icon="stack_group"
+            :label="messages.stage.group"
+            :title="messages.stage.groupTitle"
+            :mode="buttonDisplayMode"
+            variant="trigger"
+            tone="primary"
+            size="sm"
+            @click="emit('group-selected')"
+          />
         </template>
 
-        <!-- State 2: Cropping Preview -> Trim Margins (grid) + Reset Crop (if cropped) + Cancel + Done (all trigger buttons) -->
-        <template v-else-if="isCropping && activeCropDraft">
+        <!-- State 1: Locked (Element or Group) -> PassThrough (+ Tools if has grid) + Unlock on far right -->
+        <template v-else-if="singleTarget && isLocked">
+          <MdActionBtn
+            icon="do_not_touch"
+            :label="singleTarget.passThrough ? messages.bar.passthroughOn : messages.bar.passthroughOff"
+            :title="messages.bar.passthroughTitle"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            :tone="singleTarget.passThrough ? 'danger' : 'default'"
+            :active="singleTarget.passThrough"
+            size="sm"
+            @click="handleTogglePassThrough"
+          />
+          <MdActionBtn
+            v-if="targetHasGrid(singleTarget)"
+            icon="build"
+            :label="messages.bar.tools"
+            :title="messages.bar.toolsTitle"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            :active="targetDockVisible(singleTarget)"
+            size="sm"
+            @click="handleToggleDock"
+          />
+          <MdActionBtn
+            icon="lock"
+            :label="messages.stage.unlock"
+            :title="messages.stage.unlock"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            :active="true"
+            size="sm"
+            @click="handleToggleLock"
+          />
+        </template>
+
+        <!-- State 2: Cropping Preview (non-group elements only; text-only triggers without icons) -->
+        <template v-else-if="singleElement && isCropping && activeCropDraft">
           <button
-            v-if="element.kind === 'grid' && gridBounds"
+            v-if="singleElement.kind === 'grid' && gridBounds"
             class="ac-btn action tonal"
             @click="handleCropGridMargins"
           >
@@ -1329,8 +1419,74 @@ onBeforeUnmount(() => {
           </button>
         </template>
 
-        <!-- State 3: Unlocked Normal -> Toggles (Rect|Free, Crop, Tools, Lock) & Triggers (Front, Back, Delete) -->
-        <template v-else>
+        <!-- State 3: Unlocked Group -> NO resize/stretch/crop/reset; Ungroup + layer order + tools + lock + delete -->
+        <template v-else-if="singleTarget && isGroupTarget">
+          <MdActionBtn
+            icon="stack"
+            :label="messages.stage.ungroup"
+            :title="messages.stage.ungroupTitle"
+            :mode="buttonDisplayMode"
+            variant="trigger"
+            tone="tonal"
+            size="sm"
+            @click="emit('ungroup-target', singleTarget.id)"
+          />
+
+          <template v-if="showLayerOrderActions">
+            <MdActionBtn
+              icon="vertical_align_top"
+              :label="messages.stage.bringFront"
+              :mode="buttonDisplayMode"
+              variant="trigger"
+              size="sm"
+              @click="emit('bring-front', singleTarget.id)"
+            />
+            <MdActionBtn
+              icon="vertical_align_bottom"
+              :label="messages.stage.sendBack"
+              :mode="buttonDisplayMode"
+              variant="trigger"
+              size="sm"
+              @click="emit('send-back', singleTarget.id)"
+            />
+          </template>
+
+          <MdActionBtn
+            v-if="targetHasGrid(singleTarget)"
+            icon="build"
+            :label="messages.bar.tools"
+            :title="messages.bar.toolsTitle"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            :active="targetDockVisible(singleTarget)"
+            size="sm"
+            @click="handleToggleDock"
+          />
+
+          <MdActionBtn
+            icon="lock_open"
+            :label="messages.stage.lock"
+            :title="messages.stage.lock"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            size="sm"
+            @click="handleToggleLock"
+          />
+
+          <MdActionBtn
+            v-if="!targetHasGrid(singleTarget)"
+            icon="delete"
+            :label="messages.stage.remove"
+            :mode="buttonDisplayMode"
+            variant="trigger"
+            tone="danger"
+            size="sm"
+            @click="emit('remove-element', singleTarget.id)"
+          />
+        </template>
+
+        <!-- State 4: Unlocked Single Element -> Rect|Free, Reset (text-only), Crop, Front, Back, Tools, Lock, Delete -->
+        <template v-else-if="singleElement">
           <div
             class="ac-segmented"
             role="group"
@@ -1339,15 +1495,15 @@ onBeforeUnmount(() => {
           >
             <button
               class="ac-seg-btn"
-              :class="{ active: element.quadMode === 'rect' }"
-              @click="emit('update-quad-mode', element.id, 'rect')"
+              :class="{ active: singleElement.quadMode === 'rect' }"
+              @click="emit('update-quad-mode', singleElement.id, 'rect')"
             >
               {{ messages.bar.quadRect }}
             </button>
             <button
               class="ac-seg-btn"
-              :class="{ active: element.quadMode === 'free' }"
-              @click="emit('update-quad-mode', element.id, 'free')"
+              :class="{ active: singleElement.quadMode === 'free' }"
+              @click="emit('update-quad-mode', singleElement.id, 'free')"
             >
               {{ messages.bar.quadFree }}
             </button>
@@ -1356,53 +1512,76 @@ onBeforeUnmount(() => {
           <button
             class="ac-btn action"
             :title="messages.stage.resetSizeTitle"
-            @click="emit('reset-size', element.id)"
+            @click="emit('reset-size', singleElement.id)"
           >
             {{ messages.stage.resetSize }}
           </button>
 
-          <button
-            class="ac-btn action"
-            @click="emit('start-crop', element.id)"
-          >
-            {{ messages.stage.crop }}
-          </button>
+          <MdActionBtn
+            icon="crop"
+            :label="messages.stage.crop"
+            :mode="buttonDisplayMode"
+            variant="trigger"
+            size="sm"
+            @click="emit('start-crop', singleElement.id)"
+          />
 
           <template v-if="showLayerOrderActions">
-            <button class="ac-btn action" @click="emit('bring-front', element.id)">
-              {{ messages.stage.bringFront }}
-            </button>
-            <button class="ac-btn action" @click="emit('send-back', element.id)">
-              {{ messages.stage.sendBack }}
-            </button>
+            <MdActionBtn
+              icon="vertical_align_top"
+              :label="messages.stage.bringFront"
+              :mode="buttonDisplayMode"
+              variant="trigger"
+              size="sm"
+              @click="emit('bring-front', singleElement.id)"
+            />
+            <MdActionBtn
+              icon="vertical_align_bottom"
+              :label="messages.stage.sendBack"
+              :mode="buttonDisplayMode"
+              variant="trigger"
+              size="sm"
+              @click="emit('send-back', singleElement.id)"
+            />
           </template>
 
-          <button
-            v-if="element.kind === 'grid'"
-            class="ac-btn"
-            :class="{ active: element.dockVisible }"
+          <MdActionBtn
+            v-if="singleElement.kind === 'grid'"
+            icon="build"
+            :label="messages.bar.tools"
             :title="messages.bar.toolsTitle"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            :active="singleElement.dockVisible"
+            size="sm"
             @click="handleToggleDock"
-          >
-            {{ messages.bar.tools }}
-          </button>
+          />
 
-          <button class="ac-btn" @click="handleToggleLock">
-            {{ messages.stage.lock }}
-          </button>
+          <MdActionBtn
+            icon="lock_open"
+            :label="messages.stage.lock"
+            :title="messages.stage.lock"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            size="sm"
+            @click="handleToggleLock"
+          />
 
-          <button
-            v-if="element.kind !== 'grid'"
-            class="ac-btn action danger"
-            @click="emit('remove-element', element.id)"
-          >
-            {{ messages.stage.remove }}
-          </button>
+          <MdActionBtn
+            v-if="singleElement.kind !== 'grid'"
+            icon="delete"
+            :label="messages.stage.remove"
+            :mode="buttonDisplayMode"
+            variant="trigger"
+            tone="danger"
+            size="sm"
+            @click="emit('remove-element', singleElement.id)"
+          />
         </template>
       </div>
     </div>
 
-    <!-- Hover-revealed Floating Toolbar for Locked Elements (including pass-through elements) -->
+    <!-- Hover-revealed Floating Toolbar for Locked Elements & Locked Groups -->
     <div
       v-if="distinctHoveredLocked && hoverToolbarStyle"
       ref="hoverToolbarEl"
@@ -1412,26 +1591,38 @@ onBeforeUnmount(() => {
       @pointerdown.stop
     >
       <div class="ac-toolbar-main">
-        <button
-          class="ac-btn"
-          :class="{ danger: distinctHoveredLocked.passThrough }"
+        <MdActionBtn
+          icon="do_not_touch"
+          :label="distinctHoveredLocked.passThrough ? messages.bar.passthroughOn : messages.bar.passthroughOff"
           :title="messages.bar.passthroughTitle"
+          :mode="buttonDisplayMode"
+          variant="toggle"
+          :tone="distinctHoveredLocked.passThrough ? 'danger' : 'default'"
+          :active="distinctHoveredLocked.passThrough"
+          size="sm"
           @click="handleTogglePassThroughFor(distinctHoveredLocked)"
-        >
-          {{ distinctHoveredLocked.passThrough ? messages.bar.passthroughOn : messages.bar.passthroughOff }}
-        </button>
-        <button
-          v-if="distinctHoveredLocked.kind === 'grid'"
-          class="ac-btn"
-          :class="{ active: distinctHoveredLocked.dockVisible }"
+        />
+        <MdActionBtn
+          v-if="targetHasGrid(distinctHoveredLocked)"
+          icon="build"
+          :label="messages.bar.tools"
           :title="messages.bar.toolsTitle"
+          :mode="buttonDisplayMode"
+          variant="toggle"
+          :active="targetDockVisible(distinctHoveredLocked)"
+          size="sm"
           @click="handleToggleDockFor(distinctHoveredLocked)"
-        >
-          {{ messages.bar.tools }}
-        </button>
-        <button class="ac-btn active" @click="handleToggleLockFor(distinctHoveredLocked)">
-          {{ messages.stage.unlock }}
-        </button>
+        />
+        <MdActionBtn
+          icon="lock"
+          :label="messages.stage.unlock"
+          :title="messages.stage.unlock"
+          :mode="buttonDisplayMode"
+          variant="toggle"
+          :active="true"
+          size="sm"
+          @click="handleToggleLockFor(distinctHoveredLocked)"
+        />
       </div>
     </div>
   </div>

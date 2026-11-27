@@ -7,7 +7,7 @@ import PerspectiveOverlay from './components/PerspectiveOverlay.vue';
 import TransformGizmo from './components/TransformGizmo.vue';
 import PenpaDockWindow from './components/PenpaDockWindow.vue';
 import SettingsDialog from './components/SettingsDialog.vue';
-import { isPointInQuad, rectToQuad, type Point2D } from './core/homography';
+import { isPointInQuad, quadToBoundingRect, rectToQuad, type Point2D } from './core/homography';
 import type { BlendRenderMode } from './core/webglOverlay';
 import type { GridBoundsNormalized, PenpaIframeBridge } from './core/penpaBridge';
 import { DEFAULT_PENPA_MD3_CSS } from './core/defaultPenpaCss';
@@ -29,11 +29,13 @@ import {
 } from './core/world';
 import {
   cloneQuad,
+  computeCombinedWorldQuad,
   computeInitialItemWorldRect,
   convertElementQuadMode,
   createCropDraft,
   createDefaultCrop,
   generateCanvasItemId,
+  generateGroupId,
   isElementPassThrough,
   isItemCropped,
   resetElementSizeCorners,
@@ -41,10 +43,13 @@ import {
   sanitizeQuad,
   toCanvasImageMeta,
   type CropDraft,
+  type ElementGroup,
   type GridElement,
+  type GroupSelectionTarget,
   type ImageElement,
   type QuadMode,
   type ScreenElement,
+  type SelectableTarget,
   type WorldElement,
 } from './core/canvasItems';
 import {
@@ -56,6 +61,7 @@ import {
 import {
   closeOverlayApp,
   detectPlatform,
+  getIsDebugBuild,
   setOsAlwaysOnTop,
   setOsClickThrough,
   setOsFullscreenOverlay,
@@ -64,12 +70,14 @@ import {
   supportsScreenCapture,
   switchAndroidToImageActivity,
   switchAndroidToOverlayService,
+  toggleOsDevtools,
   type AndroidScreenshotCompositeStatus,
 } from './core/platform';
 import {
   flushPersistedStateNow,
   loadPersistedState,
   patchPersistedState,
+  type ButtonDisplayMode,
 } from './core/storage';
 
 const PRIMARY_GRID_ID = 'grid_primary';
@@ -166,7 +174,7 @@ function createPrimaryGridElement(): GridElement {
     id: PRIMARY_GRID_ID,
     kind: 'grid',
     worldId: ROOT_WORLD_ID,
-    label: '',
+    label: typeof savedState.gridLabel === 'string' ? savedState.gridLabel : '',
     corners: loadInitialWorldCorners(),
     quadMode: savedState.quadMode ?? 'rect',
     crop: sanitizeCrop(savedState.gridCrop),
@@ -175,6 +183,7 @@ function createPrimaryGridElement(): GridElement {
       typeof savedState.opacity === 'number' && savedState.opacity >= 0.1 && savedState.opacity <= 1
         ? savedState.opacity
         : 1.0,
+    enhanceOpacity: !!savedState.gridEnhanceOpacity,
     dockVisible: savedState.dockVisible ?? true,
     visible: savedState.canvasVisible ?? true,
     locked: initialLocked,
@@ -187,9 +196,15 @@ function createPrimaryGridElement(): GridElement {
 
 // ONE unified store for ALL World Elements (grids, images, screen projections) sharing one zIndex axis!
 const elements = ref<WorldElement[]>([createPrimaryGridElement()]);
+const groups = ref<ElementGroup[]>([]);
 const screenStreams = ref<Map<string, MediaStream>>(new Map());
 let itemsHydrated = false;
 
+const buttonDisplayMode = ref<ButtonDisplayMode>(
+  savedState.buttonDisplayMode === 'icon-only' || savedState.buttonDisplayMode === 'text-only'
+    ? savedState.buttonDisplayMode
+    : 'icon-text',
+);
 const overlayFullCanvas = ref(savedState.overlayFullCanvas ?? false);
 const fullCanvasEnabled = computed(
   () => backdropMode.value === 'canvas' || overlayFullCanvas.value,
@@ -206,6 +221,77 @@ const sortedVisibleElements = computed<WorldElement[]>(() =>
     .sort((a, b) => a.zIndex - b.zIndex),
 );
 
+function getGroupForElement(elementId: string): ElementGroup | null {
+  return groups.value.find((g) => g.memberIds.includes(elementId)) ?? null;
+}
+
+function resolveTargetId(id: string): string {
+  const g = getGroupForElement(id);
+  return g ? g.id : id;
+}
+
+function buildGroupTarget(g: ElementGroup): GroupSelectionTarget | null {
+  const byId = new Map(elements.value.map((e) => [e.id, e]));
+  const members: WorldElement[] = [];
+  for (const mid of g.memberIds) {
+    const el = byId.get(mid);
+    if (el) members.push(el);
+  }
+  if (members.length < 2) return null;
+  let maxZ = -Infinity;
+  let minZ = Infinity;
+  let hasGrid = false;
+  let dockVisible = false;
+  for (const m of members) {
+    if (m.zIndex > maxZ) maxZ = m.zIndex;
+    if (m.zIndex < minZ) minZ = m.zIndex;
+    if (m.kind === 'grid') {
+      hasGrid = true;
+      if (m.dockVisible) dockVisible = true;
+    }
+  }
+  return {
+    id: g.id,
+    kind: 'group',
+    label: g.label,
+    memberIds: members.map((m) => m.id),
+    members,
+    corners: computeCombinedWorldQuad(members),
+    zIndex: maxZ,
+    minZIndex: minZ,
+    visible: g.visible,
+    locked: g.locked,
+    passThrough: g.passThrough,
+    hasGrid,
+    dockVisible,
+  };
+}
+
+// Top-level selectable targets (each group is ONE indivisible entry; ungrouped elements are individual entries)
+const allLayerTargets = computed<SelectableTarget[]>(() => {
+  const groupedMemberSet = new Set<string>();
+  const targets: SelectableTarget[] = [];
+  for (const g of groups.value) {
+    const gt = buildGroupTarget(g);
+    if (gt) {
+      targets.push(gt);
+      for (const mid of gt.memberIds) groupedMemberSet.add(mid);
+    }
+  }
+  for (const el of elements.value) {
+    if (!groupedMemberSet.has(el.id)) {
+      targets.push(el);
+    }
+  }
+  return targets.sort((a, b) => a.zIndex - b.zIndex);
+});
+
+const activeLayerTargets = computed<SelectableTarget[]>(() => {
+  if (fullCanvasEnabled.value) return allLayerTargets.value;
+  // Overlay without full canvas: only grids are shown/selectable individually
+  return elements.value.filter((e) => e.kind === 'grid');
+});
+
 // World -> Viewport transform (Overlay locked to identity; Canvas allows pan & zoom)
 const canvasViewport = ref<WorldViewportTransform>(
   sanitizeViewportTransform(savedState.canvasViewport),
@@ -214,8 +300,8 @@ const effectiveViewportTransform = computed<WorldViewportTransform>(() =>
   backdropMode.value === 'canvas' ? canvasViewport.value : IDENTITY_VIEWPORT_TRANSFORM,
 );
 
-const selectedElementId = ref<string | null>(
-  primaryGrid.value.visible && !primaryGrid.value.locked ? primaryGrid.value.id : null,
+const selectedTargetIds = ref<string[]>(
+  primaryGrid.value.visible && !primaryGrid.value.locked ? [primaryGrid.value.id] : [],
 );
 const hoveredLockedId = ref<string | null>(null);
 const cropDraft = ref<CropDraft | null>(null);
@@ -228,9 +314,10 @@ watch(alwaysOnTop, (pinned) => {
 });
 
 function startCropMode(id: string) {
+  if (getGroupForElement(id)) return;
   const el = elements.value.find((e) => e.id === id);
   if (!el || el.locked || !el.visible) return;
-  selectedElementId.value = id;
+  selectedTargetIds.value = [id];
   cropDraft.value = createCropDraft(el);
 }
 
@@ -266,30 +353,50 @@ watch(fullCanvasEnabled, (enabled) => {
       const target = elements.value.find((e) => e.id === cropDraft.value?.elementId);
       if (target && target.kind !== 'grid') cancelCropDraft();
     }
-    if (selectedElementId.value) {
-      const sel = elements.value.find((e) => e.id === selectedElementId.value);
-      if (sel && sel.kind !== 'grid') selectElement(null);
+    const validGridIds = new Set(gridElements.value.map((g) => g.id));
+    const filtered = selectedTargetIds.value.filter((id) => validGridIds.has(id));
+    if (filtered.length !== selectedTargetIds.value.length) {
+      selectedTargetIds.value = filtered;
     }
-    if (hoveredLockedId.value) {
-      const hov = elements.value.find((e) => e.id === hoveredLockedId.value);
-      if (hov && hov.kind !== 'grid') clearHoverLocked();
+    if (hoveredLockedId.value && !validGridIds.has(hoveredLockedId.value)) {
+      clearHoverLocked();
     }
   }
 });
 
-const selectedElement = computed<WorldElement | null>(() => {
-  if (!selectedElementId.value) return null;
-  const el = elements.value.find((e) => e.id === selectedElementId.value) ?? null;
-  if (!el || !el.visible || (!fullCanvasEnabled.value && el.kind !== 'grid')) return null;
-  return el;
+const selectedTargets = computed<SelectableTarget[]>(() => {
+  const map = new Map(activeLayerTargets.value.map((t) => [t.id, t]));
+  const list: SelectableTarget[] = [];
+  for (const id of selectedTargetIds.value) {
+    const t = map.get(id);
+    if (t && t.visible) list.push(t);
+  }
+  return list;
 });
 
-const hoveredLockedElement = computed<WorldElement | null>(() => {
+const singleSelectedTarget = computed<SelectableTarget | null>(() =>
+  selectedTargets.value.length === 1 ? selectedTargets.value[0] : null,
+);
+
+const selectedElement = computed<WorldElement | null>(() =>
+  singleSelectedTarget.value && singleSelectedTarget.value.kind !== 'group'
+    ? singleSelectedTarget.value
+    : null,
+);
+
+const selectedElementId = computed<string | null>(() => singleSelectedTarget.value?.id ?? null);
+
+const hoveredLockedTarget = computed<SelectableTarget | null>(() => {
   if (!hoveredLockedId.value) return null;
-  const el = elements.value.find((e) => e.id === hoveredLockedId.value) ?? null;
-  if (!el || !el.visible || !el.locked || (!fullCanvasEnabled.value && el.kind !== 'grid')) return null;
-  return el;
+  const t = activeLayerTargets.value.find((x) => x.id === hoveredLockedId.value) ?? null;
+  if (!t || !t.visible || !t.locked) return null;
+  return t;
 });
+
+function isElementVisuallySelected(elId: string): boolean {
+  const targetId = fullCanvasEnabled.value ? resolveTargetId(elId) : elId;
+  return selectedTargetIds.value.includes(targetId);
+}
 
 const showUnavailableOptions = ref(savedState.showUnavailableOptions ?? false);
 const settingsOpen = ref(false);
@@ -350,9 +457,15 @@ function setDockRect(gridId: string, r: { x: number; y: number; w: number; h: nu
 }
 
 const activeBridge = computed<PenpaIframeBridge | null>(() => {
-  const sel = selectedElement.value;
+  const sel = singleSelectedTarget.value;
   if (sel && sel.kind === 'grid') {
     return gridBridges.value.get(sel.id) ?? gridBridges.value.get(PRIMARY_GRID_ID) ?? null;
+  }
+  if (sel && sel.kind === 'group') {
+    const gridMember = sel.members.find((m) => m.kind === 'grid');
+    if (gridMember) {
+      return gridBridges.value.get(gridMember.id) ?? gridBridges.value.get(PRIMARY_GRID_ID) ?? null;
+    }
   }
   return gridBridges.value.get(PRIMARY_GRID_ID) ?? null;
 });
@@ -378,14 +491,145 @@ function scheduleHoverHide() {
   hoveredLockedId.value = null;
 }
 
-function selectElement(id: string | null) {
-  if (selectedElementId.value !== id) {
+function selectElement(id: string | null, additive = false) {
+  if (id === null) {
     cancelCropDraft();
+    selectedTargetIds.value = [];
+    return;
   }
-  selectedElementId.value = id;
+  const targetId = fullCanvasEnabled.value ? resolveTargetId(id) : id;
+  if (!additive) {
+    if (cropDraft.value && cropDraft.value.elementId !== targetId) {
+      cancelCropDraft();
+    }
+    selectedTargetIds.value = [targetId];
+    return;
+  }
+
+  // Ctrl / Command additive multi-selection: never clears previously selected elements!
+  cancelCropDraft();
+  if (selectedTargetIds.value.includes(targetId)) {
+    if (selectedTargetIds.value.length > 1) {
+      selectedTargetIds.value = selectedTargetIds.value.filter((x) => x !== targetId);
+    }
+  } else {
+    selectedTargetIds.value = [...selectedTargetIds.value, targetId];
+  }
+}
+
+function pruneInvalidGroups() {
+  const validIds = new Set(elements.value.map((e) => e.id));
+  const nextGroups: ElementGroup[] = [];
+  let changed = false;
+  for (const g of groups.value) {
+    const kept = g.memberIds.filter((mid) => validIds.has(mid));
+    if (kept.length >= 2) {
+      if (kept.length !== g.memberIds.length) {
+        changed = true;
+        nextGroups.push({ ...g, memberIds: kept });
+      } else {
+        nextGroups.push(g);
+      }
+    } else {
+      changed = true;
+    }
+  }
+  if (changed) {
+    groups.value = nextGroups;
+  }
+}
+
+function applyLayerTargetOrder(orderedTargets: SelectableTarget[]) {
+  const zById = new Map<string, number>();
+  let nextZ = 1;
+  for (const t of orderedTargets) {
+    if (t.kind === 'group') {
+      const sortedMembers = [...t.members].sort((a, b) => a.zIndex - b.zIndex);
+      for (const m of sortedMembers) {
+        zById.set(m.id, nextZ++);
+      }
+    } else {
+      zById.set(t.id, nextZ++);
+    }
+  }
+  elements.value = elements.value.map((el) => ({
+    ...el,
+    zIndex: zById.get(el.id) ?? el.zIndex,
+  }));
+}
+
+function groupSelectedTargets() {
+  if (!fullCanvasEnabled.value) return;
+  const targets = selectedTargets.value;
+  if (targets.length < 2) return;
+
+  const memberIds: string[] = [];
+  const seen = new Set<string>();
+  const absorbedGroupIds = new Set<string>();
+  const sortedTargets = [...targets].sort((a, b) => a.zIndex - b.zIndex);
+
+  for (const t of sortedTargets) {
+    if (t.kind === 'group') {
+      absorbedGroupIds.add(t.id);
+      const sortedMembers = [...t.members].sort((a, b) => a.zIndex - b.zIndex);
+      for (const m of sortedMembers) {
+        if (!seen.has(m.id)) {
+          seen.add(m.id);
+          memberIds.push(m.id);
+        }
+      }
+    } else if (!seen.has(t.id)) {
+      seen.add(t.id);
+      memberIds.push(t.id);
+    }
+  }
+
+  if (memberIds.length < 2) return;
+  cancelCropDraft();
+
+  const newGroup: ElementGroup = {
+    id: generateGroupId(),
+    label: '',
+    memberIds,
+    visible: true,
+    locked: false,
+    passThrough: false,
+  };
+
+  // Unlock & show all members when creating a new group so the group can be moved immediately
+  elements.value = elements.value.map((el) =>
+    seen.has(el.id) ? ({ ...el, visible: true, locked: false, passThrough: false } as WorldElement) : el,
+  );
+  groups.value = [...groups.value.filter((g) => !absorbedGroupIds.has(g.id)), newGroup];
+
+  // Make the grouped members contiguous in zIndex at the top member's slot
+  const ordered = [...allLayerTargets.value];
+  applyLayerTargetOrder(ordered);
+  clearHoverLocked();
+  selectedTargetIds.value = [newGroup.id];
+}
+
+function ungroupTarget(groupId: string) {
+  const grp = groups.value.find((g) => g.id === groupId);
+  if (!grp) return;
+  groups.value = groups.value.filter((g) => g.id !== groupId);
+  const validIds = new Set(elements.value.map((e) => e.id));
+  const released = grp.memberIds.filter((mid) => validIds.has(mid));
+  if (hoveredLockedId.value === groupId) clearHoverLocked();
+  selectedTargetIds.value = released;
 }
 
 function handleLockElement(id: string) {
+  const grp = groups.value.find((g) => g.id === id);
+  if (grp) {
+    const memberSet = new Set(grp.memberIds);
+    if (cropDraft.value && memberSet.has(cropDraft.value.elementId)) cancelCropDraft();
+    groups.value = groups.value.map((g) => (g.id === id ? { ...g, locked: true } : g));
+    elements.value = elements.value.map((el) =>
+      memberSet.has(el.id) ? ({ ...el, locked: true } as WorldElement) : el,
+    );
+    return;
+  }
   const el = elements.value.find((e) => e.id === id);
   if (!el) return;
   if (cropDraft.value?.elementId === id) {
@@ -395,11 +639,24 @@ function handleLockElement(id: string) {
 }
 
 function handleUnlockElement(id: string) {
+  const grp = groups.value.find((g) => g.id === id);
+  if (grp) {
+    const memberSet = new Set(grp.memberIds);
+    groups.value = groups.value.map((g) =>
+      g.id === id ? { ...g, locked: false, passThrough: false } : g,
+    );
+    elements.value = elements.value.map((el) =>
+      memberSet.has(el.id) ? ({ ...el, locked: false, passThrough: false } as WorldElement) : el,
+    );
+    clearHoverLocked();
+    selectedTargetIds.value = [id];
+    return;
+  }
   const el = elements.value.find((e) => e.id === id);
   if (!el) return;
   updateElement(id, { locked: false });
   clearHoverLocked();
-  selectedElementId.value = id;
+  selectedTargetIds.value = [id];
 }
 
 function updateElement(id: string, patch: Partial<WorldElement>) {
@@ -408,7 +665,82 @@ function updateElement(id: string, patch: Partial<WorldElement>) {
   );
 }
 
+function focusMultiMember(id: string) {
+  const targetId = fullCanvasEnabled.value ? resolveTargetId(id) : id;
+  if (!selectedTargetIds.value.includes(targetId)) return;
+  if (selectedTargetIds.value[selectedTargetIds.value.length - 1] === targetId) return;
+  selectedTargetIds.value = [
+    ...selectedTargetIds.value.filter((x) => x !== targetId),
+    targetId,
+  ];
+}
+
+function renameTarget(id: string, nextLabel: string) {
+  const grp = groups.value.find((g) => g.id === id);
+  if (grp) {
+    groups.value = groups.value.map((g) => (g.id === id ? { ...g, label: nextLabel } : g));
+    return;
+  }
+  updateElement(id, { label: nextLabel });
+}
+
 function updateElementCorners(id: string, corners: [Point2D, Point2D, Point2D, Point2D]) {
+  const source = elements.value.find((e) => e.id === id);
+  if (!source) return;
+
+  // Multi-selection drag: translate ALL unlocked members of ALL selected targets together!
+  if (selectedTargetIds.value.length >= 2 && isElementVisuallySelected(id)) {
+    const dx = corners[0].x - source.corners[0].x;
+    const dy = corners[0].y - source.corners[0].y;
+    const moveIds = new Set<string>();
+    for (const target of selectedTargets.value) {
+      if (target.locked) continue;
+      if (target.kind === 'group') {
+        for (const m of target.members) {
+          if (!m.locked) moveIds.add(m.id);
+        }
+      } else {
+        moveIds.add(target.id);
+      }
+    }
+    if (moveIds.size > 0) {
+      elements.value = elements.value.map((el) => {
+        if (!moveIds.has(el.id)) return el;
+        const c = el.corners;
+        return {
+          ...el,
+          corners: [
+            { x: c[0].x + dx, y: c[0].y + dy },
+            { x: c[1].x + dx, y: c[1].y + dy },
+            { x: c[2].x + dx, y: c[2].y + dy },
+            { x: c[3].x + dx, y: c[3].y + dy },
+          ],
+        } as WorldElement;
+      });
+      return;
+    }
+  }
+
+  const grp = fullCanvasEnabled.value ? getGroupForElement(id) : null;
+  if (grp) {
+    const dx = corners[0].x - source.corners[0].x;
+    const dy = corners[0].y - source.corners[0].y;
+    const memberSet = new Set(grp.memberIds);
+    elements.value = elements.value.map((el) => {
+      if (!memberSet.has(el.id)) return el;
+      const c = el.corners;
+      return {
+        ...el,
+        corners: [
+          { x: c[0].x + dx, y: c[0].y + dy },
+          { x: c[1].x + dx, y: c[1].y + dy },
+          { x: c[2].x + dx, y: c[2].y + dy },
+          { x: c[3].x + dx, y: c[3].y + dy },
+        ],
+      } as WorldElement;
+    });
+    return;
+  }
   updateElement(id, { corners });
 }
 
@@ -446,55 +778,71 @@ function resetElementSize(id: string) {
 }
 
 function bringElementFront(id: string) {
-  updateElement(id, { zIndex: nextZIndex() });
+  const targetId = resolveTargetId(id);
+  const ordered = [...allLayerTargets.value];
+  const idx = ordered.findIndex((t) => t.id === targetId);
+  if (idx < 0 || idx === ordered.length - 1) return;
+  const [moved] = ordered.splice(idx, 1);
+  ordered.push(moved);
+  applyLayerTargetOrder(ordered);
 }
 
 function sendElementBack(id: string) {
-  let minZ = Infinity;
-  for (const el of elements.value) {
-    if (el.zIndex < minZ) minZ = el.zIndex;
-  }
-  updateElement(id, { zIndex: Math.max(1, (Number.isFinite(minZ) ? minZ : 2) - 1) });
-  // Normalize all zIndices >= 1 cleanly so nothing ever drops below checkerboard zIndex 0
-  normalizeZIndices();
+  const targetId = resolveTargetId(id);
+  const ordered = [...allLayerTargets.value];
+  const idx = ordered.findIndex((t) => t.id === targetId);
+  if (idx <= 0) return;
+  const [moved] = ordered.splice(idx, 1);
+  ordered.unshift(moved);
+  applyLayerTargetOrder(ordered);
 }
 
 function normalizeZIndices() {
-  const sorted = [...elements.value].sort((a, b) => a.zIndex - b.zIndex);
-  const zById = new Map<string, number>();
-  sorted.forEach((el, idx) => zById.set(el.id, idx + 1));
-  elements.value = elements.value.map((el) => ({
-    ...el,
-    zIndex: zById.get(el.id) ?? el.zIndex,
-  }));
+  applyLayerTargetOrder([...allLayerTargets.value]);
 }
 
 function moveElementLayerOrder(id: string, dir: 'up' | 'down') {
-  const sorted = [...elements.value].sort((a, b) => a.zIndex - b.zIndex);
-  const idx = sorted.findIndex((e) => e.id === id);
+  const targetId = resolveTargetId(id);
+  const ordered = [...allLayerTargets.value];
+  const idx = ordered.findIndex((t) => t.id === targetId);
   if (idx < 0) return;
   const swapIdx = dir === 'up' ? idx + 1 : idx - 1;
-  if (swapIdx < 0 || swapIdx >= sorted.length) return;
-  const reordered = [...sorted];
-  const [moved] = reordered.splice(idx, 1);
-  reordered.splice(swapIdx, 0, moved);
-  const zById = new Map<string, number>();
-  reordered.forEach((el, i) => zById.set(el.id, i + 1));
-  elements.value = elements.value.map((el) => ({
-    ...el,
-    zIndex: zById.get(el.id) ?? el.zIndex,
-  }));
+  if (swapIdx < 0 || swapIdx >= ordered.length) return;
+  const [moved] = ordered.splice(idx, 1);
+  ordered.splice(swapIdx, 0, moved);
+  applyLayerTargetOrder(ordered);
 }
 
 function toggleElementVisible(id: string) {
+  const grp = groups.value.find((g) => g.id === id);
+  if (grp) {
+    const nextVis = !grp.visible;
+    const memberSet = new Set(grp.memberIds);
+    groups.value = groups.value.map((g) => (g.id === id ? { ...g, visible: nextVis } : g));
+    elements.value = elements.value.map((el) =>
+      memberSet.has(el.id) ? ({ ...el, visible: nextVis } as WorldElement) : el,
+    );
+    if (!nextVis) {
+      selectedTargetIds.value = selectedTargetIds.value.filter((x) => x !== id);
+    }
+    return;
+  }
   const el = elements.value.find((e) => e.id === id);
   if (!el) return;
   const nextVis = !el.visible;
   updateElement(id, { visible: nextVis });
-  if (!nextVis && selectedElementId.value === id) selectElement(null);
+  if (!nextVis) {
+    selectedTargetIds.value = selectedTargetIds.value.filter((x) => x !== id);
+  }
 }
 
 function toggleElementLock(id: string) {
+  const grp = groups.value.find((g) => g.id === id);
+  if (grp) {
+    if (grp.locked) handleUnlockElement(id);
+    else handleLockElement(id);
+    return;
+  }
   const el = elements.value.find((e) => e.id === id);
   if (!el) return;
   if (el.locked) {
@@ -505,24 +853,46 @@ function toggleElementLock(id: string) {
 }
 
 function toggleElementPassThrough(id: string) {
+  const grp = groups.value.find((g) => g.id === id);
+  if (grp) {
+    if (!grp.locked) return;
+    const nextPt = !grp.passThrough;
+    const memberSet = new Set(grp.memberIds);
+    groups.value = groups.value.map((g) => (g.id === id ? { ...g, passThrough: nextPt } : g));
+    elements.value = elements.value.map((el) =>
+      memberSet.has(el.id) ? ({ ...el, passThrough: nextPt } as WorldElement) : el,
+    );
+    return;
+  }
   const el = elements.value.find((e) => e.id === id);
   if (!el || !el.locked) return;
   updateElement(id, { passThrough: !el.passThrough });
 }
 
 function toggleGridDock(id: string) {
+  const grp = groups.value.find((g) => g.id === id);
+  if (grp) {
+    const grids = elements.value.filter(
+      (e): e is GridElement => e.kind === 'grid' && grp.memberIds.includes(e.id),
+    );
+    if (grids.length === 0) return;
+    const nextDock = !grids.some((g) => g.dockVisible);
+    const gridIdSet = new Set(grids.map((g) => g.id));
+    elements.value = elements.value.map((el) =>
+      gridIdSet.has(el.id) ? ({ ...el, dockVisible: nextDock } as WorldElement) : el,
+    );
+    return;
+  }
   const el = elements.value.find((e) => e.id === id);
   if (!el || el.kind !== 'grid') return;
   updateElement(id, { dockVisible: !el.dockVisible });
 }
 
-function removeElement(id: string) {
-  const el = elements.value.find((e) => e.id === id);
-  if (!el || el.kind === 'grid') return;
+function disposeMediaElementResources(el: WorldElement) {
   if (el.kind === 'image') {
     if (el.src.startsWith('blob:')) URL.revokeObjectURL(el.src);
     void deleteCanvasImageBlob(el.id);
-  } else {
+  } else if (el.kind === 'screen') {
     const stream = screenStreams.value.get(el.streamId);
     if (stream) {
       stream.getTracks().forEach((t) => t.stop());
@@ -531,16 +901,38 @@ function removeElement(id: string) {
       screenStreams.value = nextStreams;
     }
   }
+}
+
+function removeElement(id: string) {
+  const grp = groups.value.find((g) => g.id === id);
+  if (grp) {
+    const memberSet = new Set(grp.memberIds);
+    const members = elements.value.filter((e) => memberSet.has(e.id));
+    // Never delete a group that contains a Penpa+ grid
+    if (members.some((m) => m.kind === 'grid')) return;
+    for (const m of members) disposeMediaElementResources(m);
+    groups.value = groups.value.filter((g) => g.id !== id);
+    elements.value = elements.value.filter((e) => !memberSet.has(e.id));
+    selectedTargetIds.value = selectedTargetIds.value.filter((x) => x !== id);
+    return;
+  }
+
+  const el = elements.value.find((e) => e.id === id);
+  if (!el || el.kind === 'grid') return;
+  disposeMediaElementResources(el);
   elements.value = elements.value.filter((e) => e.id !== id);
-  if (selectedElementId.value === id) selectElement(null);
+  pruneInvalidGroups();
+  selectedTargetIds.value = selectedTargetIds.value.filter((x) => x !== id);
 }
 
 // --- Persistence ---
   watch(
     [
       elements,
+      groups,
       canvasViewport,
       layersVisible,
+      buttonDisplayMode,
       overlayFullCanvas,
       showUnavailableOptions,
       customCssEnabled,
@@ -553,14 +945,17 @@ function removeElement(id: string) {
         blendMode: g.blendMode,
         quadMode: g.quadMode,
         opacity: g.opacity,
+        gridEnhanceOpacity: g.enhanceOpacity,
         gridLocked: g.locked,
         gridPassThrough: g.passThrough,
         gridCrop: { ...g.crop },
         gridZIndex: g.zIndex,
+        gridLabel: g.label,
         calibrating: !g.locked,
         dockVisible: g.dockVisible,
         canvasVisible: g.visible,
         layersWindow: { xRatio: 0, yRatio: 0, open: layersVisible.value },
+        buttonDisplayMode: buttonDisplayMode.value,
         overlayFullCanvas: overlayFullCanvas.value,
         showUnavailableOptions: showUnavailableOptions.value,
         worldCorners: cloneQuad(g.corners),
@@ -573,6 +968,14 @@ function removeElement(id: string) {
         patch.canvasItems = elements.value
           .filter((e): e is ImageElement => e.kind === 'image')
           .map(toCanvasImageMeta);
+        patch.elementGroups = groups.value.map((grp) => ({
+          id: grp.id,
+          label: grp.label,
+          memberIds: [...grp.memberIds],
+          visible: grp.visible,
+          locked: grp.locked,
+          passThrough: grp.passThrough,
+        }));
       }
       patchPersistedState(patch);
     },
@@ -683,10 +1086,10 @@ async function syncOverlayHitRegions() {
       : { x: 0, y: 0, w: 0, h: 0 };
 
   const extraUiRects: Array<{ x: number; y: number; w: number; h: number }> = [];
-  if (selectedElement.value && toolbarRect.value.w > 0 && toolbarRect.value.h > 0) {
+  if (selectedTargets.value.length > 0 && toolbarRect.value.w > 0 && toolbarRect.value.h > 0) {
     extraUiRects.push(toolbarRect.value);
   }
-  if (hoveredLockedElement.value && hoverToolbarRect.value.w > 0 && hoverToolbarRect.value.h > 0) {
+  if (hoveredLockedTarget.value && hoverToolbarRect.value.w > 0 && hoverToolbarRect.value.h > 0) {
     extraUiRects.push(hoverToolbarRect.value);
   }
   for (const grid of gridElements.value) {
@@ -797,13 +1200,14 @@ watch(
     screenshotPromptOpen,
     unavailableReasonKey,
     layersVisible,
-    selectedElementId,
+    selectedTargetIds,
     hoveredLockedId,
     barRect,
     toolbarRect,
     hoverToolbarRect,
     dockRects,
     elements,
+    groups,
     gridOuterQuads,
   ],
   () => {
@@ -890,8 +1294,45 @@ async function hydratePersistedImages() {
 
   if (restored.length > 0) {
     elements.value = [...elements.value, ...restored];
-    normalizeZIndices();
   }
+  // Restore persisted element groups once all images are hydrated
+  const savedGroups = savedState.elementGroups;
+  if (Array.isArray(savedGroups) && savedGroups.length > 0) {
+    const validIds = new Set(elements.value.map((e) => e.id));
+    const usedMembers = new Set<string>();
+    const restoredGroups: ElementGroup[] = [];
+    for (const rawG of savedGroups) {
+      if (!rawG || typeof rawG.id !== 'string' || !Array.isArray(rawG.memberIds)) continue;
+      const memberIds = rawG.memberIds.filter(
+        (mid): mid is string => typeof mid === 'string' && validIds.has(mid) && !usedMembers.has(mid),
+      );
+      if (memberIds.length < 2) continue;
+      memberIds.forEach((mid) => usedMembers.add(mid));
+      restoredGroups.push({
+        id: rawG.id,
+        label: typeof rawG.label === 'string' ? rawG.label : '',
+        memberIds,
+        visible: rawG.visible !== false,
+        locked: !!rawG.locked,
+        passThrough: !!rawG.passThrough,
+      });
+    }
+    if (restoredGroups.length > 0) {
+      groups.value = restoredGroups;
+      // Ensure member states stay synchronized with their group
+      const groupByMember = new Map<string, ElementGroup>();
+      for (const grp of restoredGroups) {
+        for (const mid of grp.memberIds) groupByMember.set(mid, grp);
+      }
+      elements.value = elements.value.map((el) => {
+        const grp = groupByMember.get(el.id);
+        return grp
+          ? ({ ...el, visible: grp.visible, locked: grp.locked, passThrough: grp.passThrough } as WorldElement)
+          : el;
+      });
+    }
+  }
+  normalizeZIndices();
   itemsHydrated = true;
   void pruneCanvasImageBlobs(
     new Set([
@@ -1029,6 +1470,76 @@ function onPaste(e: ClipboardEvent) {
   }
 }
 
+function probeVideoStreamDimensions(
+  stream: MediaStream,
+  track?: MediaStreamTrack,
+): Promise<{ w: number; h: number }> {
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    let settled = false;
+
+    const finish = (w: number, h: number) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      video.removeEventListener('loadedmetadata', onMeta);
+      video.removeEventListener('resize', onMeta);
+      video.pause();
+      video.srcObject = null;
+      resolve({ w: Math.max(1, Math.round(w)), h: Math.max(1, Math.round(h)) });
+    };
+
+    const onMeta = () => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        finish(video.videoWidth, video.videoHeight);
+      }
+    };
+
+    const timer = window.setTimeout(() => {
+      const settings = track?.getSettings?.();
+      const fw = settings?.width && settings.width > 0 ? settings.width : 1280;
+      const fh = settings?.height && settings.height > 0 ? settings.height : 720;
+      finish(fw, fh);
+    }, 700);
+
+    video.addEventListener('loadedmetadata', onMeta);
+    video.addEventListener('resize', onMeta);
+    video.srcObject = stream;
+    void video.play().catch(() => {});
+  });
+}
+
+function handleMediaNaturalSizeChange(id: string, w: number, h: number) {
+  if (w <= 0 || h <= 0) return;
+  const el = elements.value.find((e) => e.id === id);
+  if (!el || el.kind !== 'screen') return;
+  if (el.naturalW === w && el.naturalH === h) return;
+
+  // Update true source dimensions; if uncropped rect, preserve center & scale to match true source aspect
+  const patch: Partial<ScreenElement> = { naturalW: w, naturalH: h };
+  if (el.quadMode === 'rect' && !isItemCropped(el.crop)) {
+    const rect = quadToBoundingRect(el.corners);
+    const cx = rect.x + rect.w * 0.5;
+    const cy = rect.y + rect.h * 0.5;
+    const oldDiag = Math.hypot(rect.w, rect.h);
+    const newDiag = Math.hypot(w, h);
+    if (oldDiag > 16 && newDiag > 0) {
+      const scale = oldDiag / newDiag;
+      const nextW = Math.max(48, w * scale);
+      const nextH = Math.max(48, h * scale);
+      patch.corners = rectToQuad({
+        x: cx - nextW * 0.5,
+        y: cy - nextH * 0.5,
+        w: nextW,
+        h: nextH,
+      });
+    }
+  }
+  updateElement(id, patch);
+}
+
 async function addScreenProjection() {
   if (!canScreenCapture) {
     handleUnavailableClick('screenUnsupported');
@@ -1041,9 +1552,8 @@ async function addScreenProjection() {
     });
     const id = generateCanvasItemId('scr');
     const track = stream.getVideoTracks()[0];
-    const settings = track?.getSettings?.();
-    const naturalW = settings?.width && settings.width > 0 ? settings.width : 1280;
-    const naturalH = settings?.height && settings.height > 0 ? settings.height : 720;
+    // Probe the actual decoded video source dimensions (window/tab/region size), NOT the monitor size!
+    const { w: naturalW, h: naturalH } = await probeVideoStreamDimensions(stream, track);
     const safe = safeAreaInsets.value;
     const rect = computeInitialItemWorldRect(
       naturalW,
@@ -1129,9 +1639,9 @@ function evaluateLockedHoverAt(x: number, y: number) {
   // 1. Keep current locked hover pinned while cursor is inside its floating toolbar
   //    or traveling through the tapered bridge corridor between the element and its toolbar.
   //    Leaving in any other direction hides immediately (0ms).
-  const cur = hoveredLockedElement.value;
+  const cur = hoveredLockedTarget.value;
   if (cur) {
-    const usePrimaryTb = selectedElement.value?.id === cur.id;
+    const usePrimaryTb = singleSelectedTarget.value?.id === cur.id;
     const tbRect = usePrimaryTb ? toolbarRect.value : hoverToolbarRect.value;
     if (pointInPaddedRect(x, y, tbRect, 6)) {
       return;
@@ -1195,7 +1705,7 @@ function evaluateLockedHoverAt(x: number, y: number) {
 
   if (hitLocked) {
     cancelHoverHideTimer();
-    hoveredLockedId.value = hitLocked.id;
+    hoveredLockedId.value = fullCanvasEnabled.value ? resolveTargetId(hitLocked.id) : hitLocked.id;
   } else {
     scheduleHoverHide();
   }
@@ -1280,6 +1790,24 @@ function onWindowMiddlePanUp(e: PointerEvent) {
 function onWindowKey(type: 'keydown' | 'keyup', e: KeyboardEvent) {
   if (hotkeyRecording.value) return;
 
+  if (
+    type === 'keydown' &&
+    e.code === 'F12' &&
+    !e.ctrlKey &&
+    !e.altKey &&
+    !e.shiftKey &&
+    !e.metaKey &&
+    platform === 'tauri' &&
+    isTauriDebugBuild
+  ) {
+    if (!e.repeat) {
+      void toggleOsDevtools();
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+
   if (type === 'keydown' && e.code === 'Escape') {
     if (unavailableReasonKey.value) {
       e.preventDefault();
@@ -1302,12 +1830,15 @@ function onWindowKey(type: 'keydown' | 'keyup', e: KeyboardEvent) {
     spacePanning.value = type === 'keydown' && backdropMode.value === 'canvas';
   }
 
-  const sel = selectedElement.value;
+  const sel = singleSelectedTarget.value;
+  const canDeleteSel =
+    !!sel &&
+    !sel.locked &&
+    (sel.kind === 'group' ? !sel.hasGrid : sel.kind !== 'grid');
   if (
     type === 'keydown' &&
+    canDeleteSel &&
     sel &&
-    sel.kind !== 'grid' &&
-    !sel.locked &&
     (e.code === 'Delete' || e.code === 'Backspace')
   ) {
     e.preventDefault();
@@ -1340,7 +1871,7 @@ function handleWindowFocusLost() {
   spacePanning.value = false;
   endMiddlePan();
   cancelCropDraft();
-  if (selectedElementId.value !== null) {
+  if (selectedTargetIds.value.length > 0) {
     selectElement(null);
   }
   clearHoverLocked();
@@ -1366,6 +1897,7 @@ function onVisibilityChange() {
 
 let unlistenOverlayCursor: (() => void) | null = null;
 let unlistenWindowFocus: (() => void) | null = null;
+let isTauriDebugBuild = false;
 
 onMounted(async () => {
   window.addEventListener('paste', onPaste);
@@ -1407,8 +1939,16 @@ onMounted(async () => {
   window.__PENPAANYWHERE_ON_UNAVAILABLE__ = (key: string) => {
     if (key === 'penpaCloneUnsupported') handleUnavailableClick(key);
   };
+  window.__PENPAANYWHERE_TOGGLE_DEVTOOLS__ = (shouldToggle = true) => {
+    if (hotkeyRecording.value || platform !== 'tauri' || !isTauriDebugBuild) return false;
+    if (shouldToggle) {
+      void toggleOsDevtools();
+    }
+    return true;
+  };
 
   if (platform === 'tauri') {
+    isTauriDebugBuild = await getIsDebugBuild();
     try {
       const { listen } = await import('@tauri-apps/api/event');
       unlistenOverlayCursor = await listen<[number, number]>('overlay-cursor-pos', (ev) => {
@@ -1443,6 +1983,7 @@ onBeforeUnmount(() => {
   unlistenOverlayCursor = null;
   unlistenWindowFocus?.();
   unlistenWindowFocus = null;
+  delete window.__PENPAANYWHERE_TOGGLE_DEVTOOLS__;
   window.removeEventListener('paste', onPaste);
   window.removeEventListener('keydown', onKeyDown);
   window.removeEventListener('keyup', onKeyUp);
@@ -1488,7 +2029,8 @@ onBeforeUnmount(() => {
       v-if="backdropMode === 'canvas'"
       v-model:viewport-transform="canvasViewport"
       :selected-id="selectedElementId"
-      @select="selectElement"
+      :button-display-mode="buttonDisplayMode"
+      @select="(id) => selectElement(id, false)"
     />
 
     <!-- Unified World Elements rendered as direct siblings in true shared zIndex order (BOTH Overlay & Canvas modes!) -->
@@ -1501,13 +2043,16 @@ onBeforeUnmount(() => {
         :has-dom-backdrop="hasDomBackdrop"
         :viewport-transform="effectiveViewportTransform"
         :world-bounded-to-viewport="backdropMode === 'overlay'"
-        :selected="selectedElementId === el.id"
+        :selected="isElementVisuallySelected(el.id)"
+        :multi-selected="selectedTargetIds.length >= 2 && isElementVisuallySelected(el.id)"
+        :grouped="fullCanvasEnabled && !!getGroupForElement(el.id)"
         :crop-draft="cropDraft?.elementId === el.id ? cropDraft : null"
         :space-panning="backdropMode === 'canvas' && spacePanning"
         @select="selectElement"
+        @focus-multi-member="focusMultiMember"
         @update-corners="updateElementCorners"
         @update-crop-draft="updateCropDraft"
-        @toggle-crop="(id) => { cropDraft?.elementId === id ? cancelCropDraft() : startCropMode(id); }"
+        @toggle-crop="(id) => { if (fullCanvasEnabled && getGroupForElement(id)) return; cropDraft?.elementId === id ? cancelCropDraft() : startCropMode(id); }"
         @quad-geometry-change="(q) => setGridOuterQuad(el.id, q)"
         @bounds-change="(b) => setGridBounds(el.id, b)"
       />
@@ -1517,24 +2062,29 @@ onBeforeUnmount(() => {
         :stream="el.kind === 'screen' ? (screenStreams.get(el.streamId) ?? null) : null"
         :viewport-transform="effectiveViewportTransform"
         :world-bounded-to-viewport="backdropMode === 'overlay'"
-        :selected="selectedElementId === el.id"
+        :selected="isElementVisuallySelected(el.id)"
+        :multi-selected="selectedTargetIds.length >= 2 && isElementVisuallySelected(el.id)"
+        :grouped="fullCanvasEnabled && !!getGroupForElement(el.id)"
         :crop-draft="cropDraft?.elementId === el.id ? cropDraft : null"
         :space-panning="backdropMode === 'canvas' && spacePanning"
         @select="selectElement"
+        @focus-multi-member="focusMultiMember"
         @update-corners="updateElementCorners"
         @update-crop-draft="updateCropDraft"
-        @toggle-crop="(id) => { cropDraft?.elementId === id ? cancelCropDraft() : startCropMode(id); }"
+        @update-natural-size="handleMediaNaturalSizeChange"
+        @toggle-crop="(id) => { if (fullCanvasEnabled && getGroupForElement(id)) return; cropDraft?.elementId === id ? cancelCropDraft() : startCropMode(id); }"
       />
     </template>
 
-    <!-- Unified Transform / Crop / Lock Gizmo + Floating Context Toolbar for ALL World Elements -->
+    <!-- Unified Transform / Crop / Lock / Group Gizmo + Floating Context Toolbar for ALL World Elements & Groups -->
     <TransformGizmo
-      :element="selectedElement"
+      :selected-targets="selectedTargets"
       :crop-draft="cropDraft"
-      :hovered-locked-element="hoveredLockedElement"
+      :hovered-locked-target="hoveredLockedTarget"
       :viewport-transform="effectiveViewportTransform"
       :world-bounded-to-viewport="backdropMode === 'overlay'"
       :show-layer-order-actions="fullCanvasEnabled"
+      :button-display-mode="buttonDisplayMode"
       :grid-bounds="selectedElement?.kind === 'grid' ? gridBoundsMap.get(selectedElement.id) : undefined"
       @update-element="updateElement"
       @update-quad-mode="updateElementQuadMode"
@@ -1543,6 +2093,10 @@ onBeforeUnmount(() => {
       @update-crop-draft="updateCropDraft"
       @commit-crop="commitCropDraft"
       @cancel-crop="cancelCropDraft"
+      @group-selected="groupSelectedTargets"
+      @ungroup-target="ungroupTarget"
+      @toggle-passthrough="toggleElementPassThrough"
+      @toggle-dock="toggleGridDock"
       @bring-front="bringElementFront"
       @send-back="sendElementBack"
       @remove-element="removeElement"
@@ -1552,25 +2106,27 @@ onBeforeUnmount(() => {
       @hover-toolbar-bounds-change="(r) => (hoverToolbarRect = r)"
     />
 
-    <!-- Independent Penpa+ Tool Windows (one per GridElement; carries per-grid Blend & Opacity; never passes through) -->
+    <!-- Independent Penpa+ Tool Windows (one per GridElement; carries per-grid Blend, Alpha Boost & Opacity) -->
     <PenpaDockWindow
       v-for="grid in gridElements"
       :key="`dock-${grid.id}`"
       :visible="grid.dockVisible"
-      :title="grid.label || 'Penpa+'"
+      :title="grid.label || messages.stage.gridDefaultLabel"
       :backdrop-mode="backdropMode"
       :blend-mode="grid.blendMode"
       :board-opacity="grid.opacity"
+      :enhance-opacity="grid.enhanceOpacity"
       :show-unavailable-options="showUnavailableOptions"
       @update:visible="(v) => updateElement(grid.id, { dockVisible: v })"
       @update:blend-mode="(v) => updateElement(grid.id, { blendMode: v })"
       @update:board-opacity="(v) => updateElement(grid.id, { opacity: v })"
+      @update:enhance-opacity="(v) => updateElement(grid.id, { enhanceOpacity: v })"
       @unavailable-click="handleUnavailableClick"
       @bridge-ready="(b) => setGridBridge(grid.id, b)"
       @bounds-change="(r) => setDockRect(grid.id, r)"
     />
 
-    <!-- Global MD3 Control Bar (with inline expandable "+ Add" picker & aligned "Layers" table) -->
+    <!-- Global MD3 Control Bar (with inline expandable Add picker & aligned Layers table) -->
     <ControlBar
       v-model:layers-visible="layersVisible"
       v-model:always-on-top="alwaysOnTop"
@@ -1580,8 +2136,9 @@ onBeforeUnmount(() => {
       :can-screen-capture="canScreenCapture"
       :can-pin-window="platform === 'tauri'"
       :full-canvas-enabled="fullCanvasEnabled"
-      :elements="elements"
-      :selected-id="selectedElementId"
+      :elements="activeLayerTargets"
+      :selected-ids="selectedTargetIds"
+      :button-display-mode="buttonDisplayMode"
       :show-unavailable-options="showUnavailableOptions"
       @update:backdrop-mode="handleBackdropModeUpdate"
       @unavailable-click="handleUnavailableClick"
@@ -1595,6 +2152,7 @@ onBeforeUnmount(() => {
       @move-up="(id) => moveElementLayerOrder(id, 'up')"
       @move-down="(id) => moveElementLayerOrder(id, 'down')"
       @remove-element="removeElement"
+      @rename-element="renameTarget"
       @open-settings="settingsOpen = true"
       @close-overlay="handleCloseOverlay"
       @bounds-change="(r) => (barRect = r)"
@@ -1606,6 +2164,7 @@ onBeforeUnmount(() => {
       v-model:custom-css-enabled="customCssEnabled"
       v-model:custom-css="customCss"
       v-model:toggle-hotkey="toggleHotkey"
+      v-model:button-display-mode="buttonDisplayMode"
       v-model:overlay-full-canvas="overlayFullCanvas"
       v-model:show-unavailable-options="showUnavailableOptions"
       :platform="platform"

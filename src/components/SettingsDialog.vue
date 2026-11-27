@@ -8,6 +8,7 @@ import {
 } from '../core/hotkey';
 import { DEFAULT_PENPA_MD3_CSS } from '../core/defaultPenpaCss';
 import HueRingPicker from './HueRingPicker.vue';
+import MdIcon from './MdIcon.vue';
 import type { UnavailableReasonKey } from './ControlBar.vue';
 import {
   openExternalLink,
@@ -24,7 +25,7 @@ import {
   setThemeMode,
   themeMode,
 } from '../core/theme';
-import type { ThemeMode } from '../core/storage';
+import type { ButtonDisplayMode, ThemeMode } from '../core/storage';
 import {
   currentLocale,
   formatMessage,
@@ -43,6 +44,7 @@ const props = defineProps<{
   customCssEnabled: boolean;
   customCss: string;
   toggleHotkey: HotkeyBinding | null;
+  buttonDisplayMode: ButtonDisplayMode;
   overlayFullCanvas: boolean;
   showUnavailableOptions: boolean;
   androidScreenshotStatus?: AndroidScreenshotCompositeStatus | null;
@@ -53,6 +55,7 @@ const emit = defineEmits<{
   (e: 'update:customCssEnabled', v: boolean): void;
   (e: 'update:customCss', v: string): void;
   (e: 'update:toggleHotkey', v: HotkeyBinding | null): void;
+  (e: 'update:buttonDisplayMode', v: ButtonDisplayMode): void;
   (e: 'update:overlayFullCanvas', v: boolean): void;
   (e: 'update:showUnavailableOptions', v: boolean): void;
   (e: 'unavailable-click', key: UnavailableReasonKey): void;
@@ -65,6 +68,12 @@ const themeModeOptions = computed<Array<{ value: ThemeMode; label: string }>>(()
   { value: 'auto', label: messages.value.settings.themeAuto },
   { value: 'light', label: messages.value.settings.themeLight },
   { value: 'dark', label: messages.value.settings.themeDark },
+]);
+
+const buttonDisplayOptions = computed<Array<{ value: ButtonDisplayMode; label: string }>>(() => [
+  { value: 'icon-only', label: messages.value.settings.buttonDisplayIconOnly },
+  { value: 'icon-text', label: messages.value.settings.buttonDisplayIconText },
+  { value: 'text-only', label: messages.value.settings.buttonDisplayTextOnly },
 ]);
 
 function handleDynamicColorToggle() {
@@ -137,6 +146,22 @@ watch(
 const hotkeyText = computed(() =>
   formatHotkeyLabel(props.toggleHotkey, messages.value.settings.hotkeyUnbound),
 );
+
+const shortcutRows = computed<Array<{ action: string; keys: string }>>(() => {
+  const s = messages.value.settings;
+  return [
+    { action: s.scTogglePassThrough, keys: hotkeyText.value },
+    { action: s.scPasteImage, keys: s.scPasteImageKey },
+    { action: s.scMultiSelect, keys: s.scMultiSelectKey },
+    { action: s.scDeleteSelected, keys: s.scDeleteSelectedKey },
+    { action: s.scPanCanvas, keys: s.scPanCanvasKey },
+    { action: s.scZoomCanvas, keys: s.scZoomCanvasKey },
+    { action: s.scAspectResize, keys: s.scAspectResizeKey },
+    { action: s.scCenterResize, keys: s.scCenterResizeKey },
+    { action: s.scDoubleClickCrop, keys: s.scDoubleClickCropKey },
+    { action: s.scEscape, keys: s.scEscapeKey },
+  ];
+});
 
 function selectLanguage(loc: AppLocale) {
   setLocale(loc);
@@ -253,7 +278,15 @@ onBeforeUnmount(() => {
     >
       <header class="ac-settings-header">
         <div class="ac-settings-title">{{ messages.settings.title }}</div>
-        <button class="ac-btn action" @click="closeDialog">{{ messages.settings.close }}</button>
+        <button
+          type="button"
+          class="ac-icon-btn ac-dialog-close-btn"
+          :title="messages.settings.close"
+          :aria-label="messages.settings.close"
+          @click="closeDialog"
+        >
+          <MdIcon name="close" :size="18" />
+        </button>
       </header>
 
       <div class="ac-settings-body">
@@ -312,14 +345,12 @@ onBeforeUnmount(() => {
               @click="handleDynamicColorToggle"
             >
               <span class="ac-md3-switch-thumb">
-                <svg
+                <MdIcon
                   v-if="dynamicColorSupported && dynamicColorEnabled"
+                  name="check"
+                  :size="14"
                   class="ac-md3-switch-check"
-                  viewBox="0 0 16 16"
-                  aria-hidden="true"
-                >
-                  <path d="M6.4 11.4 3.2 8.2l1.1-1.1 2.1 2.1 5.3-5.3 1.1 1.1-6.4 6.4Z" />
-                </svg>
+                />
               </span>
             </button>
           </div>
@@ -327,6 +358,21 @@ onBeforeUnmount(() => {
           <div v-if="!dynamicColorEnabled || !dynamicColorSupported" class="ac-setting-row ac-hue-row">
             <div class="ac-setting-label">{{ messages.settings.hueLabel }}</div>
             <HueRingPicker :model-value="customHue" @update:model-value="setCustomHue" />
+          </div>
+
+          <div class="ac-setting-row">
+            <div class="ac-setting-label">{{ messages.settings.buttonDisplayLabel }}</div>
+            <div class="ac-lang-segmented" role="group" :aria-label="messages.settings.buttonDisplayLabel">
+              <button
+                v-for="opt in buttonDisplayOptions"
+                :key="opt.value"
+                class="ac-lang-seg-btn"
+                :class="{ active: buttonDisplayMode === opt.value }"
+                @click="emit('update:buttonDisplayMode', opt.value)"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -349,14 +395,12 @@ onBeforeUnmount(() => {
               @click="emit('update:overlayFullCanvas', !overlayFullCanvas)"
             >
               <span class="ac-md3-switch-thumb">
-                <svg
+                <MdIcon
                   v-if="overlayFullCanvas"
+                  name="check"
+                  :size="14"
                   class="ac-md3-switch-check"
-                  viewBox="0 0 16 16"
-                  aria-hidden="true"
-                >
-                  <path d="M6.4 11.4 3.2 8.2l1.1-1.1 2.1 2.1 5.3-5.3 1.1 1.1-6.4 6.4Z" />
-                </svg>
+                />
               </span>
             </button>
           </div>
@@ -376,14 +420,12 @@ onBeforeUnmount(() => {
               @click="emit('update:showUnavailableOptions', !showUnavailableOptions)"
             >
               <span class="ac-md3-switch-thumb">
-                <svg
+                <MdIcon
                   v-if="showUnavailableOptions"
+                  name="check"
+                  :size="14"
                   class="ac-md3-switch-check"
-                  viewBox="0 0 16 16"
-                  aria-hidden="true"
-                >
-                  <path d="M6.4 11.4 3.2 8.2l1.1-1.1 2.1 2.1 5.3-5.3 1.1 1.1-6.4 6.4Z" />
-                </svg>
+                />
               </span>
             </button>
           </div>
@@ -439,14 +481,12 @@ onBeforeUnmount(() => {
                 @click="emit('toggle-android-screenshot-composite', !androidScreenshotStatus?.enabled)"
               >
                 <span class="ac-md3-switch-thumb">
-                  <svg
+                  <MdIcon
                     v-if="androidScreenshotStatus?.enabled"
+                    name="check"
+                    :size="14"
                     class="ac-md3-switch-check"
-                    viewBox="0 0 16 16"
-                    aria-hidden="true"
-                  >
-                    <path d="M6.4 11.4 3.2 8.2l1.1-1.1 2.1 2.1 5.3-5.3 1.1 1.1-6.4 6.4Z" />
-                  </svg>
+                  />
                 </span>
               </button>
               <button
@@ -511,38 +551,54 @@ onBeforeUnmount(() => {
               @click="emit('update:customCssEnabled', !customCssEnabled)"
             >
               <span class="ac-md3-switch-thumb">
-                <svg
+                <MdIcon
                   v-if="customCssEnabled"
+                  name="check"
+                  :size="14"
                   class="ac-md3-switch-check"
-                  viewBox="0 0 16 16"
-                  aria-hidden="true"
-                >
-                  <path d="M6.4 11.4 3.2 8.2l1.1-1.1 2.1 2.1 5.3-5.3 1.1 1.1-6.4 6.4Z" />
-                </svg>
+                />
               </span>
             </button>
           </div>
 
-          <textarea
-            class="ac-css-editor"
-            :value="cssDraft"
-            :disabled="!customCssEnabled"
-            spellcheck="false"
-            :placeholder="messages.settings.cssPlaceholder"
-            @input="onCssInput"
-            @keydown="onCssKeyDown"
-            @focus="setAndroidKeyboardFocusable(true)"
-            @blur="setAndroidKeyboardFocusable(false)"
-          />
+          <template v-if="customCssEnabled">
+            <textarea
+              class="ac-css-editor"
+              :value="cssDraft"
+              spellcheck="false"
+              :placeholder="messages.settings.cssPlaceholder"
+              @input="onCssInput"
+              @keydown="onCssKeyDown"
+              @focus="setAndroidKeyboardFocusable(true)"
+              @blur="setAndroidKeyboardFocusable(false)"
+            />
 
-          <div class="ac-setting-actions">
-            <button class="ac-btn action tonal" @click="resetDefaultCss">
-              {{ messages.settings.cssResetDefault }}
-            </button>
-            <button class="ac-btn action" @click="clearCss">
-              {{ messages.settings.cssClear }}
-            </button>
-          </div>
+            <div class="ac-setting-actions">
+              <button class="ac-btn action tonal" @click="resetDefaultCss">
+                {{ messages.settings.cssResetDefault }}
+              </button>
+              <button class="ac-btn action" @click="clearCss">
+                {{ messages.settings.cssClear }}
+              </button>
+            </div>
+          </template>
+        </div>
+
+        <div class="ac-divider" />
+
+        <!-- Section 2.5: Shortcut Reference Table -->
+        <div class="ac-setting-section">
+          <div class="ac-setting-label">{{ messages.settings.shortcutsTitle }}</div>
+          <table class="ac-shortcuts-table">
+            <tbody>
+              <tr v-for="row in shortcutRows" :key="row.action">
+                <td class="ac-sc-action">{{ row.action }}</td>
+                <td class="ac-sc-keys">
+                  <kbd class="ac-kbd">{{ row.keys }}</kbd>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
 
         <div class="ac-divider" />
@@ -553,10 +609,12 @@ onBeforeUnmount(() => {
             <div class="ac-setting-label">{{ messages.settings.linksLabel }}</div>
             <div class="ac-setting-actions">
               <button class="ac-btn action tonal" @click="handleOpenExternal(GITHUB_REPO_URL)">
-                {{ messages.settings.githubLink }} ↗
+                <span>{{ messages.settings.githubLink }}</span>
+                <MdIcon name="open_in_new" :size="14" />
               </button>
               <button class="ac-btn action" @click="handleOpenExternal(GITHUB_ISSUES_URL)">
-                {{ messages.settings.issueLink }} ↗
+                <span>{{ messages.settings.issueLink }}</span>
+                <MdIcon name="open_in_new" :size="14" />
               </button>
             </div>
           </div>
@@ -749,10 +807,7 @@ onBeforeUnmount(() => {
 }
 
 .ac-md3-switch-check {
-  width: 13px;
-  height: 13px;
-  fill: var(--md-sys-color-on-primary-container);
-  display: block;
+  color: var(--md-sys-color-on-primary-container);
 }
 
 .ac-md3-switch.unavailable {
@@ -791,6 +846,59 @@ onBeforeUnmount(() => {
   padding: 0 10px;
   border-radius: 999px;
   font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--md-sys-color-surface-container-highest);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  color: var(--md-sys-color-primary);
+}
+
+.ac-shortcuts-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0 4px;
+}
+
+.ac-shortcuts-table td {
+  padding: 5px 10px;
+  background: var(--md-sys-color-surface-container-low);
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  vertical-align: middle;
+}
+
+.ac-shortcuts-table td:first-child {
+  border-left: 1px solid var(--md-sys-color-outline-variant);
+  border-top-left-radius: 9px;
+  border-bottom-left-radius: 9px;
+}
+
+.ac-shortcuts-table td:last-child {
+  border-right: 1px solid var(--md-sys-color-outline-variant);
+  border-top-right-radius: 9px;
+  border-bottom-right-radius: 9px;
+}
+
+.ac-sc-action {
+  font-size: 12px;
+  color: var(--md-sys-color-on-surface);
+}
+
+.ac-sc-keys {
+  width: 1%;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.ac-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 11px;
   font-weight: 600;
   line-height: 1;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

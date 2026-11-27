@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import type { RuntimePlatform } from '../core/platform';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { setAndroidKeyboardFocusable, type RuntimePlatform } from '../core/platform';
 import type { WorkspaceMode } from '../core/world';
-import type { WorldElement } from '../core/canvasItems';
-import { loadPersistedState, patchPersistedState } from '../core/storage';
+import type { SelectableTarget } from '../core/canvasItems';
+import { loadPersistedState, patchPersistedState, type ButtonDisplayMode } from '../core/storage';
 import { safeAreaInsets } from '../core/safeArea';
-import { currentLocale, messages } from '../core/i18n';
+import { currentLocale, formatMessage, messages } from '../core/i18n';
 import { beginGlobalDrag, endGlobalDrag, tryCapturePointer, tryReleasePointer } from '../core/dragGuard';
+import MdIcon, { type MdIconName } from './MdIcon.vue';
+import MdActionBtn from './MdActionBtn.vue';
 
 export type BackdropMode = WorkspaceMode;
 export type UnavailableReasonKey =
@@ -27,8 +29,9 @@ const props = defineProps<{
   fullCanvasEnabled: boolean;
   backdropMode: WorkspaceMode;
   layersVisible: boolean;
-  elements: WorldElement[];
-  selectedId: string | null;
+  elements: SelectableTarget[];
+  selectedIds: string[];
+  buttonDisplayMode: ButtonDisplayMode;
   showUnavailableOptions: boolean;
 }>();
 
@@ -39,7 +42,7 @@ const emit = defineEmits<{
   (e: 'unavailable-click', key: UnavailableReasonKey): void;
   (e: 'add-image'): void;
   (e: 'add-screen'): void;
-  (e: 'select-element', id: string): void;
+  (e: 'select-element', id: string, additive: boolean): void;
   (e: 'toggle-visible', id: string): void;
   (e: 'toggle-lock', id: string): void;
   (e: 'toggle-passthrough', id: string): void;
@@ -47,6 +50,7 @@ const emit = defineEmits<{
   (e: 'move-up', id: string): void;
   (e: 'move-down', id: string): void;
   (e: 'remove-element', id: string): void;
+  (e: 'rename-element', id: string, label: string): void;
   (e: 'open-settings'): void;
   (e: 'close-overlay'): void;
   (e: 'bounds-change', rect: { x: number; y: number; w: number; h: number }): void;
@@ -56,7 +60,40 @@ const barEl = ref<HTMLElement | null>(null);
 const savedBar = loadPersistedState().bar;
 const compact = ref(savedBar?.compact ?? false);
 const addMenuOpen = ref(false);
+const editingId = ref<string | null>(null);
+const editingValue = ref('');
+let renameInputEl: HTMLInputElement | null = null;
 const initSafe = safeAreaInsets.value;
+
+function setRenameInputRef(el: HTMLInputElement | null) {
+  renameInputEl = el;
+}
+
+function startRename(el: SelectableTarget) {
+  editingId.value = el.id;
+  editingValue.value = el.label || displayLabel(el);
+  void nextTick(() => {
+    if (renameInputEl) {
+      renameInputEl.focus();
+      renameInputEl.select();
+    }
+  });
+}
+
+function commitRename() {
+  const id = editingId.value;
+  if (!id) return;
+  const trimmed = editingValue.value.trim();
+  editingId.value = null;
+  setAndroidKeyboardFocusable(false);
+  emit('rename-element', id, trimmed);
+}
+
+function cancelRename() {
+  if (!editingId.value) return;
+  editingId.value = null;
+  setAndroidKeyboardFocusable(false);
+}
 
 const pos = ref({
   x:
@@ -92,6 +129,10 @@ const activePanel = computed<'add' | 'layers' | null>(() => {
   return null;
 });
 
+watch(activePanel, (panel) => {
+  if (panel !== 'layers') cancelRename();
+});
+
 watch(
   () => props.fullCanvasEnabled,
   (enabled) => {
@@ -100,17 +141,36 @@ watch(
   },
 );
 
-function kindLabel(el: WorldElement): string {
+function kindLabel(el: SelectableTarget): string {
+  if (el.kind === 'group') return messages.value.layers.kindGroup;
   if (el.kind === 'grid') return messages.value.layers.kindGrid;
   if (el.kind === 'image') return messages.value.layers.kindImage;
   return messages.value.layers.kindScreen;
 }
 
-function displayLabel(el: WorldElement): string {
+function kindIconName(el: SelectableTarget): MdIconName {
+  if (el.kind === 'group') return 'stack_group';
+  if (el.kind === 'grid') return 'grid_on';
+  if (el.kind === 'image') return 'image';
+  return 'cast';
+}
+
+function displayLabel(el: SelectableTarget): string {
   if (el.label) return el.label;
+  if (el.kind === 'group') {
+    return formatMessage(messages.value.stage.groupDefaultLabel, { count: el.memberIds.length });
+  }
   if (el.kind === 'grid') return messages.value.stage.gridDefaultLabel;
   if (el.kind === 'image') return messages.value.stage.imageDefaultLabel;
   return messages.value.stage.screenDefaultLabel;
+}
+
+function targetHasGrid(el: SelectableTarget): boolean {
+  return el.kind === 'grid' || (el.kind === 'group' && el.hasGrid);
+}
+
+function targetDockVisible(el: SelectableTarget): boolean {
+  return (el.kind === 'grid' || el.kind === 'group') && el.dockVisible;
 }
 
 function persistBarState() {
@@ -332,9 +392,11 @@ onBeforeUnmount(() => {
     @click.capture="onBarClickCapture"
   >
     <div class="ac-bar-row">
-      <span class="ac-brand" :title="messages.bar.dragTitle">⋮⋮</span>
+      <span class="ac-brand" :title="messages.bar.dragTitle">
+        <MdIcon name="drag_indicator" :size="16" />
+      </span>
 
-      <!-- Expanded controls (collapsed state ONLY keeps drag handle + Expand button) -->
+      <!-- Left section (collapses when compact): Mode switcher, Add, Layers, Divider -->
       <div class="ac-anim-slot" :class="{ closed: compact }" :inert="compact">
         <div class="ac-anim-inner">
           <div class="ac-segmented" role="group" :aria-label="messages.bar.backdropGroupAria">
@@ -355,79 +417,109 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <!-- Toggle buttons (切换式): Add, Layers (hidden when fullCanvasEnabled=false), Window Pin -->
-          <button
+          <!-- Toggle buttons (切换式): Add, Layers (hidden when fullCanvasEnabled=false) -->
+          <MdActionBtn
             v-if="fullCanvasEnabled"
-            class="ac-btn ac-gap-left"
-            :class="{ active: addMenuOpen }"
+            class="ac-gap-left"
+            icon="add"
+            :label="messages.bar.add"
             :title="messages.bar.addTitle"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            :active="addMenuOpen"
             @click="handleToggleAddMenu"
-          >
-            {{ messages.bar.add }}
-          </button>
+          />
 
-          <button
+          <MdActionBtn
             v-if="fullCanvasEnabled"
-            class="ac-btn ac-gap-left"
-            :class="{ active: layersVisible && !addMenuOpen }"
+            class="ac-gap-left"
+            icon="layers"
+            :label="messages.bar.layers"
             :title="messages.bar.layersTitle"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            :active="layersVisible && !addMenuOpen"
             @click="handleToggleLayers"
-          >
-            {{ messages.bar.layers }}
-          </button>
-
-          <button
-            v-if="canPinWindow"
-            class="ac-btn ac-gap-left"
-            :class="{ active: alwaysOnTop }"
-            :title="messages.bar.pinTitle"
-            @click="emit('update:alwaysOnTop', !alwaysOnTop)"
-          >
-            {{ messages.bar.pin }}
-          </button>
+          />
 
           <span class="ac-sep" aria-hidden="true" />
-
-          <!-- Trigger buttons (触发式): Settings, Exit, Collapse/Expand -->
-          <button class="ac-btn action" :title="messages.bar.settingsTitle" @click="emit('open-settings')">
-            {{ messages.bar.settings }}
-          </button>
-
-          <button
-            v-if="platform === 'tauri' || platform === 'android-overlay' || platform === 'android-app'"
-            class="ac-btn action danger ac-gap-left"
-            :title="platform === 'android-app' ? messages.bar.exitAppTitle : messages.bar.exitOverlayTitle"
-            @click="emit('close-overlay')"
-          >
-            {{ messages.bar.exit }}
-          </button>
         </div>
       </div>
 
-      <button
-        class="ac-btn action ac-gap-left"
+      <!-- Right divider section starts with Window Pin (ALWAYS visible even when collapsed!) -->
+      <MdActionBtn
+        v-if="canPinWindow"
+        :class="{ 'ac-gap-left': compact }"
+        icon="keep"
+        :label="messages.bar.pin"
+        :title="messages.bar.pinTitle"
+        :mode="buttonDisplayMode"
+        variant="toggle"
+        :active="alwaysOnTop"
+        @click="emit('update:alwaysOnTop', !alwaysOnTop)"
+      />
+
+      <!-- Right-side collapsible triggers: Settings & Exit -->
+      <div class="ac-anim-slot" :class="{ closed: compact }" :inert="compact">
+        <div class="ac-anim-inner">
+          <MdActionBtn
+            :class="{ 'ac-gap-left': canPinWindow }"
+            icon="settings"
+            :label="messages.bar.settings"
+            :title="messages.bar.settingsTitle"
+            :mode="buttonDisplayMode"
+            variant="trigger"
+            @click="emit('open-settings')"
+          />
+
+          <MdActionBtn
+            v-if="platform === 'tauri' || platform === 'android-overlay' || platform === 'android-app'"
+            class="ac-gap-left"
+            icon="logout"
+            :label="messages.bar.exit"
+            :title="platform === 'android-app' ? messages.bar.exitAppTitle : messages.bar.exitOverlayTitle"
+            :mode="buttonDisplayMode"
+            variant="trigger"
+            tone="danger"
+            @click="emit('close-overlay')"
+          />
+        </div>
+      </div>
+
+      <MdActionBtn
+        class="ac-gap-left"
+        :icon="compact ? 'chevron_right' : 'chevron_left'"
+        :label="compact ? messages.bar.expand : messages.bar.collapse"
         :title="compact ? messages.bar.expandTitle : messages.bar.collapseTitle"
+        :mode="buttonDisplayMode"
+        variant="trigger"
+        :icon-size="buttonDisplayMode === 'icon-only' ? 20 : 17"
         @click="toggleCompact"
-      >
-        {{ compact ? messages.bar.expand : messages.bar.collapse }}
-      </button>
+      />
     </div>
 
     <!-- Pure-DOM MD3 inline expandable strip ("Add" picker OR aligned "Layers" table) -->
     <div class="ac-popover-wrap" :class="{ open: activePanel !== null }">
       <div class="ac-popover-inner">
         <div v-if="activePanel === 'add'" class="ac-popover-row">
-          <button class="ac-btn action tonal" @click="handleAddImageClick">
-            {{ messages.bar.addImageOption }}
-          </button>
-          <button
+          <MdActionBtn
+            icon="image"
+            :label="messages.bar.addImageOption"
+            :mode="buttonDisplayMode"
+            variant="trigger"
+            tone="tonal"
+            @click="handleAddImageClick"
+          />
+          <MdActionBtn
             v-if="canScreenCapture || showUnavailableOptions"
-            class="ac-btn action tonal"
-            :class="{ unavailable: !canScreenCapture }"
+            icon="cast"
+            :label="messages.bar.addScreenOption"
+            :mode="buttonDisplayMode"
+            variant="trigger"
+            tone="tonal"
+            :unavailable="!canScreenCapture"
             @click="handleAddScreenClick"
-          >
-            {{ messages.bar.addScreenOption }}
-          </button>
+          />
         </div>
 
         <div v-else-if="activePanel === 'layers'" class="ac-layers-scroll" @wheel.stop>
@@ -440,86 +532,115 @@ onBeforeUnmount(() => {
                 v-for="(el, idx) in displayElements"
                 :key="el.id"
                 class="ac-layer-tr"
-                :class="{ selected: el.id === selectedId, muted: !el.visible }"
-                @click="emit('select-element', el.id)"
+                :class="{ selected: selectedIds.includes(el.id), muted: !el.visible }"
+                @click="emit('select-element', el.id, $event.ctrlKey || $event.metaKey)"
               >
                 <td class="col-kind">
-                  <span class="ac-layer-badge" :class="`kind-${el.kind}`">{{ kindLabel(el) }}</span>
+                  <span
+                    class="ac-layer-kind-icon"
+                    :class="`kind-${el.kind}`"
+                    :title="kindLabel(el)"
+                    :aria-label="kindLabel(el)"
+                  >
+                    <MdIcon :name="kindIconName(el)" :size="17" />
+                  </span>
                 </td>
-                <td class="col-name" :title="displayLabel(el)">
-                  <span class="ac-layer-name">{{ displayLabel(el) }}</span>
+                <td class="col-name" :title="displayLabel(el)" @dblclick.stop="startRename(el)">
+                  <input
+                    v-if="editingId === el.id"
+                    :ref="(node) => setRenameInputRef(node as HTMLInputElement | null)"
+                    v-model="editingValue"
+                    type="text"
+                    class="ac-layer-rename-input"
+                    @click.stop
+                    @pointerdown.stop
+                    @dblclick.stop
+                    @keydown.stop
+                    @keydown.enter.prevent="commitRename"
+                    @keydown.esc.prevent="cancelRename"
+                    @focus="setAndroidKeyboardFocusable(true)"
+                    @blur="commitRename"
+                  />
+                  <span v-else class="ac-layer-name">{{ displayLabel(el) }}</span>
                 </td>
                 <td class="col-act" @click.stop>
                   <button
-                    class="ac-chip-btn"
+                    class="ac-icon-btn xs"
                     :class="{ active: el.visible }"
                     :title="el.visible ? messages.layers.hide : messages.layers.show"
+                    :aria-label="el.visible ? messages.layers.hide : messages.layers.show"
                     @click="emit('toggle-visible', el.id)"
                   >
-                    {{ el.visible ? messages.layers.show : messages.layers.hide }}
+                    <MdIcon :name="el.visible ? 'visibility' : 'visibility_off'" :size="16" />
                   </button>
                 </td>
                 <td class="col-act" @click.stop>
                   <button
-                    class="ac-chip-btn"
+                    class="ac-icon-btn xs"
                     :class="{ active: el.locked }"
                     :title="el.locked ? messages.layers.unlock : messages.layers.lock"
+                    :aria-label="el.locked ? messages.layers.unlock : messages.layers.lock"
                     @click="emit('toggle-lock', el.id)"
                   >
-                    {{ el.locked ? messages.layers.unlock : messages.layers.lock }}
+                    <MdIcon :name="el.locked ? 'lock' : 'lock_open'" :size="16" />
                   </button>
                 </td>
                 <td class="col-act" @click.stop>
                   <button
-                    class="ac-chip-btn"
-                    :class="{ danger: el.locked && el.passThrough }"
+                    class="ac-icon-btn xs"
+                    :class="{ danger: el.locked && el.passThrough, active: el.locked && el.passThrough }"
                     :disabled="!el.locked"
                     :title="messages.layers.passThrough"
+                    :aria-label="messages.layers.passThrough"
                     @click="emit('toggle-passthrough', el.id)"
                   >
-                    {{ messages.layers.passThrough }}
+                    <MdIcon name="do_not_touch" :size="16" />
                   </button>
                 </td>
                 <td class="col-act" @click.stop>
                   <button
-                    class="ac-chip-btn"
-                    :class="{ active: el.kind === 'grid' && el.dockVisible }"
-                    :disabled="el.kind !== 'grid'"
+                    class="ac-icon-btn xs"
+                    :class="{ active: targetDockVisible(el) }"
+                    :disabled="!targetHasGrid(el)"
                     :title="messages.layers.tools"
+                    :aria-label="messages.layers.tools"
                     @click="emit('toggle-dock', el.id)"
                   >
-                    {{ messages.layers.tools }}
+                    <MdIcon name="build" :size="16" />
                   </button>
                 </td>
                 <td class="col-act" @click.stop>
                   <button
-                    class="ac-chip-btn ac-chip-icon"
+                    class="ac-icon-btn xs"
                     :disabled="idx === 0"
                     :title="messages.layers.moveUp"
+                    :aria-label="messages.layers.moveUp"
                     @click="emit('move-up', el.id)"
                   >
-                    ↑
+                    <MdIcon name="arrow_upward" :size="16" />
                   </button>
                 </td>
                 <td class="col-act" @click.stop>
                   <button
-                    class="ac-chip-btn ac-chip-icon"
+                    class="ac-icon-btn xs"
                     :disabled="idx === displayElements.length - 1"
                     :title="messages.layers.moveDown"
+                    :aria-label="messages.layers.moveDown"
                     @click="emit('move-down', el.id)"
                   >
-                    ↓
+                    <MdIcon name="arrow_downward" :size="16" />
                   </button>
                 </td>
                 <td class="col-act" @click.stop>
                   <button
-                    class="ac-chip-btn ac-chip-icon"
-                    :class="{ danger: el.kind !== 'grid' }"
-                    :disabled="el.kind === 'grid'"
+                    class="ac-icon-btn xs"
+                    :class="{ danger: !targetHasGrid(el) }"
+                    :disabled="targetHasGrid(el)"
                     :title="messages.layers.remove"
+                    :aria-label="messages.layers.remove"
                     @click="emit('remove-element', el.id)"
                   >
-                    ×
+                    <MdIcon name="delete" :size="16" />
                   </button>
                 </td>
               </tr>
@@ -774,38 +895,35 @@ onBeforeUnmount(() => {
   font-size: 0;
 }
 
-.ac-layer-badge {
+.ac-layer-kind-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: 22px;
   height: 22px;
-  padding: 0 7px;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1;
   vertical-align: middle;
 }
 
-.ac-layer-badge.kind-grid {
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+.ac-layer-kind-icon.kind-grid {
+  color: var(--md-sys-color-primary);
 }
 
-.ac-layer-badge.kind-image {
-  background: var(--md-sys-color-secondary-container);
-  color: var(--md-sys-color-on-secondary-container);
+.ac-layer-kind-icon.kind-image {
+  color: var(--md-sys-color-secondary);
 }
 
-.ac-layer-badge.kind-screen {
-  background: var(--md-sys-color-tertiary-container);
-  color: var(--md-sys-color-on-tertiary-container);
+.ac-layer-kind-icon.kind-screen {
+  color: var(--md-sys-color-tertiary);
+}
+
+.ac-layer-kind-icon.kind-group {
+  color: var(--md-sys-color-primary);
 }
 
 .ac-layer-name {
   display: block;
-  height: 22px;
-  line-height: 22px;
+  height: 24px;
+  line-height: 24px;
   max-width: 126px;
   font-size: 11px;
   font-weight: 500;
@@ -815,50 +933,20 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.ac-chip-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  min-width: 34px;
+.ac-layer-rename-input {
+  display: block;
+  width: 118px;
   height: 22px;
-  padding: 0 7px;
-  border-radius: 999px;
-  border: 1px solid var(--md-sys-color-outline-variant);
-  background: var(--md-sys-color-surface-container-high);
-  color: var(--md-sys-color-on-surface-variant);
-  font-size: 10px;
+  padding: 0 6px;
+  border-radius: 6px;
+  border: 1px solid var(--md-sys-color-primary);
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+  font-size: 11px;
   font-weight: 500;
-  line-height: 1;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
-}
-
-.ac-chip-btn.ac-chip-icon {
-  min-width: 24px;
-  padding: 0 5px;
-  font-size: 12px;
-  line-height: 1;
-}
-
-.ac-chip-btn.active {
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
-  border-color: var(--md-sys-color-primary);
-}
-
-.ac-chip-btn.danger {
-  background: var(--md-sys-color-error-container);
-  color: var(--md-sys-color-on-error-container);
-  border-color: var(--md-sys-color-error);
-}
-
-.ac-chip-btn:disabled {
-  opacity: 0.34;
-  background: var(--md-sys-color-surface-container-low);
-  color: var(--md-sys-color-on-surface-variant);
-  border-color: var(--md-sys-color-outline-variant);
-  cursor: not-allowed;
+  line-height: 20px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
 }
 </style>

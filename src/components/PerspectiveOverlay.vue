@@ -33,12 +33,15 @@ const props = defineProps<{
   viewportTransform?: WorldViewportTransform;
   worldBoundedToViewport: boolean;
   selected: boolean;
+  multiSelected?: boolean;
+  grouped?: boolean;
   cropDraft: CropDraft | null;
   spacePanning: boolean;
 }>();
 
 const emit = defineEmits<{
-  (e: 'select', id: string): void;
+  (e: 'select', id: string, additive: boolean): void;
+  (e: 'focus-multi-member', id: string): void;
   (e: 'update-corners', id: string, corners: [Point2D, Point2D, Point2D, Point2D]): void;
   (e: 'update-crop-draft', draft: CropDraft): void;
   (e: 'toggle-crop', id: string): void;
@@ -280,6 +283,7 @@ function renderLoop() {
     0.99,
     webglClipRect.value,
     isCropping.value ? 0.3 : 0.0,
+    props.element.enhanceOpacity,
   );
 }
 
@@ -297,6 +301,8 @@ function clientToPenpaUv(clientX: number, clientY: number): { u: number; v: numb
   return { u: uv.x, v: uv.y };
 }
 
+let pendingSingleSelectOnClick = false;
+
 // Shared whole-body drag & crop-preview background-pan composable (same UX & clamping as MediaElementView)
 const { beginDrag, beginCropPan } = useWholeElementDrag({
   getElement: () => props.element,
@@ -305,6 +311,14 @@ const { beginDrag, beginCropPan } = useWholeElementDrag({
   isWorldBounded: () => props.worldBoundedToViewport,
   onUpdateCorners: (id, corners) => emit('update-corners', id, corners),
   onUpdateCropDraft: (draft) => emit('update-crop-draft', draft),
+  onMoveFinish: (moved) => {
+    if (pendingSingleSelectOnClick) {
+      pendingSingleSelectOnClick = false;
+      if (!moved) {
+        emit('select', props.element.id, false);
+      }
+    }
+  },
 });
 
 const cropGhostStyle = computed(() => {
@@ -325,7 +339,25 @@ function onSurfacePointerDown(e: PointerEvent) {
   if (e.button === 1) return; // allow middle-mouse canvas pan to bubble
 
   e.stopPropagation();
-  emit('select', props.element.id);
+  const additive = e.ctrlKey || e.metaKey;
+  if (additive) {
+    pendingSingleSelectOnClick = false;
+    emit('select', props.element.id, true);
+    e.preventDefault();
+    return;
+  }
+
+  if (props.multiSelected && !props.element.locked && !isCropping.value) {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    pendingSingleSelectOnClick = true;
+    emit('focus-multi-member', props.element.id);
+    e.preventDefault();
+    beginDrag(e);
+    return;
+  }
+
+  pendingSingleSelectOnClick = false;
+  emit('select', props.element.id, false);
 
   // Unlocked grid: start crop background-pan (in crop mode) or whole-body drag
   if (!props.element.locked) {
@@ -411,9 +443,9 @@ function onSurfaceContextMenu(e: MouseEvent) {
 }
 
 function onSurfaceDoubleClick(e: MouseEvent) {
-  if (effectivePassThrough.value || props.element.locked) return;
+  if (effectivePassThrough.value || props.element.locked || props.grouped) return;
   e.stopPropagation();
-  emit('select', props.element.id);
+  emit('select', props.element.id, false);
   emit('toggle-crop', props.element.id);
 }
 
@@ -456,6 +488,8 @@ function captureOverlayPng(): string | null {
       props.element.opacity,
       0.99,
       webglClipRect.value,
+      0.0,
+      props.element.enhanceOpacity,
     );
   }
   try {

@@ -24,14 +24,18 @@ const props = defineProps<{
   viewportTransform: WorldViewportTransform;
   worldBoundedToViewport: boolean;
   selected: boolean;
+  multiSelected?: boolean;
+  grouped?: boolean;
   cropDraft: CropDraft | null;
   spacePanning: boolean;
 }>();
 
 const emit = defineEmits<{
-  (e: 'select', id: string): void;
+  (e: 'select', id: string, additive: boolean): void;
+  (e: 'focus-multi-member', id: string): void;
   (e: 'update-corners', id: string, corners: [Point2D, Point2D, Point2D, Point2D]): void;
   (e: 'update-crop-draft', draft: CropDraft): void;
+  (e: 'update-natural-size', id: string, w: number, h: number): void;
   (e: 'toggle-crop', id: string): void;
 }>();
 
@@ -140,6 +144,8 @@ const ghostStyle = computed(() => {
   };
 });
 
+let pendingSingleSelectOnClick = false;
+
 // Shared whole-body drag & crop-preview background-pan composable
 const { beginDrag, beginCropPan } = useWholeElementDrag({
   getElement: () => props.element,
@@ -148,7 +154,25 @@ const { beginDrag, beginCropPan } = useWholeElementDrag({
   isWorldBounded: () => props.worldBoundedToViewport,
   onUpdateCorners: (id, corners) => emit('update-corners', id, corners),
   onUpdateCropDraft: (draft) => emit('update-crop-draft', draft),
+  onMoveFinish: (moved) => {
+    if (pendingSingleSelectOnClick) {
+      pendingSingleSelectOnClick = false;
+      if (!moved) {
+        emit('select', props.element.id, false);
+      }
+    }
+  },
 });
+
+function onVideoMetadataOrResize() {
+  const v = videoEl.value;
+  if (!v || props.element.kind !== 'screen') return;
+  const w = v.videoWidth;
+  const h = v.videoHeight;
+  if (w > 0 && h > 0 && (w !== props.element.naturalW || h !== props.element.naturalH)) {
+    emit('update-natural-size', props.element.id, w, h);
+  }
+}
 
 function onPointerDown(e: PointerEvent) {
   if (effectivePassThrough.value) return;
@@ -156,7 +180,24 @@ function onPointerDown(e: PointerEvent) {
   if (e.button !== 0 && e.pointerType === 'mouse') return;
 
   e.stopPropagation();
-  emit('select', props.element.id);
+  const additive = e.ctrlKey || e.metaKey;
+  if (additive) {
+    pendingSingleSelectOnClick = false;
+    emit('select', props.element.id, true);
+    e.preventDefault();
+    return;
+  }
+
+  if (props.multiSelected && !props.element.locked && !isCropping.value) {
+    pendingSingleSelectOnClick = true;
+    emit('focus-multi-member', props.element.id);
+    e.preventDefault();
+    beginDrag(e);
+    return;
+  }
+
+  pendingSingleSelectOnClick = false;
+  emit('select', props.element.id, false);
   if (props.element.locked) return;
 
   e.preventDefault();
@@ -168,9 +209,9 @@ function onPointerDown(e: PointerEvent) {
 }
 
 function onDoubleClick(e: MouseEvent) {
-  if (effectivePassThrough.value || props.element.locked) return;
+  if (effectivePassThrough.value || props.element.locked || props.grouped) return;
   e.stopPropagation();
-  emit('select', props.element.id);
+  emit('select', props.element.id, false);
   emit('toggle-crop', props.element.id);
 }
 </script>
@@ -228,6 +269,8 @@ function onDoubleClick(e: MouseEvent) {
       autoplay
       muted
       playsinline
+      @loadedmetadata="onVideoMetadataOrResize"
+      @resize="onVideoMetadataOrResize"
     />
   </div>
 </template>

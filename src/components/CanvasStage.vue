@@ -9,10 +9,14 @@ import {
 } from '../core/world';
 import { messages } from '../core/i18n';
 import { beginGlobalDrag, endGlobalDrag, tryCapturePointer, tryReleasePointer } from '../core/dragGuard';
+import type { ButtonDisplayMode } from '../core/storage';
+import MdIcon from './MdIcon.vue';
+import MdActionBtn from './MdActionBtn.vue';
 
 const props = defineProps<{
   viewportTransform: WorldViewportTransform;
   selectedId: string | null;
+  buttonDisplayMode: ButtonDisplayMode;
 }>();
 
 const emit = defineEmits<{
@@ -241,17 +245,34 @@ onBeforeUnmount(() => {
 
   <!-- Bottom-left Viewport Zoom / Reset HUD pill -->
   <div class="ac-viewport-hud" @pointerdown.stop>
-    <button class="ac-hud-btn" :title="messages.stage.zoomOutTitle" @click="zoomStep(1 / 1.2)">−</button>
-    <span class="ac-hud-zoom">{{ zoomPercent }}%</span>
-    <button class="ac-hud-btn" :title="messages.stage.zoomInTitle" @click="zoomStep(1.2)">+</button>
     <button
-      class="ac-hud-reset"
-      :class="{ active: showOriginMarker }"
-      :title="messages.stage.resetViewTitle"
-      @click="resetViewport"
+      class="ac-icon-btn xs"
+      :title="messages.stage.zoomOutTitle"
+      :aria-label="messages.stage.zoomOutTitle"
+      @click="zoomStep(1 / 1.2)"
     >
-      {{ messages.stage.resetView }}
+      <MdIcon name="remove" :size="16" />
     </button>
+    <span class="ac-hud-zoom">{{ zoomPercent }}%</span>
+    <button
+      class="ac-icon-btn xs"
+      :title="messages.stage.zoomInTitle"
+      :aria-label="messages.stage.zoomInTitle"
+      @click="zoomStep(1.2)"
+    >
+      <MdIcon name="add" :size="16" />
+    </button>
+    <MdActionBtn
+      class="ac-hud-reset"
+      icon="recenter"
+      :label="messages.stage.resetView"
+      :title="messages.stage.resetViewTitle"
+      :mode="buttonDisplayMode"
+      variant="toggle"
+      :active="showOriginMarker"
+      size="xs"
+      @click="resetViewport"
+    />
   </div>
 </template>
 
@@ -307,27 +328,6 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(10px);
 }
 
-.ac-hud-btn {
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--md-sys-color-on-surface);
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.ac-hud-btn:hover {
-  background: var(--md-sys-color-surface-container-highest);
-}
-
 .ac-hud-zoom {
   display: inline-flex;
   align-items: center;
@@ -343,30 +343,6 @@ onBeforeUnmount(() => {
 }
 
 .ac-hud-reset {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 24px;
-  padding: 0 9px;
   margin-left: 2px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--md-sys-color-on-surface-variant);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.ac-hud-reset:hover {
-  background: var(--md-sys-color-surface-container-highest);
-  color: var(--md-sys-color-on-surface);
-}
-
-.ac-hud-reset.active {
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
-  border-color: var(--md-sys-color-primary);
 }
 </style>

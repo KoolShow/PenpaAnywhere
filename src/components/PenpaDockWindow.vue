@@ -8,6 +8,8 @@ import { loadPersistedState, patchPersistedState } from '../core/storage';
 import { safeAreaInsets } from '../core/safeArea';
 import { messages } from '../core/i18n';
 import { beginGlobalDrag, endGlobalDrag, tryCapturePointer, tryReleasePointer } from '../core/dragGuard';
+import MdIcon from './MdIcon.vue';
+import MdSlider from './MdSlider.vue';
 
 const props = defineProps<{
   visible: boolean;
@@ -15,6 +17,7 @@ const props = defineProps<{
   backdropMode: WorkspaceMode;
   blendMode: BlendRenderMode;
   boardOpacity: number;
+  enhanceOpacity: boolean;
   showUnavailableOptions: boolean;
 }>();
 
@@ -23,6 +26,7 @@ const emit = defineEmits<{
   (e: 'update:visible', value: boolean): void;
   (e: 'update:blendMode', value: BlendRenderMode): void;
   (e: 'update:boardOpacity', value: number): void;
+  (e: 'update:enhanceOpacity', value: boolean): void;
   (e: 'unavailable-click', key: UnavailableReasonKey): void;
   (e: 'bounds-change', rect: { x: number; y: number; w: number; h: number }): void;
 }>();
@@ -171,7 +175,7 @@ function finishDockDrag(persist: boolean) {
 }
 
 function startMove(e: PointerEvent) {
-  if ((e.target as HTMLElement).closest('button, input')) return;
+  if ((e.target as HTMLElement).closest('button, input, .ac-md-slider')) return;
   if (e.button !== 0 && e.pointerType === 'mouse') return;
   e.preventDefault();
   if (dragMode) finishDockDrag(false);
@@ -340,65 +344,44 @@ onBeforeUnmount(() => {
           <div class="ac-dock-sliders-inner">
             <label class="ac-mini-slider" :title="messages.dock.zoomTitle">
               <span>{{ messages.dock.zoom }}</span>
-              <input
-                v-model.number="scale"
-                type="range"
-                min="0.5"
-                max="1.15"
-                step="0.05"
+              <MdSlider
+                v-model="scale"
+                :min="0.5"
+                :max="1.15"
+                :step="0.05"
+                width="54px"
+                :aria-label="messages.dock.zoomTitle"
               />
             </label>
             <label class="ac-mini-slider" :title="messages.dock.opacityTitle">
               <span>{{ messages.dock.opacity }}</span>
-              <input
-                v-model.number="dockOpacity"
-                type="range"
-                min="0.35"
-                max="1"
-                step="0.05"
+              <MdSlider
+                v-model="dockOpacity"
+                :min="0.35"
+                :max="1"
+                :step="0.05"
+                width="54px"
+                :aria-label="messages.dock.opacityTitle"
               />
             </label>
           </div>
         </div>
         <div class="ac-dock-btns">
           <button
-            class="ac-icon-btn"
+            class="ac-icon-btn xs"
             :title="collapsed ? messages.dock.expand : messages.dock.collapse"
             :aria-label="collapsed ? messages.dock.expand : messages.dock.collapse"
             @click="toggleCollapsed"
           >
-            <svg
-              v-if="collapsed"
-              class="ac-mat-icon"
-              viewBox="0 -960 960 960"
-              aria-hidden="true"
-            >
-              <path
-                d="M440-440H240q-17 0-28.5-11.5T200-480q0-17 11.5-28.5T240-520h200v-200q0-17 11.5-28.5T480-760q17 0 28.5 11.5T520-720v200h200q17 0 28.5 11.5T760-480q0 17-11.5 28.5T720-440H520v200q0 17-11.5 28.5T480-200q-17 0-28.5-11.5T440-240v-200Z"
-              />
-            </svg>
-            <svg
-              v-else
-              class="ac-mat-icon"
-              viewBox="0 -960 960 960"
-              aria-hidden="true"
-            >
-              <path
-                d="M240-440q-17 0-28.5-11.5T200-480q0-17 11.5-28.5T240-520h480q17 0 28.5 11.5T760-480q0 17-11.5 28.5T720-440H240Z"
-              />
-            </svg>
+            <MdIcon :name="collapsed ? 'keyboard_arrow_down' : 'keyboard_arrow_up'" :size="18" />
           </button>
           <button
-            class="ac-icon-btn"
+            class="ac-icon-btn xs"
             :title="messages.dock.hide"
             :aria-label="messages.dock.hide"
             @click="emit('update:visible', false)"
           >
-            <svg class="ac-mat-icon" viewBox="0 -960 960 960" aria-hidden="true">
-              <path
-                d="m480-424 196 196q11 11 28 11t28-11q11-11 11-28t-11-28L536-480l196-196q11-11 11-28t-11-28q-11-11-28-11t-28 11L480-536 284-732q-11-11-28-11t-28 11q-11 11-11 28t11 28l196 196-196 196q-11 11-11 28t11 28q11 11 28 11t28-11l196-196Z"
-              />
-            </svg>
+            <MdIcon name="close" :size="16" />
           </button>
         </div>
       </div>
@@ -413,20 +396,41 @@ onBeforeUnmount(() => {
           :title="messages.dock.boardBlendTitle"
           @click="blendMenuOpen = !blendMenuOpen"
         >
-          {{ currentBlendLabel }}
+          <MdIcon name="contrast" :size="15" />
+          <span>{{ currentBlendLabel }}</span>
         </button>
 
-        <label class="ac-board-opacity-box" :title="messages.dock.boardOpacityTitle">
-          <span>{{ messages.dock.boardOpacity }} {{ Math.round(boardOpacity * 100) }}%</span>
-          <input
-            type="range"
-            min="0.1"
-            max="1"
-            step="0.02"
-            :value="boardOpacity"
-            @input="emit('update:boardOpacity', parseFloat(($event.target as HTMLInputElement).value))"
-          />
-        </label>
+        <div class="ac-dock-render-controls">
+          <div class="ac-enhance-opacity-box" :title="messages.dock.enhanceOpacityTitle">
+            <span>{{ messages.dock.enhanceOpacity }}</span>
+            <button
+              type="button"
+              role="switch"
+              class="ac-md3-switch-sm"
+              :class="{ checked: enhanceOpacity }"
+              :aria-checked="enhanceOpacity"
+              :aria-label="messages.dock.enhanceOpacity"
+              @click="emit('update:enhanceOpacity', !enhanceOpacity)"
+            >
+              <span class="ac-md3-switch-sm-thumb">
+                <MdIcon v-if="enhanceOpacity" name="check" :size="10" />
+              </span>
+            </button>
+          </div>
+
+          <label class="ac-board-opacity-box" :title="messages.dock.boardOpacityTitle">
+            <span>{{ messages.dock.boardOpacity }} {{ Math.round(boardOpacity * 100) }}%</span>
+            <MdSlider
+              :model-value="boardOpacity"
+              :min="0.1"
+              :max="1"
+              :step="0.02"
+              width="86px"
+              :aria-label="messages.dock.boardOpacityTitle"
+              @update:model-value="emit('update:boardOpacity', $event)"
+            />
+          </label>
+        </div>
       </div>
 
       <div v-if="blendMenuOpen" class="ac-dock-blend-popover">
@@ -573,46 +577,12 @@ onBeforeUnmount(() => {
 .ac-mini-slider {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   font-size: 11px;
   line-height: 1;
   color: var(--md-sys-color-on-surface-variant);
   flex-shrink: 1;
   min-width: 0;
-}
-
-.ac-mini-slider input {
-  width: 48px;
-  margin: 0;
-  accent-color: var(--md-sys-color-primary);
-}
-
-.ac-icon-btn {
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  flex-shrink: 0;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--md-sys-color-on-surface);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.ac-mat-icon {
-  width: 16px;
-  height: 16px;
-  display: block;
-  fill: currentColor;
-}
-
-@media (hover: hover) {
-  .ac-icon-btn:hover {
-    background: var(--md-sys-color-surface-container-highest);
-  }
 }
 
 .ac-dock-body {
@@ -649,7 +619,14 @@ onBeforeUnmount(() => {
   font-size: 11px;
 }
 
-.ac-board-opacity-box {
+.ac-dock-render-controls {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.ac-enhance-opacity-box {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -659,11 +636,14 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.ac-board-opacity-box input {
-  width: 78px;
-  margin: 0;
-  accent-color: var(--md-sys-color-primary);
-  touch-action: pan-x;
+.ac-board-opacity-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
 }
 
 .ac-dock-blend-popover {
