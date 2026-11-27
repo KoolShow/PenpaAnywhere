@@ -656,6 +656,29 @@
     );
   }
 
+  origWinAddEventListener(
+    'keydown',
+    function (e) {
+      if (
+        e &&
+        e.code === 'F12' &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.shiftKey &&
+        !e.metaKey &&
+        window.parent &&
+        window.parent !== window &&
+        typeof window.parent.__PENPAANYWHERE_TOGGLE_DEVTOOLS__ === 'function'
+      ) {
+        if (window.parent.__PENPAANYWHERE_TOGGLE_DEVTOOLS__(!e.repeat)) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }
+    },
+    true
+  );
+
   window.__PENPAANYWHERE_BRIDGE__ = {
     isReady: isReady,
     getCanvas: getCanvas,

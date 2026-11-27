@@ -49,6 +49,7 @@ declare global {
     __PENPAANYWHERE_ON_SCREENSHOT_PROMPT__?: (fileName: string) => void;
     __PENPAANYWHERE_ON_SCREENSHOT_STATUS__?: (status: AndroidScreenshotCompositeStatus) => void;
     __PENPAANYWHERE_ON_UNAVAILABLE__?: (key: string) => void;
+    __PENPAANYWHERE_TOGGLE_DEVTOOLS__?: (shouldToggle?: boolean) => boolean;
   }
 }
 
@@ -210,5 +211,33 @@ export async function closeOverlayApp(): Promise<void> {
     }
   } else if (platform === 'android-overlay' || platform === 'android-app') {
     window.AndroidOverlay?.closeOverlay?.();
+  }
+}
+
+let cachedDebugBuild: boolean | null = null;
+
+export async function getIsDebugBuild(): Promise<boolean> {
+  if (cachedDebugBuild !== null) return cachedDebugBuild;
+  if (detectPlatform() === 'tauri') {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      cachedDebugBuild = Boolean(await invoke<boolean>('is_debug_build'));
+      return cachedDebugBuild;
+    } catch {
+      cachedDebugBuild = false;
+      return false;
+    }
+  }
+  cachedDebugBuild = Boolean(import.meta.env.DEV);
+  return cachedDebugBuild;
+}
+
+export async function toggleOsDevtools(): Promise<boolean> {
+  if (detectPlatform() !== 'tauri') return false;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return Boolean(await invoke<boolean>('toggle_devtools'));
+  } catch {
+    return false;
   }
 }

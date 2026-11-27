@@ -358,6 +358,29 @@ fn close_app(window: WebviewWindow) -> Result<(), String> {
     window.close().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn is_debug_build() -> bool {
+    cfg!(debug_assertions)
+}
+
+#[tauri::command]
+fn toggle_devtools(window: WebviewWindow) -> bool {
+    #[cfg(debug_assertions)]
+    {
+        if window.is_devtools_open() {
+            window.close_devtools();
+        } else {
+            window.open_devtools();
+        }
+        true
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = window;
+        false
+    }
+}
+
 #[cfg(windows)]
 fn read_windows_accent_hex() -> Option<String> {
     use windows_sys::Win32::System::Registry::{
@@ -1015,7 +1038,9 @@ pub fn run() {
             set_drag_active,
             get_system_accent_color,
             set_toggle_hotkey,
-            close_app
+            close_app,
+            is_debug_build,
+            toggle_devtools
         ])
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
