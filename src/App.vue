@@ -11,7 +11,6 @@ import { isPointInQuad, quadToBoundingRect, rectToQuad, type Point2D } from './c
 import type { BlendRenderMode } from './core/webglOverlay';
 import type { GridBoundsNormalized, PenpaIframeBridge } from './core/penpaBridge';
 import { DEFAULT_PENPA_MD3_CSS } from './core/defaultPenpaCss';
-import { DEFAULT_TOGGLE_HOTKEY, type HotkeyBinding } from './core/hotkey';
 import { getCurrentMd3Tokens } from './core/theme';
 import { safeAreaInsets } from './core/safeArea';
 import { beginGlobalDrag, endGlobalDrag, tryCapturePointer, tryReleasePointer } from './core/dragGuard';
@@ -402,7 +401,6 @@ const showUnavailableOptions = ref(savedState.showUnavailableOptions ?? false);
 const settingsOpen = ref(false);
 const screenPickerOpen = ref(false);
 const unavailableReasonKey = ref<UnavailableReasonKey | null>(null);
-const hotkeyRecording = ref(false);
 const screenshotPromptOpen = ref(false);
 const screenshotPromptFile = ref('');
 const androidScreenshotStatus = ref<AndroidScreenshotCompositeStatus | null>(null);
@@ -410,9 +408,6 @@ const androidScreenshotStatus = ref<AndroidScreenshotCompositeStatus | null>(nul
 const customCssEnabled = ref(savedState.customCssEnabled ?? true);
 const customCss = ref(
   typeof savedState.customCss === 'string' ? savedState.customCss : DEFAULT_PENPA_MD3_CSS,
-);
-const toggleHotkey = ref<HotkeyBinding | null>(
-  savedState.toggleHotkey === undefined ? { ...DEFAULT_TOGGLE_HOTKEY } : savedState.toggleHotkey,
 );
 
 // Per-grid runtime references (keyed by grid.id)
@@ -507,14 +502,24 @@ function selectElement(id: string | null, additive = false) {
     return;
   }
 
-  // Ctrl / Command additive multi-selection: never clears previously selected elements!
+  // Ctrl / Command additive multi-selection: locked targets can NEVER participate in multi-selection!
+  const clickedTarget = activeLayerTargets.value.find((t) => t.id === targetId);
+  if (!clickedTarget || clickedTarget.locked) return;
+
   cancelCropDraft();
-  if (selectedTargetIds.value.includes(targetId)) {
-    if (selectedTargetIds.value.length > 1) {
-      selectedTargetIds.value = selectedTargetIds.value.filter((x) => x !== targetId);
+  const unlockedSelected = selectedTargetIds.value.filter((sid) => {
+    const st = activeLayerTargets.value.find((t) => t.id === sid);
+    return !!st && !st.locked;
+  });
+
+  if (unlockedSelected.includes(targetId)) {
+    if (unlockedSelected.length > 1) {
+      selectedTargetIds.value = unlockedSelected.filter((x) => x !== targetId);
+    } else {
+      selectedTargetIds.value = unlockedSelected;
     }
   } else {
-    selectedTargetIds.value = [...selectedTargetIds.value, targetId];
+    selectedTargetIds.value = [...unlockedSelected, targetId];
   }
 }
 
@@ -617,7 +622,7 @@ function ungroupTarget(groupId: string) {
   const validIds = new Set(elements.value.map((e) => e.id));
   const released = grp.memberIds.filter((mid) => validIds.has(mid));
   if (hoveredLockedId.value === groupId) clearHoverLocked();
-  selectedTargetIds.value = released;
+  selectedTargetIds.value = grp.locked ? [] : released;
 }
 
 function handleLockElement(id: string) {
@@ -629,6 +634,9 @@ function handleLockElement(id: string) {
     elements.value = elements.value.map((el) =>
       memberSet.has(el.id) ? ({ ...el, locked: true } as WorldElement) : el,
     );
+    if (selectedTargetIds.value.length > 1 && selectedTargetIds.value.includes(id)) {
+      selectedTargetIds.value = selectedTargetIds.value.filter((x) => x !== id);
+    }
     return;
   }
   const el = elements.value.find((e) => e.id === id);
@@ -637,6 +645,9 @@ function handleLockElement(id: string) {
     cancelCropDraft();
   }
   updateElement(id, { locked: true });
+  if (selectedTargetIds.value.length > 1 && selectedTargetIds.value.includes(id)) {
+    selectedTargetIds.value = selectedTargetIds.value.filter((x) => x !== id);
+  }
 }
 
 function handleUnlockElement(id: string) {
@@ -938,7 +949,6 @@ function removeElement(id: string) {
       showUnavailableOptions,
       customCssEnabled,
       customCss,
-      toggleHotkey,
     ],
     () => {
       const g = primaryGrid.value;
@@ -963,7 +973,6 @@ function removeElement(id: string) {
         canvasViewport: { ...canvasViewport.value },
         customCssEnabled: customCssEnabled.value,
         customCss: customCss.value,
-        toggleHotkey: toggleHotkey.value,
       };
       if (itemsHydrated) {
         patch.canvasItems = elements.value
@@ -1806,8 +1815,6 @@ function onWindowMiddlePanUp(e: PointerEvent) {
 
 // Forward keyboard shortcuts to active Penpa+ instance
 function onWindowKey(type: 'keydown' | 'keyup', e: KeyboardEvent) {
-  if (hotkeyRecording.value) return;
-
   if (
     type === 'keydown' &&
     e.code === 'F12' &&
@@ -1958,7 +1965,7 @@ onMounted(async () => {
     if (key === 'penpaCloneUnsupported') handleUnavailableClick(key);
   };
   window.__PENPAANYWHERE_TOGGLE_DEVTOOLS__ = (shouldToggle = true) => {
-    if (hotkeyRecording.value || platform !== 'tauri' || !isTauriDebugBuild) return false;
+    if (platform !== 'tauri' || !isTauriDebugBuild) return false;
     if (shouldToggle) {
       void toggleOsDevtools();
     }
@@ -2181,7 +2188,6 @@ onBeforeUnmount(() => {
       v-model:open="settingsOpen"
       v-model:custom-css-enabled="customCssEnabled"
       v-model:custom-css="customCss"
-      v-model:toggle-hotkey="toggleHotkey"
       v-model:button-display-mode="buttonDisplayMode"
       v-model:overlay-full-canvas="overlayFullCanvas"
       v-model:show-unavailable-options="showUnavailableOptions"
@@ -2190,7 +2196,6 @@ onBeforeUnmount(() => {
       @unavailable-click="handleUnavailableClick"
       @toggle-android-screenshot-composite="handleToggleAndroidScreenshotComposite"
       @request-android-all-files="handleRequestAndroidAllFiles"
-      @recording-change="(r) => (hotkeyRecording = r)"
     />
 
     <!-- Unavailable Option Explanation Dialog -->

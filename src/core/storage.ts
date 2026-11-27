@@ -1,6 +1,5 @@
 import type { Point2D } from './homography';
 import type { BlendRenderMode } from './webglOverlay';
-import type { HotkeyBinding } from './hotkey';
 import type { AppLocale } from './i18n';
 import type { WorldViewportTransform } from './world';
 import type { CanvasImageItemMeta, MediaCrop } from './canvasItems';
@@ -69,7 +68,6 @@ export interface PersistedAppState {
   layersWindow?: PersistedLayersWindowState;
   customCssEnabled?: boolean;
   customCss?: string;
-  toggleHotkey?: HotkeyBinding | null;
   locale?: AppLocale;
   themeMode?: ThemeMode;
   dynamicColor?: boolean;

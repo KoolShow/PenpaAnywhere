@@ -1,11 +1,5 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
-import {
-  DEFAULT_TOGGLE_HOTKEY,
-  formatHotkeyLabel,
-  keyboardEventToHotkey,
-  type HotkeyBinding,
-} from '../core/hotkey';
 import { DEFAULT_PENPA_MD3_CSS } from '../core/defaultPenpaCss';
 import HueRingPicker from './HueRingPicker.vue';
 import MdIcon from './MdIcon.vue';
@@ -13,6 +7,7 @@ import type { UnavailableReasonKey } from './ControlBar.vue';
 import {
   openExternalLink,
   setAndroidKeyboardFocusable,
+  supportsOverlaySwitch,
   type AndroidScreenshotCompositeStatus,
   type RuntimePlatform,
 } from '../core/platform';
@@ -28,12 +23,12 @@ import {
 import type { ButtonDisplayMode, ThemeMode } from '../core/storage';
 import {
   currentLocale,
-  formatMessage,
   LOCALE_OPTIONS,
   messages,
   setLocale,
   type AppLocale,
 } from '../core/i18n';
+import { beginGlobalDrag, endGlobalDrag, tryCapturePointer, tryReleasePointer } from '../core/dragGuard';
 
 const GITHUB_REPO_URL = 'https://github.com/KoolShow/PenpaAnywhere';
 const GITHUB_ISSUES_URL = 'https://github.com/KoolShow/PenpaAnywhere/issues';
@@ -43,7 +38,6 @@ const props = defineProps<{
   platform: RuntimePlatform;
   customCssEnabled: boolean;
   customCss: string;
-  toggleHotkey: HotkeyBinding | null;
   buttonDisplayMode: ButtonDisplayMode;
   overlayFullCanvas: boolean;
   showUnavailableOptions: boolean;
@@ -54,15 +48,21 @@ const emit = defineEmits<{
   (e: 'update:open', v: boolean): void;
   (e: 'update:customCssEnabled', v: boolean): void;
   (e: 'update:customCss', v: string): void;
-  (e: 'update:toggleHotkey', v: HotkeyBinding | null): void;
   (e: 'update:buttonDisplayMode', v: ButtonDisplayMode): void;
   (e: 'update:overlayFullCanvas', v: boolean): void;
   (e: 'update:showUnavailableOptions', v: boolean): void;
   (e: 'unavailable-click', key: UnavailableReasonKey): void;
   (e: 'toggle-android-screenshot-composite', enabled: boolean): void;
   (e: 'request-android-all-files'): void;
-  (e: 'recording-change', recording: boolean): void;
 }>();
+
+const canOverlayMode = computed(() => supportsOverlaySwitch(props.platform));
+const showDynamicColorRow = computed(() => dynamicColorSupported.value || props.showUnavailableOptions);
+const showHueRow = computed(() => !dynamicColorEnabled.value || !dynamicColorSupported.value);
+const showOverlayFullCanvasRow = computed(() => canOverlayMode.value || props.showUnavailableOptions);
+const showAndroidShotSection = computed(
+  () => props.platform === 'android-overlay' || props.showUnavailableOptions,
+);
 
 const themeModeOptions = computed<Array<{ value: ThemeMode; label: string }>>(() => [
   { value: 'auto', label: messages.value.settings.themeAuto },
@@ -84,6 +84,14 @@ function handleDynamicColorToggle() {
   setDynamicColorEnabled(!dynamicColorEnabled.value);
 }
 
+function handleOverlayFullCanvasToggle() {
+  if (!canOverlayMode.value) {
+    emit('unavailable-click', 'overlayWeb');
+    return;
+  }
+  emit('update:overlayFullCanvas', !props.overlayFullCanvas);
+}
+
 function handleAndroidShotUnavailable() {
   emit('unavailable-click', 'androidShotUnavailable');
 }
@@ -92,34 +100,60 @@ function handleOpenExternal(url: string) {
   void openExternalLink(url);
 }
 
-type RecordHintState =
-  | null
-  | { kind: 'prompt' | 'cancelled' | 'needModifier' | 'cleared' }
-  | { kind: 'bound' | 'resetDone'; label: string };
-
-const recording = ref(false);
-const recordStatus = ref<RecordHintState>(null);
 const cssDraft = ref(props.customCss);
+const cssEditorHeight = ref(220);
+const cssResizing = ref(false);
 
-const recordHintText = computed(() => {
-  const s = recordStatus.value;
-  if (!s) return '';
-  const m = messages.value.settings;
-  switch (s.kind) {
-    case 'prompt':
-      return m.hotkeyPrompt;
-    case 'cancelled':
-      return m.hotkeyCancelled;
-    case 'needModifier':
-      return m.hotkeyNeedModifier;
-    case 'cleared':
-      return m.hotkeyCleared;
-    case 'bound':
-      return formatMessage(m.hotkeyBound, { label: s.label });
-    case 'resetDone':
-      return formatMessage(m.hotkeyResetDone, { label: s.label });
-  }
-});
+let resizeSession: {
+  pointerId: number;
+  captureEl: Element | null;
+  startY: number;
+  startHeight: number;
+} | null = null;
+
+function finishCssResize() {
+  if (!resizeSession) return;
+  tryReleasePointer(resizeSession.captureEl, resizeSession.pointerId);
+  resizeSession = null;
+  cssResizing.value = false;
+  window.removeEventListener('pointermove', onCssResizeMove);
+  window.removeEventListener('pointerup', onCssResizeEnd);
+  window.removeEventListener('pointercancel', onCssResizeEnd);
+  window.removeEventListener('blur', finishCssResize);
+  endGlobalDrag();
+}
+
+function startCssResize(e: PointerEvent) {
+  if (e.button !== 0 && e.pointerType === 'mouse') return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (resizeSession) finishCssResize();
+  const captureEl = tryCapturePointer(e.currentTarget as HTMLElement, e.pointerId);
+  resizeSession = {
+    pointerId: e.pointerId,
+    captureEl,
+    startY: e.clientY,
+    startHeight: cssEditorHeight.value,
+  };
+  cssResizing.value = true;
+  beginGlobalDrag();
+  window.addEventListener('pointermove', onCssResizeMove);
+  window.addEventListener('pointerup', onCssResizeEnd);
+  window.addEventListener('pointercancel', onCssResizeEnd);
+  window.addEventListener('blur', finishCssResize);
+}
+
+function onCssResizeMove(e: PointerEvent) {
+  if (!resizeSession || e.pointerId !== resizeSession.pointerId) return;
+  e.preventDefault();
+  const nextH = resizeSession.startHeight + (e.clientY - resizeSession.startY);
+  cssEditorHeight.value = Math.round(Math.max(120, Math.min(480, nextH)));
+}
+
+function onCssResizeEnd(e: PointerEvent) {
+  if (!resizeSession || e.pointerId !== resizeSession.pointerId) return;
+  finishCssResize();
+}
 
 watch(
   () => props.customCss,
@@ -134,99 +168,21 @@ watch(
   () => props.open,
   (isOpen) => {
     if (!isOpen) {
-      stopRecording();
+      finishCssResize();
       setAndroidKeyboardFocusable(false);
     } else {
       cssDraft.value = props.customCss;
-      recordStatus.value = null;
     }
   },
 );
-
-const hotkeyText = computed(() =>
-  formatHotkeyLabel(props.toggleHotkey, messages.value.settings.hotkeyUnbound),
-);
-
-const shortcutRows = computed<Array<{ action: string; keys: string }>>(() => {
-  const s = messages.value.settings;
-  return [
-    { action: s.scTogglePassThrough, keys: hotkeyText.value },
-    { action: s.scPasteImage, keys: s.scPasteImageKey },
-    { action: s.scMultiSelect, keys: s.scMultiSelectKey },
-    { action: s.scDeleteSelected, keys: s.scDeleteSelectedKey },
-    { action: s.scPanCanvas, keys: s.scPanCanvasKey },
-    { action: s.scZoomCanvas, keys: s.scZoomCanvasKey },
-    { action: s.scAspectResize, keys: s.scAspectResizeKey },
-    { action: s.scCenterResize, keys: s.scCenterResizeKey },
-    { action: s.scDoubleClickCrop, keys: s.scDoubleClickCropKey },
-    { action: s.scEscape, keys: s.scEscapeKey },
-  ];
-});
 
 function selectLanguage(loc: AppLocale) {
   setLocale(loc);
 }
 
 function closeDialog() {
-  stopRecording();
+  finishCssResize();
   emit('update:open', false);
-}
-
-function startRecording() {
-  recording.value = true;
-  recordStatus.value = { kind: 'prompt' };
-  emit('recording-change', true);
-  window.addEventListener('keydown', onRecordKeyDown, true);
-}
-
-function stopRecording() {
-  if (!recording.value) return;
-  recording.value = false;
-  emit('recording-change', false);
-  window.removeEventListener('keydown', onRecordKeyDown, true);
-}
-
-function onRecordKeyDown(e: KeyboardEvent) {
-  e.preventDefault();
-  e.stopPropagation();
-
-  if (e.code === 'Escape') {
-    recordStatus.value = { kind: 'cancelled' };
-    stopRecording();
-    return;
-  }
-
-  // Ignore bare modifier press while waiting for main key
-  if (
-    e.code.startsWith('Control') ||
-    e.code.startsWith('Shift') ||
-    e.code.startsWith('Alt') ||
-    e.code.startsWith('Meta')
-  ) {
-    return;
-  }
-
-  const parsed = keyboardEventToHotkey(e);
-  if (!parsed) {
-    recordStatus.value = { kind: 'needModifier' };
-    return;
-  }
-
-  emit('update:toggleHotkey', parsed);
-  recordStatus.value = { kind: 'bound', label: parsed.label };
-  stopRecording();
-}
-
-function resetDefaultHotkey() {
-  stopRecording();
-  emit('update:toggleHotkey', { ...DEFAULT_TOGGLE_HOTKEY });
-  recordStatus.value = { kind: 'resetDone', label: DEFAULT_TOGGLE_HOTKEY.label };
-}
-
-function clearHotkey() {
-  stopRecording();
-  emit('update:toggleHotkey', null);
-  recordStatus.value = { kind: 'cleared' };
 }
 
 function onCssInput(e: Event) {
@@ -264,367 +220,386 @@ function clearCss() {
 }
 
 onBeforeUnmount(() => {
-  stopRecording();
+  finishCssResize();
 });
 </script>
 
 <template>
-  <div v-if="open" class="ac-settings-backdrop" @pointerdown.self="closeDialog">
-    <section
-      class="ac-settings-card"
-      role="dialog"
-      aria-modal="true"
-      :aria-label="messages.settings.ariaLabel"
-    >
-      <header class="ac-settings-header">
-        <div class="ac-settings-title">{{ messages.settings.title }}</div>
-        <button
-          type="button"
-          class="ac-icon-btn ac-dialog-close-btn"
-          :title="messages.settings.close"
-          :aria-label="messages.settings.close"
-          @click="closeDialog"
-        >
-          <MdIcon name="close" :size="18" />
-        </button>
-      </header>
-
-      <div class="ac-settings-body">
-        <!-- Section 0: Interface Language (CN / EN / JP) - Auto one-way syncs to Penpa+ -->
-        <div class="ac-setting-section">
-          <div class="ac-setting-row">
-            <div class="ac-setting-label">{{ messages.settings.languageLabel }}</div>
-            <div class="ac-lang-segmented" role="group" :aria-label="messages.settings.languageLabel">
-              <button
-                v-for="opt in LOCALE_OPTIONS"
-                :key="opt.value"
-                class="ac-lang-seg-btn"
-                :class="{ active: currentLocale === opt.value }"
-                @click="selectLanguage(opt.value)"
-              >
-                {{ opt.label }}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div class="ac-divider" />
-
-        <!-- Section 0.5: Appearance (Light / Dark / Auto) & Dynamic Color + Hue Ring -->
-        <div class="ac-setting-section">
-          <div class="ac-setting-row">
-            <div class="ac-setting-label">{{ messages.settings.themeLabel }}</div>
-            <div class="ac-lang-segmented" role="group" :aria-label="messages.settings.themeLabel">
-              <button
-                v-for="opt in themeModeOptions"
-                :key="opt.value"
-                class="ac-lang-seg-btn"
-                :class="{ active: themeMode === opt.value }"
-                @click="setThemeMode(opt.value)"
-              >
-                {{ opt.label }}
-              </button>
-            </div>
-          </div>
-
-          <div
-            v-if="dynamicColorSupported || showUnavailableOptions"
-            class="ac-setting-row"
+  <Transition name="ac-settings-modal">
+    <div v-if="open" class="ac-settings-backdrop" @pointerdown.self="closeDialog">
+      <section
+        class="ac-settings-card"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="messages.settings.ariaLabel"
+      >
+        <header class="ac-settings-header">
+          <div class="ac-settings-title">{{ messages.settings.title }}</div>
+          <button
+            type="button"
+            class="ac-icon-btn ac-dialog-close-btn"
+            :title="messages.settings.close"
+            :aria-label="messages.settings.close"
+            @click="closeDialog"
           >
-            <div class="ac-setting-label">{{ messages.settings.dynamicColorLabel }}</div>
-            <button
-              type="button"
-              role="switch"
-              class="ac-md3-switch"
-              :aria-checked="dynamicColorSupported && dynamicColorEnabled"
-              :aria-label="messages.settings.dynamicColorLabel"
-              :class="{
-                checked: dynamicColorSupported && dynamicColorEnabled,
-                unavailable: !dynamicColorSupported,
-              }"
-              @click="handleDynamicColorToggle"
-            >
-              <span class="ac-md3-switch-thumb">
-                <MdIcon
-                  v-if="dynamicColorSupported && dynamicColorEnabled"
-                  name="check"
-                  :size="14"
-                  class="ac-md3-switch-check"
-                />
-              </span>
-            </button>
-          </div>
+            <MdIcon name="close" :size="18" />
+          </button>
+        </header>
 
-          <div v-if="!dynamicColorEnabled || !dynamicColorSupported" class="ac-setting-row ac-hue-row">
-            <div class="ac-setting-label">{{ messages.settings.hueLabel }}</div>
-            <HueRingPicker :model-value="customHue" @update:model-value="setCustomHue" />
-          </div>
-
-          <div class="ac-setting-row">
-            <div class="ac-setting-label">{{ messages.settings.buttonDisplayLabel }}</div>
-            <div class="ac-lang-segmented" role="group" :aria-label="messages.settings.buttonDisplayLabel">
-              <button
-                v-for="opt in buttonDisplayOptions"
-                :key="opt.value"
-                class="ac-lang-seg-btn"
-                :class="{ active: buttonDisplayMode === opt.value }"
-                @click="emit('update:buttonDisplayMode', opt.value)"
-              >
-                {{ opt.label }}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div class="ac-divider" />
-
-        <!-- Section 0.8: Workspace & Visibility Options -->
-        <div class="ac-setting-section">
-          <div class="ac-setting-row">
-            <div>
-              <div class="ac-setting-label">{{ messages.settings.overlayFullCanvasLabel }}</div>
-              <div class="ac-setting-desc">{{ messages.settings.overlayFullCanvasDesc }}</div>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              class="ac-md3-switch"
-              :aria-checked="overlayFullCanvas"
-              :aria-label="messages.settings.overlayFullCanvasLabel"
-              :class="{ checked: overlayFullCanvas }"
-              @click="emit('update:overlayFullCanvas', !overlayFullCanvas)"
-            >
-              <span class="ac-md3-switch-thumb">
-                <MdIcon
-                  v-if="overlayFullCanvas"
-                  name="check"
-                  :size="14"
-                  class="ac-md3-switch-check"
-                />
-              </span>
-            </button>
-          </div>
-
-          <div class="ac-setting-row">
-            <div>
-              <div class="ac-setting-label">{{ messages.settings.showUnavailableLabel }}</div>
-              <div class="ac-setting-desc">{{ messages.settings.showUnavailableDesc }}</div>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              class="ac-md3-switch"
-              :aria-checked="showUnavailableOptions"
-              :aria-label="messages.settings.showUnavailableLabel"
-              :class="{ checked: showUnavailableOptions }"
-              @click="emit('update:showUnavailableOptions', !showUnavailableOptions)"
-            >
-              <span class="ac-md3-switch-thumb">
-                <MdIcon
-                  v-if="showUnavailableOptions"
-                  name="check"
-                  :size="14"
-                  class="ac-md3-switch-check"
-                />
-              </span>
-            </button>
-          </div>
-        </div>
-
-        <div class="ac-divider" />
-
-        <!-- Section 1: Click-through Toggle Hotkey -->
-        <div class="ac-setting-section">
-          <div class="ac-setting-row">
-            <div class="ac-setting-label">{{ messages.settings.hotkeyLabel }}</div>
-            <span class="ac-hotkey-pill" :class="{ recording }">
-              {{ recording ? messages.settings.hotkeyRecordingPill : hotkeyText }}
-            </span>
-          </div>
-
-          <div class="ac-setting-actions">
-            <button
-              class="ac-btn"
-              :class="{ active: recording }"
-              @click="recording ? stopRecording() : startRecording()"
-            >
-              {{ recording ? messages.settings.hotkeyCancelBtn : messages.settings.hotkeyRecordBtn }}
-            </button>
-            <button class="ac-btn action" @click="resetDefaultHotkey">
-              {{ messages.settings.hotkeyResetBtn }}
-            </button>
-            <button class="ac-btn action" @click="clearHotkey">
-              {{ messages.settings.hotkeyClearBtn }}
-            </button>
-          </div>
-
-          <div v-if="recordHintText" class="ac-setting-hint">{{ recordHintText }}</div>
-        </div>
-
-        <!-- Android Compatibility Section: Auto-Composite Overlay onto System Screenshots -->
-        <template v-if="platform === 'android-overlay' || showUnavailableOptions">
-          <div class="ac-divider" />
+        <div class="ac-settings-body">
+          <!-- Section 0: Interface Language (CN / EN / JP) - Auto one-way syncs to Penpa+ -->
           <div class="ac-setting-section">
             <div class="ac-setting-row">
+              <div class="ac-setting-label">{{ messages.settings.languageLabel }}</div>
+              <div class="ac-lang-segmented" role="group" :aria-label="messages.settings.languageLabel">
+                <button
+                  v-for="opt in LOCALE_OPTIONS"
+                  :key="opt.value"
+                  class="ac-lang-seg-btn"
+                  :class="{ active: currentLocale === opt.value }"
+                  @click="selectLanguage(opt.value)"
+                >
+                  {{ opt.label }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="ac-divider" />
+
+          <!-- Section 0.5: Appearance (Light / Dark / Auto) & Dynamic Color + Hue Ring -->
+          <div class="ac-setting-section ac-setting-section-animated">
+            <div class="ac-setting-row">
+              <div class="ac-setting-label">{{ messages.settings.themeLabel }}</div>
+              <div class="ac-lang-segmented" role="group" :aria-label="messages.settings.themeLabel">
+                <button
+                  v-for="opt in themeModeOptions"
+                  :key="opt.value"
+                  class="ac-lang-seg-btn"
+                  :class="{ active: themeMode === opt.value }"
+                  @click="setThemeMode(opt.value)"
+                >
+                  {{ opt.label }}
+                </button>
+              </div>
+            </div>
+
+            <div class="ac-collapse" :class="{ open: showDynamicColorRow }" :inert="!showDynamicColorRow">
+              <div class="ac-collapse-inner ac-collapse-pad-top">
+                <div class="ac-setting-row">
+                  <div class="ac-setting-label">{{ messages.settings.dynamicColorLabel }}</div>
+                  <button
+                    type="button"
+                    role="switch"
+                    class="ac-md3-switch"
+                    :aria-checked="dynamicColorSupported && dynamicColorEnabled"
+                    :aria-label="messages.settings.dynamicColorLabel"
+                    :class="{
+                      checked: dynamicColorSupported && dynamicColorEnabled,
+                      unavailable: !dynamicColorSupported,
+                    }"
+                    @click="handleDynamicColorToggle"
+                  >
+                    <span class="ac-md3-switch-thumb">
+                      <MdIcon
+                        v-if="dynamicColorSupported && dynamicColorEnabled"
+                        name="check"
+                        :size="14"
+                        class="ac-md3-switch-check"
+                      />
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="ac-collapse" :class="{ open: showHueRow }" :inert="!showHueRow">
+              <div class="ac-collapse-inner ac-collapse-pad-top">
+                <div class="ac-setting-row ac-hue-row">
+                  <div class="ac-setting-label">{{ messages.settings.hueLabel }}</div>
+                  <HueRingPicker :model-value="customHue" @update:model-value="setCustomHue" />
+                </div>
+              </div>
+            </div>
+
+            <div class="ac-setting-row ac-row-gap-top">
+              <div class="ac-setting-label">{{ messages.settings.buttonDisplayLabel }}</div>
+              <div class="ac-lang-segmented" role="group" :aria-label="messages.settings.buttonDisplayLabel">
+                <button
+                  v-for="opt in buttonDisplayOptions"
+                  :key="opt.value"
+                  class="ac-lang-seg-btn"
+                  :class="{ active: buttonDisplayMode === opt.value }"
+                  @click="emit('update:buttonDisplayMode', opt.value)"
+                >
+                  {{ opt.label }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="ac-divider" />
+
+          <!-- Section 0.8: Workspace & Visibility Options -->
+          <div class="ac-setting-section ac-setting-section-animated">
+            <div class="ac-collapse" :class="{ open: showOverlayFullCanvasRow }" :inert="!showOverlayFullCanvasRow">
+              <div class="ac-collapse-inner ac-collapse-pad-bottom">
+                <div class="ac-setting-row">
+                  <div>
+                    <div class="ac-setting-label">{{ messages.settings.overlayFullCanvasLabel }}</div>
+                    <div class="ac-setting-desc">{{ messages.settings.overlayFullCanvasDesc }}</div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    class="ac-md3-switch"
+                    :aria-checked="canOverlayMode && overlayFullCanvas"
+                    :aria-label="messages.settings.overlayFullCanvasLabel"
+                    :class="{
+                      checked: canOverlayMode && overlayFullCanvas,
+                      unavailable: !canOverlayMode,
+                    }"
+                    @click="handleOverlayFullCanvasToggle"
+                  >
+                    <span class="ac-md3-switch-thumb">
+                      <MdIcon
+                        v-if="canOverlayMode && overlayFullCanvas"
+                        name="check"
+                        :size="14"
+                        class="ac-md3-switch-check"
+                      />
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="ac-setting-row">
               <div>
-                <div class="ac-setting-label">{{ messages.settings.androidShotLabel }}</div>
-                <div class="ac-setting-desc">{{ messages.settings.androidShotDesc }}</div>
+                <div class="ac-setting-label">{{ messages.settings.showUnavailableLabel }}</div>
+                <div class="ac-setting-desc">{{ messages.settings.showUnavailableDesc }}</div>
               </div>
               <button
-                v-if="platform === 'android-overlay'"
                 type="button"
                 role="switch"
                 class="ac-md3-switch"
-                :aria-checked="!!androidScreenshotStatus?.enabled"
-                :aria-label="messages.settings.androidShotLabel"
-                :class="{ checked: !!androidScreenshotStatus?.enabled }"
-                @click="emit('toggle-android-screenshot-composite', !androidScreenshotStatus?.enabled)"
+                :aria-checked="showUnavailableOptions"
+                :aria-label="messages.settings.showUnavailableLabel"
+                :class="{ checked: showUnavailableOptions }"
+                @click="emit('update:showUnavailableOptions', !showUnavailableOptions)"
               >
                 <span class="ac-md3-switch-thumb">
                   <MdIcon
-                    v-if="androidScreenshotStatus?.enabled"
+                    v-if="showUnavailableOptions"
                     name="check"
                     :size="14"
                     class="ac-md3-switch-check"
                   />
                 </span>
               </button>
-              <button
-                v-else
-                type="button"
-                role="switch"
-                class="ac-md3-switch unavailable"
-                aria-checked="false"
-                :aria-label="messages.settings.androidShotLabel"
-                @click="handleAndroidShotUnavailable"
-              >
-                <span class="ac-md3-switch-thumb" />
-              </button>
-            </div>
-            <div v-if="platform === 'android-overlay' && androidScreenshotStatus" class="ac-setting-actions">
-              <span class="ac-setting-desc">
-                <template v-if="androidScreenshotStatus.enabled">
-                  {{
-                    androidScreenshotStatus.hasWritePermission
-                      ? messages.settings.androidPermGranted
-                      : messages.settings.androidPermMissing
-                  }}
-                </template>
-                <template v-else-if="!androidScreenshotStatus.hasReadPermission">
-                  {{ messages.settings.androidReadMissing }}
-                </template>
-                <template v-else>
-                  {{ messages.settings.androidReadReady }}
-                </template>
-              </span>
-              <button
-                v-if="androidScreenshotStatus.enabled && !androidScreenshotStatus.hasWritePermission"
-                class="ac-btn action tonal"
-                @click="emit('request-android-all-files')"
-              >
-                {{ messages.settings.grantPermission }}
-              </button>
             </div>
           </div>
-        </template>
 
-        <div class="ac-divider" />
-
-        <!-- Section 2: Custom CSS Injection into Penpa+ -->
-        <div class="ac-setting-section">
-          <div class="ac-setting-row">
-            <div>
-              <div class="ac-setting-label">{{ messages.settings.cssLabel }}</div>
-              <div class="ac-setting-desc">
-                {{ messages.settings.cssDescBefore }}
-                <code>--md-sys-color-*</code>
-                {{ messages.settings.cssDescAfter }}
+          <!-- Android Compatibility Section: Auto-Composite Overlay onto System Screenshots -->
+          <div
+            class="ac-collapse ac-section-collapse"
+            :class="{ open: showAndroidShotSection }"
+            :inert="!showAndroidShotSection"
+          >
+            <div class="ac-collapse-inner">
+              <div class="ac-section-collapse-body">
+                <div class="ac-divider" />
+                <div class="ac-setting-section">
+                  <div class="ac-setting-row">
+                    <div>
+                      <div class="ac-setting-label">{{ messages.settings.androidShotLabel }}</div>
+                      <div class="ac-setting-desc">{{ messages.settings.androidShotDesc }}</div>
+                    </div>
+                    <button
+                      v-if="platform === 'android-overlay'"
+                      type="button"
+                      role="switch"
+                      class="ac-md3-switch"
+                      :aria-checked="!!androidScreenshotStatus?.enabled"
+                      :aria-label="messages.settings.androidShotLabel"
+                      :class="{ checked: !!androidScreenshotStatus?.enabled }"
+                      @click="emit('toggle-android-screenshot-composite', !androidScreenshotStatus?.enabled)"
+                    >
+                      <span class="ac-md3-switch-thumb">
+                        <MdIcon
+                          v-if="androidScreenshotStatus?.enabled"
+                          name="check"
+                          :size="14"
+                          class="ac-md3-switch-check"
+                        />
+                      </span>
+                    </button>
+                    <button
+                      v-else
+                      type="button"
+                      role="switch"
+                      class="ac-md3-switch unavailable"
+                      aria-checked="false"
+                      :aria-label="messages.settings.androidShotLabel"
+                      @click="handleAndroidShotUnavailable"
+                    >
+                      <span class="ac-md3-switch-thumb" />
+                    </button>
+                  </div>
+                  <div
+                    class="ac-collapse"
+                    :class="{ open: platform === 'android-overlay' && !!androidScreenshotStatus }"
+                    :inert="!(platform === 'android-overlay' && !!androidScreenshotStatus)"
+                  >
+                    <div class="ac-collapse-inner">
+                      <div v-if="androidScreenshotStatus" class="ac-setting-actions">
+                        <span class="ac-setting-desc">
+                          <template v-if="androidScreenshotStatus.enabled">
+                            {{
+                              androidScreenshotStatus.hasWritePermission
+                                ? messages.settings.androidPermGranted
+                                : messages.settings.androidPermMissing
+                            }}
+                          </template>
+                          <template v-else-if="!androidScreenshotStatus.hasReadPermission">
+                            {{ messages.settings.androidReadMissing }}
+                          </template>
+                          <template v-else>
+                            {{ messages.settings.androidReadReady }}
+                          </template>
+                        </span>
+                        <button
+                          v-if="androidScreenshotStatus.enabled && !androidScreenshotStatus.hasWritePermission"
+                          class="ac-btn action tonal"
+                          @click="emit('request-android-all-files')"
+                        >
+                          {{ messages.settings.grantPermission }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
-            <button
-              type="button"
-              role="switch"
-              class="ac-md3-switch"
-              :aria-checked="customCssEnabled"
-              :aria-label="messages.settings.cssLabel"
-              :class="{ checked: customCssEnabled }"
-              @click="emit('update:customCssEnabled', !customCssEnabled)"
-            >
-              <span class="ac-md3-switch-thumb">
-                <MdIcon
-                  v-if="customCssEnabled"
-                  name="check"
-                  :size="14"
-                  class="ac-md3-switch-check"
-                />
-              </span>
-            </button>
           </div>
 
-          <template v-if="customCssEnabled">
-            <textarea
-              class="ac-css-editor"
-              :value="cssDraft"
-              spellcheck="false"
-              :placeholder="messages.settings.cssPlaceholder"
-              @input="onCssInput"
-              @keydown="onCssKeyDown"
-              @focus="setAndroidKeyboardFocusable(true)"
-              @blur="setAndroidKeyboardFocusable(false)"
-            />
+          <div class="ac-divider" />
 
-            <div class="ac-setting-actions">
-              <button class="ac-btn action tonal" @click="resetDefaultCss">
-                {{ messages.settings.cssResetDefault }}
-              </button>
-              <button class="ac-btn action" @click="clearCss">
-                {{ messages.settings.cssClear }}
+          <!-- Section 2: Custom CSS Injection into Penpa+ -->
+          <div class="ac-setting-section ac-setting-section-animated">
+            <div class="ac-setting-row">
+              <div>
+                <div class="ac-setting-label">{{ messages.settings.cssLabel }}</div>
+                <div class="ac-setting-desc">
+                  {{ messages.settings.cssDescBefore }}
+                  <code>--md-sys-color-*</code>
+                  {{ messages.settings.cssDescAfter }}
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                class="ac-md3-switch"
+                :aria-checked="customCssEnabled"
+                :aria-label="messages.settings.cssLabel"
+                :class="{ checked: customCssEnabled }"
+                @click="emit('update:customCssEnabled', !customCssEnabled)"
+              >
+                <span class="ac-md3-switch-thumb">
+                  <MdIcon
+                    v-if="customCssEnabled"
+                    name="check"
+                    :size="14"
+                    class="ac-md3-switch-check"
+                  />
+                </span>
               </button>
             </div>
-          </template>
-        </div>
 
-        <div class="ac-divider" />
+            <div class="ac-collapse" :class="{ open: customCssEnabled }" :inert="!customCssEnabled">
+              <div class="ac-collapse-inner ac-collapse-pad-top">
+                <div class="ac-css-editor-block">
+                  <div class="ac-css-editor-wrap" :class="{ resizing: cssResizing }">
+                    <textarea
+                      class="ac-css-editor"
+                      :style="{ height: `${cssEditorHeight}px` }"
+                      :value="cssDraft"
+                      spellcheck="false"
+                      :placeholder="messages.settings.cssPlaceholder"
+                      @input="onCssInput"
+                      @keydown="onCssKeyDown"
+                      @focus="setAndroidKeyboardFocusable(true)"
+                      @blur="setAndroidKeyboardFocusable(false)"
+                    />
+                    <div
+                      class="ac-css-resize-handle"
+                      aria-hidden="true"
+                      @pointerdown="startCssResize"
+                    />
+                  </div>
 
-        <!-- Section 2.5: Shortcut Reference Table -->
-        <div class="ac-setting-section">
-          <div class="ac-setting-label">{{ messages.settings.shortcutsTitle }}</div>
-          <table class="ac-shortcuts-table">
-            <tbody>
-              <tr v-for="row in shortcutRows" :key="row.action">
-                <td class="ac-sc-action">{{ row.action }}</td>
-                <td class="ac-sc-keys">
-                  <kbd class="ac-kbd">{{ row.keys }}</kbd>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+                  <div class="ac-setting-actions">
+                    <button class="ac-btn action tonal" @click="resetDefaultCss">
+                      {{ messages.settings.cssResetDefault }}
+                    </button>
+                    <button class="ac-btn action" @click="clearCss">
+                      {{ messages.settings.cssClear }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
 
-        <div class="ac-divider" />
+          <div class="ac-divider" />
 
-        <!-- Section 3: About & External Links (GitHub & Issues) -->
-        <div class="ac-setting-section">
-          <div class="ac-setting-row">
-            <div class="ac-setting-label">{{ messages.settings.linksLabel }}</div>
-            <div class="ac-setting-actions">
-              <button class="ac-btn action tonal" @click="handleOpenExternal(GITHUB_REPO_URL)">
-                <span>{{ messages.settings.githubLink }}</span>
-                <MdIcon name="open_in_new" :size="14" />
-              </button>
-              <button class="ac-btn action" @click="handleOpenExternal(GITHUB_ISSUES_URL)">
-                <span>{{ messages.settings.issueLink }}</span>
-                <MdIcon name="open_in_new" :size="14" />
-              </button>
+          <!-- Section 3: About & External Links (GitHub & Issues) -->
+          <div class="ac-setting-section">
+            <div class="ac-setting-row">
+              <div class="ac-setting-label">{{ messages.settings.linksLabel }}</div>
+              <div class="ac-setting-actions">
+                <button class="ac-btn action tonal" @click="handleOpenExternal(GITHUB_REPO_URL)">
+                  <span>{{ messages.settings.githubLink }}</span>
+                  <MdIcon name="open_in_new" :size="14" />
+                </button>
+                <button class="ac-btn action" @click="handleOpenExternal(GITHUB_ISSUES_URL)">
+                  <span>{{ messages.settings.issueLink }}</span>
+                  <MdIcon name="open_in_new" :size="14" />
+                </button>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-    </section>
-  </div>
+      </section>
+    </div>
+  </Transition>
 </template>
 
 <style scoped>
+/* Dialog open / close MD3 emphasized transition */
+.ac-settings-modal-enter-active,
+.ac-settings-modal-leave-active {
+  transition: opacity 0.2s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ac-settings-modal-enter-active .ac-settings-card,
+.ac-settings-modal-leave-active .ac-settings-card {
+  transition:
+    transform 0.24s cubic-bezier(0.2, 0, 0, 1),
+    opacity 0.2s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ac-settings-modal-enter-from,
+.ac-settings-modal-leave-to {
+  opacity: 0;
+}
+
+.ac-settings-modal-enter-from .ac-settings-card,
+.ac-settings-modal-leave-to .ac-settings-card {
+  transform: scale(0.96) translateY(8px);
+  opacity: 0;
+}
+
 .ac-settings-backdrop {
   position: fixed;
   inset: 0;
@@ -680,6 +655,68 @@ onBeforeUnmount(() => {
   gap: 10px;
 }
 
+.ac-setting-section-animated {
+  gap: 0;
+}
+
+.ac-row-gap-top {
+  margin-top: 10px;
+}
+
+/* Smooth MD3 height + opacity collapse/expand for dynamic settings rows & sections */
+.ac-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    grid-template-rows 0.24s cubic-bezier(0.2, 0, 0, 1),
+    opacity 0.18s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ac-collapse.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ac-collapse-inner {
+  overflow: hidden;
+  min-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  transition:
+    padding-top 0.24s cubic-bezier(0.2, 0, 0, 1),
+    padding-bottom 0.24s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ac-collapse.open > .ac-collapse-pad-top {
+  padding-top: 10px;
+}
+
+.ac-collapse.open > .ac-collapse-pad-bottom {
+  padding-bottom: 10px;
+}
+
+/* Collapse section inside .ac-settings-body (gap: 14px) without leaving extra gap when closed */
+.ac-section-collapse {
+  margin-top: -14px;
+  transition:
+    grid-template-rows 0.24s cubic-bezier(0.2, 0, 0, 1),
+    opacity 0.18s cubic-bezier(0.2, 0, 0, 1),
+    margin-top 0.24s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ac-section-collapse.open {
+  margin-top: 0;
+}
+
+.ac-section-collapse-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .ac-setting-row {
   display: flex;
   flex-wrap: wrap;
@@ -694,7 +731,7 @@ onBeforeUnmount(() => {
 }
 
 .ac-hue-row {
-  padding-top: 4px;
+  padding-top: 2px;
   align-items: center;
 }
 
@@ -724,7 +761,7 @@ onBeforeUnmount(() => {
   line-height: 1;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.16s cubic-bezier(0.2, 0, 0, 1), color 0.16s cubic-bezier(0.2, 0, 0, 1);
 }
 
 .ac-lang-seg-btn:last-child {
@@ -759,7 +796,8 @@ onBeforeUnmount(() => {
   cursor: pointer;
   transition:
     background-color 0.18s cubic-bezier(0.2, 0, 0, 1),
-    border-color 0.18s cubic-bezier(0.2, 0, 0, 1);
+    border-color 0.18s cubic-bezier(0.2, 0, 0, 1),
+    opacity 0.18s ease;
 }
 
 .ac-md3-switch-thumb {
@@ -837,82 +875,6 @@ onBeforeUnmount(() => {
   color: var(--md-sys-color-primary);
 }
 
-.ac-hotkey-pill {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  height: 26px;
-  padding: 0 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  background: var(--md-sys-color-surface-container-highest);
-  border: 1px solid var(--md-sys-color-outline-variant);
-  color: var(--md-sys-color-primary);
-}
-
-.ac-shortcuts-table {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0 4px;
-}
-
-.ac-shortcuts-table td {
-  padding: 5px 10px;
-  background: var(--md-sys-color-surface-container-low);
-  border-top: 1px solid var(--md-sys-color-outline-variant);
-  border-bottom: 1px solid var(--md-sys-color-outline-variant);
-  vertical-align: middle;
-}
-
-.ac-shortcuts-table td:first-child {
-  border-left: 1px solid var(--md-sys-color-outline-variant);
-  border-top-left-radius: 9px;
-  border-bottom-left-radius: 9px;
-}
-
-.ac-shortcuts-table td:last-child {
-  border-right: 1px solid var(--md-sys-color-outline-variant);
-  border-top-right-radius: 9px;
-  border-bottom-right-radius: 9px;
-}
-
-.ac-sc-action {
-  font-size: 12px;
-  color: var(--md-sys-color-on-surface);
-}
-
-.ac-sc-keys {
-  width: 1%;
-  text-align: right;
-  white-space: nowrap;
-}
-
-.ac-kbd {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 22px;
-  padding: 0 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  background: var(--md-sys-color-surface-container-highest);
-  border: 1px solid var(--md-sys-color-outline-variant);
-  color: var(--md-sys-color-primary);
-}
-
-.ac-hotkey-pill.recording {
-  background: var(--md-sys-color-primary-container);
-  border-color: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary-container);
-}
-
 .ac-setting-actions {
   display: flex;
   flex-wrap: wrap;
@@ -920,25 +882,43 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
-.ac-setting-hint {
-  font-size: 11px;
-  color: var(--md-sys-color-primary);
-}
-
 .ac-divider {
   height: 1px;
+  flex-shrink: 0;
   background: var(--md-sys-color-outline-variant);
 }
 
-.ac-css-editor {
+.ac-css-editor-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ac-css-editor-wrap {
+  position: relative;
   width: 100%;
-  min-height: 220px;
-  max-height: 320px;
-  resize: vertical;
-  padding: 10px 12px;
   border-radius: 12px;
   border: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface-container-low);
+  overflow: hidden;
+  transition: border-color 0.16s ease;
+}
+
+.ac-css-editor-wrap:focus-within,
+.ac-css-editor-wrap.resizing {
+  border-color: var(--md-sys-color-primary);
+}
+
+.ac-css-editor {
+  display: block;
+  width: 100%;
+  min-height: 120px;
+  max-height: 480px;
+  resize: none;
+  padding: 10px 12px 16px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
   color: var(--md-sys-color-on-surface);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
@@ -949,12 +929,73 @@ onBeforeUnmount(() => {
   touch-action: pan-y;
 }
 
-.ac-css-editor:focus {
-  border-color: var(--md-sys-color-primary);
+.ac-css-editor::-webkit-resizer {
+  display: none;
+}
+
+.ac-css-editor::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .ac-css-editor:disabled {
   opacity: 0.5;
+}
+
+/* MD3 themed bottom-right resize grip for multiline CSS editor (works on mouse & touch) */
+.ac-css-resize-handle {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 16px;
+  height: 16px;
+  border-bottom-right-radius: 8px;
+  cursor: ns-resize;
+  touch-action: none;
+  background: linear-gradient(
+    135deg,
+    transparent 44%,
+    var(--md-sys-color-outline) 44%,
+    var(--md-sys-color-outline) 54%,
+    transparent 54%,
+    transparent 70%,
+    var(--md-sys-color-outline) 70%,
+    var(--md-sys-color-outline) 80%,
+    transparent 80%
+  );
+  opacity: 0.72;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+@media (hover: hover) {
+  .ac-css-resize-handle:hover {
+    opacity: 1;
+    background: linear-gradient(
+      135deg,
+      transparent 44%,
+      var(--md-sys-color-primary) 44%,
+      var(--md-sys-color-primary) 54%,
+      transparent 54%,
+      transparent 70%,
+      var(--md-sys-color-primary) 70%,
+      var(--md-sys-color-primary) 80%,
+      transparent 80%
+    );
+  }
+}
+
+.ac-css-editor-wrap.resizing .ac-css-resize-handle {
+  opacity: 1;
+  background: linear-gradient(
+    135deg,
+    transparent 44%,
+    var(--md-sys-color-primary) 44%,
+    var(--md-sys-color-primary) 54%,
+    transparent 54%,
+    transparent 70%,
+    var(--md-sys-color-primary) 70%,
+    var(--md-sys-color-primary) 80%,
+    transparent 80%
+  );
 }
 
 .ac-css-editor::-webkit-scrollbar,
