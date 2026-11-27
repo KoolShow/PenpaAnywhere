@@ -400,6 +400,7 @@ function isElementVisuallySelected(elId: string): boolean {
 
 const showUnavailableOptions = ref(savedState.showUnavailableOptions ?? false);
 const settingsOpen = ref(false);
+const screenPickerOpen = ref(false);
 const unavailableReasonKey = ref<UnavailableReasonKey | null>(null);
 const hotkeyRecording = ref(false);
 const screenshotPromptOpen = ref(false);
@@ -1078,7 +1079,11 @@ watch(backdropMode, async (mode) => {
 // ALL visible non-passing elements (grids, images, screens) register their viewport quad!
 // ALL UI floating windows (ControlBar, PenpaDockWindow(s), LayersWindow, ElementToolbar) never pass through!
 async function syncOverlayHitRegions() {
-  const modalBlocking = settingsOpen.value || screenshotPromptOpen.value || !!unavailableReasonKey.value;
+  const modalBlocking =
+    settingsOpen.value ||
+    screenPickerOpen.value ||
+    screenshotPromptOpen.value ||
+    !!unavailableReasonKey.value;
   const g = primaryGrid.value;
   const primaryDock =
     g.dockVisible && (dockRects.value.get(g.id)?.w ?? 0) > 0
@@ -1197,6 +1202,7 @@ watch(
     backdropMode,
     overlayFullCanvas,
     settingsOpen,
+    screenPickerOpen,
     screenshotPromptOpen,
     unavailableReasonKey,
     layersVisible,
@@ -1545,6 +1551,10 @@ async function addScreenProjection() {
     handleUnavailableClick('screenUnsupported');
     return;
   }
+  screenPickerOpen.value = true;
+  clearHoverLocked();
+  // Ensure OS overlay click-through (WS_EX_TRANSPARENT) is disabled BEFORE the native screen picker opens!
+  await syncOverlayHitRegions();
   try {
     const stream = await navigator.mediaDevices.getDisplayMedia({
       video: { cursor: 'always' } as MediaTrackConstraints,
@@ -1596,6 +1606,9 @@ async function addScreenProjection() {
     });
   } catch {
     // User cancelled capture dialog
+  } finally {
+    screenPickerOpen.value = false;
+    await syncOverlayHitRegions();
   }
 }
 
@@ -1631,7 +1644,12 @@ function pointInPaddedRect(
 }
 
 function evaluateLockedHoverAt(x: number, y: number) {
-  if (settingsOpen.value || unavailableReasonKey.value || screenshotPromptOpen.value) {
+  if (
+    settingsOpen.value ||
+    screenPickerOpen.value ||
+    unavailableReasonKey.value ||
+    screenshotPromptOpen.value
+  ) {
     clearHoverLocked();
     return;
   }
