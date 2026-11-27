@@ -1,8 +1,16 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::{
     window::Color, Emitter, Manager, PhysicalPosition, PhysicalSize, State, Theme, WebviewWindow,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+struct SafeAreaInsets {
+    top: u32,
+    right: u32,
+    bottom: u32,
+    left: u32,
+}
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct HitRect {
@@ -205,6 +213,7 @@ fn set_overlay_window_mode(
             }
             let _ = window.set_focus();
         }
+        emit_safe_area_insets(&window, false);
         return Ok(());
     }
 
@@ -235,6 +244,7 @@ fn set_overlay_window_mode(
         .set_always_on_top(always_on_top)
         .map_err(|e| e.to_string())?;
     fit_overlay_window_to_monitor(&window);
+    emit_safe_area_insets(&window, true);
     Ok(())
 }
 
@@ -304,36 +314,167 @@ fn set_window_theme(
     Ok(())
 }
 
+fn is_allowed_external_url(raw: &str) -> bool {
+    let url = raw.trim();
+    if url.is_empty() || url.len() > 32_768 {
+        return false;
+    }
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    let rest = if let Some(r) = lower.strip_prefix("https://") {
+        r
+    } else if let Some(r) = lower.strip_prefix("http://") {
+        r
+    } else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty() && !host.starts_with('.')
+}
+
+fn sanitize_download_filename(raw: &str) -> String {
+    let base = raw
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    let mut cleaned: String = base
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        })
+        .collect();
+    while cleaned.ends_with('.') || cleaned.ends_with(' ') {
+        cleaned.pop();
+    }
+    while cleaned.starts_with('.') || cleaned.starts_with(' ') {
+        cleaned.remove(0);
+    }
+    if cleaned.is_empty() {
+        "download.bin".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let payload = match input.find(";base64,") {
+        Some(idx) => &input[idx + 8..],
+        None => input,
+    };
+    let mut out = Vec::with_capacity(payload.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+    for b in payload.bytes() {
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => break,
+            b' ' | b'\n' | b'\r' | b'\t' => continue,
+            _ => return Err("Invalid base64 character".to_string()),
+        };
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn pick_unique_file_path(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
+    let safe_name = sanitize_download_filename(filename);
+    let first = dir.join(&safe_name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match safe_name.rfind('.') {
+        Some(dot) if dot > 0 => (&safe_name[..dot], &safe_name[dot..]),
+        _ => (safe_name.as_str(), ""),
+    };
+    for idx in 1..=9999 {
+        let candidate = dir.join(format!("{stem} ({idx}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    first
+}
+
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
-    if !url.starts_with("https://github.com/KoolShow/PenpaAnywhere") {
-        return Err("URL not allowed".to_string());
+    let trimmed = url.trim();
+    if !is_allowed_external_url(trimmed) {
+        return Err("URL scheme not allowed".to_string());
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &url])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let op: Vec<u16> = "open\0".encode_utf16().collect();
+        let target: Vec<u16> = trimmed.encode_utf16().chain(std::iter::once(0)).collect();
+        let ret = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                op.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        } as isize;
+        if ret <= 32 {
+            return Err(format!("ShellExecuteW failed with code {ret}"));
+        }
     }
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .arg(&url)
+            .arg(trimmed)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         std::process::Command::new("xdg-open")
-            .arg(&url)
+            .arg(trimmed)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[tauri::command]
+fn save_download_file(
+    app: tauri::AppHandle,
+    filename: String,
+    base64_data: String,
+) -> Result<String, String> {
+    let bytes = decode_base64(&base64_data)?;
+    let dir = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().desktop_dir())
+        .or_else(|_| app.path().document_dir())
+        .or_else(|_| app.path().home_dir())
+        .map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let target = pick_unique_file_path(&dir, &filename);
+    std::fs::write(&target, bytes).map_err(|e| e.to_string())?;
+    Ok(target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&filename)
+        .to_string())
 }
 
 #[tauri::command]
@@ -621,6 +762,86 @@ fn get_system_accent_color() -> Option<String> {
     }
 }
 
+fn compute_work_area_insets(
+    win_pos: (i32, i32),
+    win_size: (u32, u32),
+    work_pos: (i32, i32),
+    work_size: (u32, u32),
+    scale: f64,
+) -> SafeAreaInsets {
+    let safe_scale = if scale.is_finite() && scale > 0.1 {
+        scale
+    } else {
+        1.0
+    };
+    let win_left = win_pos.0;
+    let win_top = win_pos.1;
+    let win_right = win_left.saturating_add(win_size.0 as i32);
+    let win_bottom = win_top.saturating_add(win_size.1 as i32);
+
+    let work_left = work_pos.0;
+    let work_top = work_pos.1;
+    let work_right = work_left.saturating_add(work_size.0 as i32);
+    let work_bottom = work_top.saturating_add(work_size.1 as i32);
+
+    let to_css = |px: i32| -> u32 {
+        if px <= 0 {
+            0
+        } else {
+            ((px as f64) / safe_scale).round().clamp(0.0, 400.0) as u32
+        }
+    };
+
+    SafeAreaInsets {
+        top: to_css(work_top - win_top),
+        right: to_css(win_right - work_right),
+        bottom: to_css(win_bottom - work_bottom),
+        left: to_css(work_left - win_left),
+    }
+}
+
+fn read_window_safe_area_insets(window: &WebviewWindow, is_overlay: bool) -> SafeAreaInsets {
+    if !is_overlay {
+        return SafeAreaInsets::default();
+    }
+    let Ok(Some(monitor)) = window.current_monitor().or_else(|_| window.primary_monitor()) else {
+        return SafeAreaInsets::default();
+    };
+    let pos = monitor.position();
+    let size = monitor.size();
+    let work = monitor.work_area();
+    #[cfg(windows)]
+    let win_h = size.height.saturating_sub(1).max(400);
+    #[cfg(not(windows))]
+    let win_h = size.height.max(400);
+
+    compute_work_area_insets(
+        (pos.x, pos.y),
+        (size.width, win_h),
+        (work.position.x, work.position.y),
+        (work.size.width, work.size.height),
+        monitor.scale_factor(),
+    )
+}
+
+fn emit_safe_area_insets(window: &WebviewWindow, is_overlay: bool) {
+    let insets = read_window_safe_area_insets(window, is_overlay);
+    let _ = window.emit("safe-area-insets-changed", insets);
+}
+
+#[tauri::command]
+fn get_safe_area_insets(
+    window: WebviewWindow,
+    state: State<'_, AppOverlayState>,
+) -> SafeAreaInsets {
+    let is_overlay = state
+        .0
+        .lock()
+        .map(|g| g.is_overlay_mode)
+        .unwrap_or(true);
+    read_window_safe_area_insets(&window, is_overlay)
+}
+
 fn fit_overlay_window_to_monitor(window: &WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor().or_else(|_| window.primary_monitor()) {
         let pos = monitor.position();
@@ -800,14 +1021,17 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
 
     thread::spawn(move || {
         let mut last_emitted_cursor: (f64, f64) = (-10000.0, -10000.0);
+        let mut last_safe_insets: Option<SafeAreaInsets> = None;
+        let mut safe_check_ticks: u32 = 0;
         loop {
             thread::sleep(Duration::from_millis(12));
 
-            let (initialized, auto_enabled, force_ct, drag_active, bar_rect, dock_rect, ui_rects, quads, last_ignore) = {
+            let (is_overlay, initialized, auto_enabled, force_ct, drag_active, bar_rect, dock_rect, ui_rects, quads, last_ignore) = {
                 let Ok(guard) = state.lock() else {
                     continue;
                 };
                 (
+                    guard.is_overlay_mode,
                     guard.initialized,
                     guard.auto_passthrough,
                     guard.force_click_through,
@@ -819,6 +1043,17 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
                     guard.last_ignore,
                 )
             };
+
+            // Periodically sync monitor work area (~480ms) while in overlay mode so toggling
+            // taskbar auto-hide or resizing/moving the taskbar immediately updates safe insets.
+            safe_check_ticks = safe_check_ticks.wrapping_add(1);
+            if safe_check_ticks % 40 == 0 {
+                let current_insets = read_window_safe_area_insets(&window, is_overlay);
+                if last_safe_insets != Some(current_insets) {
+                    last_safe_insets = Some(current_insets);
+                    let _ = window.emit("safe-area-insets-changed", current_insets);
+                }
+            }
 
             if !auto_enabled || !initialized {
                 continue;
@@ -1191,10 +1426,12 @@ pub fn run() {
             set_overlay_window_mode,
             set_window_theme,
             open_external_url,
+            save_download_file,
             update_hit_regions,
             set_drag_active,
             get_system_theme,
             get_system_accent_color,
+            get_safe_area_insets,
             close_app,
             is_debug_build,
             toggle_devtools
@@ -1208,6 +1445,7 @@ pub fn run() {
                 let _ = window.set_always_on_top(false);
                 let _ = window.set_ignore_cursor_events(false);
                 fit_overlay_window_to_monitor(&window);
+                emit_safe_area_insets(&window, true);
 
                 let win_for_evt = window.clone();
                 let state_for_evt = Arc::clone(&state_for_setup);
@@ -1220,6 +1458,14 @@ pub fn run() {
                         if is_overlay {
                             fit_overlay_window_to_monitor(&win_for_evt);
                         }
+                        emit_safe_area_insets(&win_for_evt, is_overlay);
+                    }
+                    tauri::WindowEvent::Resized(_) => {
+                        let is_overlay = state_for_evt
+                            .lock()
+                            .map(|g| g.is_overlay_mode)
+                            .unwrap_or(false);
+                        emit_safe_area_insets(&win_for_evt, is_overlay);
                     }
                     tauri::WindowEvent::ThemeChanged(theme) => {
                         let is_dark = matches!(theme, Theme::Dark);
@@ -1361,5 +1607,96 @@ mod windows_theme_tests {
             RegCloseKey(hkey);
             RegDeleteTreeW(HKEY_CURRENT_USER, subkey.as_ptr());
         }
+    }
+}
+
+#[cfg(test)]
+mod io_utils_tests {
+    use super::*;
+
+    #[test]
+    fn validates_external_urls_strictly() {
+        assert!(is_allowed_external_url(
+            "https://swaroopg92.github.io/penpa-edit/#m=edit&p=abc123"
+        ));
+        assert!(is_allowed_external_url("http://tinyurl.com/app"));
+        assert!(!is_allowed_external_url("file:///C:/Windows/System32/calc.exe"));
+        assert!(!is_allowed_external_url("javascript:alert(1)"));
+        assert!(!is_allowed_external_url("https://example.com/\ncalc"));
+        assert!(!is_allowed_external_url("https://"));
+        assert!(!is_allowed_external_url(""));
+    }
+
+    #[test]
+    fn sanitizes_filenames_and_deduplicates() {
+        assert_eq!(sanitize_download_filename("../../evil:name?.png"), "evilname.png");
+        assert_eq!(sanitize_download_filename("  ...  "), "download.bin");
+        assert_eq!(sanitize_download_filename("puzzle.txt"), "puzzle.txt");
+
+        let tmp = std::env::temp_dir().join(format!(
+            "penpaanywhere-dl-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let p0 = pick_unique_file_path(&tmp, "puzzle.png");
+        assert_eq!(p0.file_name().unwrap(), "puzzle.png");
+        std::fs::write(&p0, b"1").unwrap();
+        let p1 = pick_unique_file_path(&tmp, "puzzle.png");
+        assert_eq!(p1.file_name().unwrap(), "puzzle (1).png");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn decodes_base64_and_data_uri() {
+        assert_eq!(decode_base64("SGVsbG8=").unwrap(), b"Hello");
+        assert_eq!(
+            decode_base64("data:text/plain;base64,UGVucGEr\n").unwrap(),
+            b"Penpa+"
+        );
+        assert!(decode_base64("not!valid@base64").is_err());
+    }
+
+    #[test]
+    fn computes_taskbar_work_area_insets() {
+        // Bottom 48px taskbar on 1920x1080 @ 1.0x (overlay window height = 1079 on Windows)
+        let bottom = compute_work_area_insets((0, 0), (1920, 1079), (0, 0), (1920, 1032), 1.0);
+        assert_eq!(
+            bottom,
+            SafeAreaInsets {
+                top: 0,
+                right: 0,
+                bottom: 47,
+                left: 0
+            }
+        );
+
+        // Bottom 72px taskbar on 2560x1440 @ 1.5x -> 48 CSS px
+        let hidpi = compute_work_area_insets((0, 0), (2560, 1439), (0, 0), (2560, 1368), 1.5);
+        assert_eq!(
+            hidpi,
+            SafeAreaInsets {
+                top: 0,
+                right: 0,
+                bottom: 47,
+                left: 0
+            }
+        );
+
+        // Left 60px docked taskbar @ 1.0x
+        let left = compute_work_area_insets((0, 0), (1920, 1079), (60, 0), (1860, 1080), 1.0);
+        assert_eq!(
+            left,
+            SafeAreaInsets {
+                top: 0,
+                right: 0,
+                bottom: 0,
+                left: 60
+            }
+        );
+
+        // Auto-hidden taskbar (work_area == full monitor) -> all 0
+        let hidden = compute_work_area_insets((0, 0), (1920, 1079), (0, 0), (1920, 1080), 1.0);
+        assert_eq!(hidden, SafeAreaInsets::default());
     }
 }

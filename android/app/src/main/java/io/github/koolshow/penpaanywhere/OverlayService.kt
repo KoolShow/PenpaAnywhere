@@ -375,7 +375,15 @@ class OverlayService : Service() {
                 mainHandler.post { switchToImageActivity() }
             },
             onOpenExternalUrl = { url ->
-                mainHandler.post { openExternalBrowserUrl(url) }
+                mainHandler.post {
+                    OverlayWebViewFactory.openExternalBrowserUrl(overlayContext, url, newTask = true)
+                }
+            },
+            onSaveDownloadFile = { filename, mimeType, base64Data ->
+                OverlayWebViewFactory.saveDownloadFile(overlayContext, filename, mimeType, base64Data)
+            },
+            onCopyText = { text ->
+                OverlayWebViewFactory.copyTextToClipboard(overlayContext, text)
             },
             onClose = {
                 mainHandler.post { flushWebStorageAndStop() }
@@ -723,17 +731,6 @@ class OverlayService : Service() {
         }
 
         sc.setTouchableRegion(mask)
-    }
-
-    private fun openExternalBrowserUrl(url: String) {
-        if (!url.startsWith("https://github.com/KoolShow/PenpaAnywhere")) return
-        try {
-            val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(viewIntent)
-        } catch (_: Exception) {
-        }
     }
 
     private fun switchToImageActivity() {

@@ -182,6 +182,16 @@ const MESSAGES = {
       penpaCloneUnsupportedTitle: '复制功能暂不支持',
       penpaCloneUnsupportedBody: '暂不支持。',
     },
+    imagePreview: {
+      ariaLabel: '导出图片预览',
+      title: '图片预览',
+      save: '保存',
+      close: '关闭',
+    },
+    downloadToast: {
+      saved: '已保存到下载目录：{name}',
+      failed: '保存文件失败',
+    },
     screenshotPrompt: {
       ariaLabel: '截图合成提示',
       title: '检测到系统截屏',
@@ -363,6 +373,16 @@ const MESSAGES = {
       penpaCloneUnsupportedTitle: 'Clone is currently unsupported',
       penpaCloneUnsupportedBody: 'Not supported yet.',
     },
+    imagePreview: {
+      ariaLabel: 'Exported Image Preview',
+      title: 'Image Preview',
+      save: 'Save',
+      close: 'Close',
+    },
+    downloadToast: {
+      saved: 'Saved to Downloads: {name}',
+      failed: 'Failed to save file',
+    },
     screenshotPrompt: {
       ariaLabel: 'Screenshot Composite Prompt',
       title: 'System Screenshot Detected',
@@ -543,6 +563,16 @@ const MESSAGES = {
       dynamicColorUnavailableBody: 'ブラウザのプライバシー保護により OS アクセントカラーを読み取れません。下の色相環から好きなテーマ色を選択してください。',
       penpaCloneUnsupportedTitle: '複製機能は現在未対応です',
       penpaCloneUnsupportedBody: '現在サポートされていません。',
+    },
+    imagePreview: {
+      ariaLabel: '書き出し画像プレビュー',
+      title: '画像プレビュー',
+      save: '保存',
+      close: '閉じる',
+    },
+    downloadToast: {
+      saved: 'ダウンロードに保存しました：{name}',
+      failed: 'ファイルの保存に失敗しました',
     },
     screenshotPrompt: {
       ariaLabel: 'スクショ合成の確認',

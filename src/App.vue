@@ -14,7 +14,7 @@ import { DEFAULT_PENPA_MD3_CSS } from './core/defaultPenpaCss';
 import { getCurrentMd3Tokens } from './core/theme';
 import { safeAreaInsets } from './core/safeArea';
 import { beginGlobalDrag, endGlobalDrag, tryCapturePointer, tryReleasePointer } from './core/dragGuard';
-import { currentLocale, getPenpaLangCode, messages } from './core/i18n';
+import { currentLocale, formatMessage, getPenpaLangCode, messages } from './core/i18n';
 import {
   IDENTITY_VIEWPORT_TRANSFORM,
   ROOT_WORLD_ID,
@@ -60,7 +60,10 @@ import {
 import {
   closeOverlayApp,
   detectPlatform,
+  getInitialIsDebugBuild,
   getIsDebugBuild,
+  openExternalLink,
+  saveDownloadedFile,
   setOsAlwaysOnTop,
   setOsClickThrough,
   setOsFullscreenOverlay,
@@ -404,6 +407,39 @@ const unavailableReasonKey = ref<UnavailableReasonKey | null>(null);
 const screenshotPromptOpen = ref(false);
 const screenshotPromptFile = ref('');
 const androidScreenshotStatus = ref<AndroidScreenshotCompositeStatus | null>(null);
+const imagePreview = ref<{ dataUrl: string; filename: string; mimeType: string } | null>(null);
+const toastMessage = ref<string | null>(null);
+let toastTimer = 0;
+
+function showHostToast(msg: string) {
+  toastMessage.value = msg;
+  if (toastTimer) window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toastMessage.value = null;
+    toastTimer = 0;
+  }, 2600);
+}
+
+async function handleHostDownload(filename: string, mimeType: string, base64Data: string) {
+  const savedName = await saveDownloadedFile(filename, mimeType, base64Data);
+  // Android already shows a native system Toast; show a lightweight host toast on desktop Tauri
+  if (platform === 'tauri') {
+    if (savedName) {
+      showHostToast(formatMessage(messages.value.downloadToast.saved, { name: savedName }));
+    } else {
+      showHostToast(messages.value.downloadToast.failed);
+    }
+  }
+}
+
+async function handleSavePreviewImage() {
+  const preview = imagePreview.value;
+  if (!preview) return;
+  const commaIdx = preview.dataUrl.indexOf(',');
+  const base64Data = commaIdx >= 0 ? preview.dataUrl.slice(commaIdx + 1) : preview.dataUrl;
+  await handleHostDownload(preview.filename, preview.mimeType, base64Data);
+  imagePreview.value = null;
+}
 
 const customCssEnabled = ref(savedState.customCssEnabled ?? true);
 const customCss = ref(
@@ -1092,6 +1128,7 @@ async function syncOverlayHitRegions() {
     settingsOpen.value ||
     screenPickerOpen.value ||
     screenshotPromptOpen.value ||
+    !!imagePreview.value ||
     !!unavailableReasonKey.value;
   const g = primaryGrid.value;
   const primaryDock =
@@ -1213,6 +1250,7 @@ watch(
     settingsOpen,
     screenPickerOpen,
     screenshotPromptOpen,
+    imagePreview,
     unavailableReasonKey,
     layersVisible,
     selectedTargetIds,
@@ -1756,10 +1794,53 @@ function isUiControlTarget(target: EventTarget | null): boolean {
   );
 }
 
+function canScrollAncestorConsumeWheel(
+  target: EventTarget | null,
+  boundary: EventTarget | null,
+  deltaX: number,
+  deltaY: number,
+): boolean {
+  let el: Element | null = target instanceof Element ? target : null;
+  while (el && el !== boundary && el !== document.body && el !== document.documentElement) {
+    if (el instanceof HTMLElement) {
+      const style = window.getComputedStyle(el);
+      const canY =
+        (style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+        el.scrollHeight > el.clientHeight + 1;
+      if (canY && deltaY !== 0) {
+        if (deltaY < 0 && el.scrollTop > 0) return true;
+        if (deltaY > 0 && el.scrollTop + el.clientHeight < el.scrollHeight - 1) return true;
+      }
+      const canX =
+        (style.overflowX === 'auto' || style.overflowX === 'scroll') &&
+        el.scrollWidth > el.clientWidth + 1;
+      if (canX && deltaX !== 0) {
+        if (deltaX < 0 && el.scrollLeft > 0) return true;
+        if (deltaX > 0 && el.scrollLeft + el.clientWidth < el.scrollWidth - 1) return true;
+      }
+    }
+    el = el.parentElement;
+  }
+  return false;
+}
+
 function onRootWheel(e: WheelEvent) {
-  if (backdropMode.value !== 'canvas') return;
-  if (settingsOpen.value || unavailableReasonKey.value) return;
-  if (isUiControlTarget(e.target)) return;
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault();
+    return;
+  }
+  if (
+    backdropMode.value !== 'canvas' ||
+    settingsOpen.value ||
+    !!imagePreview.value ||
+    unavailableReasonKey.value ||
+    isUiControlTarget(e.target)
+  ) {
+    if (!canScrollAncestorConsumeWheel(e.target, e.currentTarget, e.deltaX, e.deltaY)) {
+      e.preventDefault();
+    }
+    return;
+  }
   e.preventDefault();
   const deltaY = Math.max(-180, Math.min(180, e.deltaY));
   const factor = Math.exp(-deltaY * 0.0014);
@@ -1768,6 +1849,12 @@ function onRootWheel(e: WheelEvent) {
     canvasViewport.value.zoom * factor,
     { x: e.clientX, y: e.clientY },
   );
+}
+
+function onWindowScrollGuard() {
+  if (window.scrollX !== 0 || window.scrollY !== 0) {
+    window.scrollTo(0, 0);
+  }
 }
 
 let middlePanSession: {
@@ -1823,7 +1910,7 @@ function onWindowKey(type: 'keydown' | 'keyup', e: KeyboardEvent) {
     !e.shiftKey &&
     !e.metaKey &&
     platform === 'tauri' &&
-    isTauriDebugBuild
+    isDebugBuild
   ) {
     if (!e.repeat) {
       void toggleOsDevtools();
@@ -1834,6 +1921,11 @@ function onWindowKey(type: 'keydown' | 'keyup', e: KeyboardEvent) {
   }
 
   if (type === 'keydown' && e.code === 'Escape') {
+    if (imagePreview.value) {
+      e.preventDefault();
+      imagePreview.value = null;
+      return;
+    }
     if (unavailableReasonKey.value) {
       e.preventDefault();
       unavailableReasonKey.value = null;
@@ -1846,7 +1938,7 @@ function onWindowKey(type: 'keydown' | 'keyup', e: KeyboardEvent) {
     }
   }
 
-  if (settingsOpen.value || unavailableReasonKey.value) return;
+  if (settingsOpen.value || !!imagePreview.value || unavailableReasonKey.value) return;
 
   const activeTag = (document.activeElement?.tagName || '').toLowerCase();
   if (activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select') return;
@@ -1922,18 +2014,27 @@ function onVisibilityChange() {
 
 let unlistenOverlayCursor: (() => void) | null = null;
 let unlistenWindowFocus: (() => void) | null = null;
-let isTauriDebugBuild = false;
+let isDebugBuild = getInitialIsDebugBuild();
+window.__PENPAANYWHERE_IS_DEBUG__ = isDebugBuild;
+
+function onWindowContextMenu(e: MouseEvent) {
+  if (!isDebugBuild) {
+    e.preventDefault();
+  }
+}
 
 onMounted(async () => {
   window.addEventListener('paste', onPaste);
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('contextmenu', onWindowContextMenu);
   window.addEventListener('pointermove', onWindowPointerMoveForHover, { passive: true });
   window.addEventListener('pointermove', onWindowMiddlePanMove);
   window.addEventListener('pointerup', onWindowMiddlePanUp);
   window.addEventListener('pointercancel', onWindowMiddlePanUp);
   document.addEventListener('mouseleave', onWindowPointerLeave);
   window.addEventListener('blur', onWindowBlur);
+  window.addEventListener('scroll', onWindowScrollGuard, { passive: true });
   window.addEventListener('pagehide', flushAllStateNow);
   window.addEventListener('beforeunload', flushAllStateNow);
   window.addEventListener('penpaanywhere-md3-updated', syncAllPenpaThemeAndCss);
@@ -1962,18 +2063,36 @@ onMounted(async () => {
     androidScreenshotStatus.value = status;
   };
   window.__PENPAANYWHERE_ON_UNAVAILABLE__ = (key: string) => {
-    if (key === 'penpaCloneUnsupported') handleUnavailableClick(key);
+    if (key === 'penpaCloneUnsupported') {
+      handleUnavailableClick(key);
+    }
+  };
+  window.__PENPAANYWHERE_OPEN_EXTERNAL__ = (url: string) => {
+    void openExternalLink(url);
+  };
+  window.__PENPAANYWHERE_DOWNLOAD__ = (filename: string, mimeType: string, base64Data: string) => {
+    void handleHostDownload(filename, mimeType, base64Data);
+  };
+  window.__PENPAANYWHERE_PREVIEW_IMAGE__ = (dataUrl: string, filename: string, mimeType: string) => {
+    if (!dataUrl) return;
+    imagePreview.value = {
+      dataUrl,
+      filename: filename || 'penpa-image.png',
+      mimeType: mimeType || 'image/png',
+    };
   };
   window.__PENPAANYWHERE_TOGGLE_DEVTOOLS__ = (shouldToggle = true) => {
-    if (platform !== 'tauri' || !isTauriDebugBuild) return false;
+    if (platform !== 'tauri' || !isDebugBuild) return false;
     if (shouldToggle) {
       void toggleOsDevtools();
     }
     return true;
   };
 
+  isDebugBuild = await getIsDebugBuild();
+  window.__PENPAANYWHERE_IS_DEBUG__ = isDebugBuild;
+
   if (platform === 'tauri') {
-    isTauriDebugBuild = await getIsDebugBuild();
     try {
       const { listen } = await import('@tauri-apps/api/event');
       unlistenOverlayCursor = await listen<[number, number]>('overlay-cursor-pos', (ev) => {
@@ -2009,15 +2128,24 @@ onBeforeUnmount(() => {
   unlistenWindowFocus?.();
   unlistenWindowFocus = null;
   delete window.__PENPAANYWHERE_TOGGLE_DEVTOOLS__;
+  delete window.__PENPAANYWHERE_OPEN_EXTERNAL__;
+  delete window.__PENPAANYWHERE_DOWNLOAD__;
+  delete window.__PENPAANYWHERE_PREVIEW_IMAGE__;
+  if (toastTimer) {
+    window.clearTimeout(toastTimer);
+    toastTimer = 0;
+  }
   window.removeEventListener('paste', onPaste);
   window.removeEventListener('keydown', onKeyDown);
   window.removeEventListener('keyup', onKeyUp);
+  window.removeEventListener('contextmenu', onWindowContextMenu);
   window.removeEventListener('pointermove', onWindowPointerMoveForHover);
   window.removeEventListener('pointermove', onWindowMiddlePanMove);
   window.removeEventListener('pointerup', onWindowMiddlePanUp);
   window.removeEventListener('pointercancel', onWindowMiddlePanUp);
   document.removeEventListener('mouseleave', onWindowPointerLeave);
   window.removeEventListener('blur', onWindowBlur);
+  window.removeEventListener('scroll', onWindowScrollGuard);
   window.removeEventListener('pagehide', flushAllStateNow);
   window.removeEventListener('beforeunload', flushAllStateNow);
   window.removeEventListener('penpaanywhere-md3-updated', syncAllPenpaThemeAndCss);
@@ -2220,6 +2348,39 @@ onBeforeUnmount(() => {
       </section>
     </div>
 
+    <!-- In-App Exported Image Preview Dialog (non-Web saveimage_window) -->
+    <div
+      v-if="imagePreview"
+      class="ac-prompt-backdrop ac-preview-backdrop"
+      @pointerdown.self="imagePreview = null"
+    >
+      <section
+        class="ac-prompt-card ac-preview-card"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="messages.imagePreview.ariaLabel"
+      >
+        <div class="ac-prompt-title">{{ messages.imagePreview.title }}</div>
+        <div class="ac-preview-stage">
+          <img :src="imagePreview.dataUrl" :alt="imagePreview.filename" class="ac-preview-img" />
+        </div>
+        <div class="ac-prompt-file">{{ imagePreview.filename }}</div>
+        <div class="ac-prompt-actions">
+          <button class="ac-btn" @click="imagePreview = null">
+            {{ messages.imagePreview.close }}
+          </button>
+          <button class="ac-btn active" @click="handleSavePreviewImage">
+            {{ messages.imagePreview.save }}
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <!-- Lightweight non-blocking host Toast (e.g. desktop Downloads feedback) -->
+    <div v-if="toastMessage" class="ac-host-toast" role="status" aria-live="polite">
+      {{ toastMessage }}
+    </div>
+
     <!-- First-time Android Screenshot Auto-Composite Prompt -->
     <div
       v-if="screenshotPromptOpen"
@@ -2267,6 +2428,57 @@ onBeforeUnmount(() => {
 
 .ac-unavailable-backdrop {
   z-index: 1250;
+}
+
+.ac-preview-backdrop {
+  z-index: 1240;
+}
+
+.ac-preview-card {
+  width: min(640px, 92vw);
+  max-height: min(86vh, 720px);
+}
+
+.ac-preview-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-height: min(60vh, 520px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 10px;
+  border-radius: 12px;
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.ac-preview-img {
+  display: block;
+  max-width: 100%;
+  max-height: min(56vh, 480px);
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.ac-host-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(20px + var(--ac-safe-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 1300;
+  max-width: min(460px, 90vw);
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: var(--md-sys-color-inverse-surface);
+  color: var(--md-sys-color-inverse-on-surface);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.36);
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ac-prompt-card {

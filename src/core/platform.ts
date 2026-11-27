@@ -9,6 +9,7 @@ export interface AndroidScreenshotCompositeStatus {
 
 interface AndroidOverlayInterface {
   isOverlayMode?: () => boolean;
+  isDebugBuild?: () => boolean;
   setClickThrough?: (enabled: boolean) => void;
   setFocusable?: (focusable: boolean) => void;
   updateHitRegions?: (payloadJson: string) => void;
@@ -22,6 +23,8 @@ interface AndroidOverlayInterface {
   switchToImageActivity?: () => void;
   switchToOverlayService?: () => void;
   openExternalUrl?: (url: string) => void;
+  saveDownloadFile?: (filename: string, mimeType: string, base64Data: string) => string;
+  copyText?: (text: string) => boolean;
   closeOverlay?: () => void;
   pickImage?: () => void;
 }
@@ -49,6 +52,10 @@ declare global {
     __PENPAANYWHERE_ON_SCREENSHOT_PROMPT__?: (fileName: string) => void;
     __PENPAANYWHERE_ON_SCREENSHOT_STATUS__?: (status: AndroidScreenshotCompositeStatus) => void;
     __PENPAANYWHERE_ON_UNAVAILABLE__?: (key: string) => void;
+    __PENPAANYWHERE_OPEN_EXTERNAL__?: (url: string) => void;
+    __PENPAANYWHERE_DOWNLOAD__?: (filename: string, mimeType: string, base64Data: string) => void;
+    __PENPAANYWHERE_PREVIEW_IMAGE__?: (dataUrl: string, filename: string, mimeType: string) => void;
+    __PENPAANYWHERE_IS_DEBUG__?: boolean;
     __PENPAANYWHERE_TOGGLE_DEVTOOLS__?: (shouldToggle?: boolean) => boolean;
   }
 }
@@ -117,12 +124,25 @@ export function switchAndroidToOverlayService(): boolean {
   return false;
 }
 
+export function isAllowedExternalHttpUrl(rawUrl: string): boolean {
+  const url = (rawUrl || '').trim();
+  if (!url || url.length > 32768 || /[\s\u0000-\u001F\u007F]/.test(url)) return false;
+  try {
+    const parsed = new URL(url);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !!parsed.host;
+  } catch {
+    return false;
+  }
+}
+
 export async function openExternalLink(url: string): Promise<void> {
+  const trimmed = (url || '').trim();
+  if (!isAllowedExternalHttpUrl(trimmed)) return;
   const platform = detectPlatform();
   if (platform === 'tauri') {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('open_external_url', { url });
+      await invoke('open_external_url', { url: trimmed });
       return;
     } catch {
       // fall through
@@ -130,14 +150,49 @@ export async function openExternalLink(url: string): Promise<void> {
   } else if (platform === 'android-overlay' || platform === 'android-app') {
     try {
       if (window.AndroidOverlay?.openExternalUrl) {
-        window.AndroidOverlay.openExternalUrl(url);
+        window.AndroidOverlay.openExternalUrl(trimmed);
         return;
       }
     } catch {
       // fall through
     }
   }
-  window.open(url, '_blank', 'noopener,noreferrer');
+  window.open(trimmed, '_blank', 'noopener,noreferrer');
+}
+
+export async function saveDownloadedFile(
+  filename: string,
+  mimeType: string,
+  base64Data: string,
+): Promise<string | null> {
+  const platform = detectPlatform();
+  if (platform === 'tauri') {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const savedName = await invoke<string>('save_download_file', {
+        filename,
+        base64Data,
+      });
+      return savedName || filename;
+    } catch (err) {
+      console.warn('[PenpaAnywhere] Tauri save_download_file failed:', err);
+      return null;
+    }
+  }
+  if (platform === 'android-overlay' || platform === 'android-app') {
+    try {
+      const savedName = window.AndroidOverlay?.saveDownloadFile?.(
+        filename,
+        mimeType || 'application/octet-stream',
+        base64Data,
+      );
+      return savedName || null;
+    } catch (err) {
+      console.warn('[PenpaAnywhere] Android saveDownloadFile failed:', err);
+      return null;
+    }
+  }
+  return null;
 }
 
 export function supportsScreenCapture(): boolean {
@@ -219,12 +274,43 @@ export async function closeOverlayApp(): Promise<void> {
 
 let cachedDebugBuild: boolean | null = null;
 
+export function getInitialIsDebugBuild(): boolean {
+  if (cachedDebugBuild !== null) return cachedDebugBuild;
+  const platform = detectPlatform();
+  if (platform === 'android-overlay' || platform === 'android-app') {
+    try {
+      if (typeof window.AndroidOverlay?.isDebugBuild === 'function') {
+        cachedDebugBuild = Boolean(window.AndroidOverlay.isDebugBuild());
+        return cachedDebugBuild;
+      }
+    } catch {
+      // fall through
+    }
+    return false;
+  }
+  if (platform === 'web') {
+    cachedDebugBuild = Boolean(import.meta.env.DEV);
+    return cachedDebugBuild;
+  }
+  return Boolean(import.meta.env.DEV);
+}
+
 export async function getIsDebugBuild(): Promise<boolean> {
   if (cachedDebugBuild !== null) return cachedDebugBuild;
-  if (detectPlatform() === 'tauri') {
+  const platform = detectPlatform();
+  if (platform === 'tauri') {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       cachedDebugBuild = Boolean(await invoke<boolean>('is_debug_build'));
+      return cachedDebugBuild;
+    } catch {
+      cachedDebugBuild = false;
+      return false;
+    }
+  }
+  if (platform === 'android-overlay' || platform === 'android-app') {
+    try {
+      cachedDebugBuild = Boolean(window.AndroidOverlay?.isDebugBuild?.());
       return cachedDebugBuild;
     } catch {
       cachedDebugBuild = false;

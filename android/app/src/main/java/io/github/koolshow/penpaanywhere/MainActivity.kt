@@ -301,24 +301,28 @@ class MainActivity : AppCompatActivity() {
             onGetDynamicColorBundle = { Md3DynamicColorProvider.exportDualTokensJson(this) },
             onGetSafeAreaInsets = { lastSafeInsetsJson },
             onSwitchToOverlayService = { runOnUiThread { closeInAppWebView(thenLaunchOverlay = true) } },
-            onOpenExternalUrl = { url -> runOnUiThread { openExternalBrowserUrl(url) } },
+            onOpenExternalUrl = { url ->
+                runOnUiThread { OverlayWebViewFactory.openExternalBrowserUrl(this, url, newTask = false) }
+            },
+            onSaveDownloadFile = { filename, mimeType, base64Data ->
+                OverlayWebViewFactory.saveDownloadFile(this, filename, mimeType, base64Data)
+            },
+            onCopyText = { text ->
+                OverlayWebViewFactory.copyTextToClipboard(this, text)
+            },
             onClose = { runOnUiThread { closeInAppWebView() } },
             onPickImage = { runOnUiThread { directImageLauncher.launch("image/*") } },
         )
-        val wv = OverlayWebViewFactory.create(this, bridge).apply {
-            webChromeClient = object : WebChromeClient() {
-                override fun onShowFileChooser(
-                    webView: WebView?,
-                    filePathCallback: ValueCallback<Array<Uri>>?,
-                    fileChooserParams: FileChooserParams?,
-                ): Boolean {
-                    this@MainActivity.filePathCallback?.onReceiveValue(null)
-                    this@MainActivity.filePathCallback = filePathCallback
-                    fileChooserLauncher.launch("image/*")
-                    return true
-                }
-            }
-        }
+        val wv = OverlayWebViewFactory.create(
+            context = this,
+            bridge = bridge,
+            onShowFileChooserCallback = { filePathCallback, _ ->
+                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                this@MainActivity.filePathCallback = filePathCallback
+                fileChooserLauncher.launch("image/*")
+                true
+            },
+        )
         inAppWebView = wv
         container.addView(
             wv,
@@ -351,15 +355,6 @@ class MainActivity : AppCompatActivity() {
         setContentView(container)
         ViewCompat.requestApplyInsets(container)
         wv.loadUrl(OverlayWebViewFactory.ENTRY_URL)
-    }
-
-    private fun openExternalBrowserUrl(url: String) {
-        if (!url.startsWith("https://github.com/KoolShow/PenpaAnywhere")) return
-        try {
-            val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-            startActivity(viewIntent)
-        } catch (_: Exception) {
-        }
     }
 
     private fun closeInAppWebView(thenLaunchOverlay: Boolean = false) {

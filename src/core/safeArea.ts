@@ -106,7 +106,33 @@ export function initSafeAreaBridge(): void {
     // ignore
   }
 
-  // 2. Fallback to CSS env(safe-area-inset-*) on Web / mobile browsers
+  // 2. Tauri Desktop (Windows / macOS): read work-area taskbar/dock insets & subscribe to updates
+  if (window.__TAURI_INTERNALS__) {
+    void (async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const initial = await invoke<SafeAreaInsets>('get_safe_area_insets');
+        if (initial) {
+          applySafeAreaInsets(initial, true);
+        }
+      } catch {
+        // ignore if command unavailable
+      }
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        await listen<SafeAreaInsets>('safe-area-insets-changed', (ev) => {
+          if (ev.payload) {
+            applySafeAreaInsets(ev.payload, true);
+          }
+        });
+      } catch {
+        // ignore if listener unavailable
+      }
+    })();
+    return;
+  }
+
+  // 3. Fallback to CSS env(safe-area-inset-*) on Web / mobile browsers
   const refreshEnv = () => {
     if (nativeOverrideActive) return;
     applySafeAreaInsets(readCssEnvSafeArea(), false);

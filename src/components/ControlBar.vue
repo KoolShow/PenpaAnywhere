@@ -820,6 +820,7 @@ onBeforeUnmount(() => {
   max-height: min(260px, 45vh);
   overflow-y: auto;
   overflow-x: auto;
+  overscroll-behavior: contain;
   padding-top: 6px;
   border-top: 1px solid var(--md-sys-color-outline-variant);
   cursor: default;

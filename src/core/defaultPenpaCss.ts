@@ -61,6 +61,8 @@ header,
 #header {
   background: var(--md-sys-color-surface-container-high, #282a2f);
   color: var(--md-sys-color-on-surface, #e2e2e9);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant, #44474f);
+  box-shadow: none;
 }
 
 #page_help {
@@ -68,7 +70,10 @@ header,
   color: var(--md-sys-color-on-secondary-container, #c2e7ff);
   border: 1px solid var(--md-sys-color-outline-variant, #44474f);
   border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 12px;
   text-decoration: none;
+  cursor: pointer;
 }
 
 #buttons {

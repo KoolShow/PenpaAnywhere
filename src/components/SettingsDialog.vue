@@ -644,6 +644,7 @@ onBeforeUnmount(() => {
 .ac-settings-body {
   padding: 14px 16px 16px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -924,6 +925,7 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.5;
   outline: none;
+  overscroll-behavior: contain;
   user-select: text;
   -webkit-user-select: text;
   touch-action: pan-y;

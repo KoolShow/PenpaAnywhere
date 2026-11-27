@@ -120,6 +120,349 @@
     return origWinAddEventListener(type, listener, options);
   };
 
+  // Unified official Penpa+ URL base so all share/export/shortlink outputs use the official host
+  // instead of local Tauri/Android/Web host origins.
+  var OFFICIAL_PENPA_BASE_URL = 'https://swaroopg92.github.io/penpa-edit/';
+
+  function extractPenpaParamString(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return '';
+    var trimmed = rawUrl.trim();
+    var hashIdx = trimmed.indexOf('#');
+    if (hashIdx >= 0) return trimmed.slice(hashIdx + 1);
+    var qIdx = trimmed.indexOf('?');
+    if (qIdx >= 0) return trimmed.slice(qIdx + 1);
+    if (trimmed.indexOf('p=') >= 0 || trimmed.indexOf('m=') >= 0) return trimmed;
+    return '';
+  }
+
+  function toOfficialPenpaUrl(rawUrl) {
+    var param = extractPenpaParamString(rawUrl);
+    return param ? OFFICIAL_PENPA_BASE_URL + '#' + param : OFFICIAL_PENPA_BASE_URL;
+  }
+
+  function isAllowedExternalHttpUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return false;
+    var trimmed = rawUrl.trim();
+    if (!trimmed || trimmed.length > 32768 || /[\s\u0000-\u001F\u007F]/.test(trimmed)) return false;
+    try {
+      var parsed = new URL(trimmed, window.location.href);
+      return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !!parsed.host;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function isNativeHostEnv() {
+    try {
+      return !!(
+        window.parent &&
+        window.parent !== window &&
+        (window.parent.__TAURI_INTERNALS__ || window.parent.AndroidOverlay)
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function isDebugBuildEnv() {
+    try {
+      if (window.parent && typeof window.parent.__PENPAANYWHERE_IS_DEBUG__ === 'boolean') {
+        return window.parent.__PENPAANYWHERE_IS_DEBUG__;
+      }
+      if (
+        window.parent &&
+        window.parent.AndroidOverlay &&
+        typeof window.parent.AndroidOverlay.isDebugBuild === 'function'
+      ) {
+        return !!window.parent.AndroidOverlay.isDebugBuild();
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  // Suppress default browser/WebView context menu in non-debug builds
+  // (bubble phase so Penpa+'s own canvas right-click handlers still execute)
+  origWinAddEventListener('contextmenu', function (e) {
+    if (!isDebugBuildEnv()) {
+      e.preventDefault();
+    }
+  });
+
+  function openExternalViaHost(url) {
+    try {
+      if (
+        window.parent &&
+        window.parent !== window &&
+        typeof window.parent.__PENPAANYWHERE_OPEN_EXTERNAL__ === 'function'
+      ) {
+        window.parent.__PENPAANYWHERE_OPEN_EXTERNAL__(url);
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  function previewImageViaHost(dataUrl, filename, mimeType) {
+    try {
+      if (
+        window.parent &&
+        window.parent !== window &&
+        typeof window.parent.__PENPAANYWHERE_PREVIEW_IMAGE__ === 'function'
+      ) {
+        window.parent.__PENPAANYWHERE_PREVIEW_IMAGE__(
+          dataUrl,
+          filename || 'penpa-image.png',
+          mimeType || 'image/png'
+        );
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  function downloadViaHost(filename, mimeType, base64Data) {
+    try {
+      if (
+        window.parent &&
+        window.parent !== window &&
+        typeof window.parent.__PENPAANYWHERE_DOWNLOAD__ === 'function'
+      ) {
+        window.parent.__PENPAANYWHERE_DOWNLOAD__(filename, mimeType, base64Data);
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  function getSuggestedImageFilename(mimeType) {
+    var ext = mimeType === 'image/svg+xml' ? 'svg' : mimeType === 'image/jpeg' ? 'jpg' : 'png';
+    var base = 'penpa-image';
+    try {
+      var input = document.getElementById('saveimagename');
+      if (input && typeof input.value === 'string' && input.value.trim()) {
+        base = input.value.trim();
+      }
+    } catch (_) {}
+    if (base.toLowerCase().endsWith('.' + ext)) return base;
+    return base + '.' + ext;
+  }
+
+  function parseDataUrlParts(dataUrl) {
+    if (!dataUrl || typeof dataUrl !== 'string' || dataUrl.indexOf('data:') !== 0) return null;
+    var commaIdx = dataUrl.indexOf(',');
+    if (commaIdx < 0) return null;
+    var header = dataUrl.slice(5, commaIdx);
+    var body = dataUrl.slice(commaIdx + 1);
+    var isBase64 = header.toLowerCase().indexOf(';base64') >= 0;
+    var mime = header.split(';')[0] || 'application/octet-stream';
+    if (isBase64) {
+      return { mimeType: mime, base64Data: body };
+    }
+    try {
+      var decoded = decodeURIComponent(body);
+      var b64 = btoa(unescape(encodeURIComponent(decoded)));
+      return { mimeType: mime, base64Data: b64 };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function readBlobUrlAsDataUrl(blobUrl) {
+    return fetch(blobUrl)
+      .then(function (resp) {
+        return resp.blob();
+      })
+      .then(function (blob) {
+        return new Promise(function (resolve, reject) {
+          var reader = new FileReader();
+          reader.onloadend = function () {
+            resolve({
+              dataUrl: typeof reader.result === 'string' ? reader.result : '',
+              mimeType: blob.type || 'application/octet-stream',
+            });
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      });
+  }
+
+  function dispatchAnchorDownloadToHost(anchor) {
+    if (!anchor) return false;
+    var rawHref = anchor.getAttribute('href') || anchor.href || '';
+    if (!rawHref) return false;
+    var filename = anchor.getAttribute('download') || 'download.bin';
+    if (rawHref.indexOf('data:') === 0) {
+      var parsed = parseDataUrlParts(rawHref);
+      if (parsed) {
+        downloadViaHost(filename, parsed.mimeType, parsed.base64Data);
+        return true;
+      }
+      return false;
+    }
+    if (rawHref.indexOf('blob:') === 0) {
+      readBlobUrlAsDataUrl(rawHref)
+        .then(function (res) {
+          var parts = parseDataUrlParts(res.dataUrl);
+          if (parts) {
+            downloadViaHost(filename, parts.mimeType || res.mimeType, parts.base64Data);
+          }
+        })
+        .catch(function () {});
+      return true;
+    }
+    return false;
+  }
+
+  function createVirtualImagePreviewWindow() {
+    var htmlBuffer = '';
+    var delivered = false;
+    function tryDeliver() {
+      if (delivered || !htmlBuffer) return;
+      var match = htmlBuffer.match(/src\s*=\s*(['"])(data:image\/[^'"]+|blob:[^'"]+)\1/i);
+      if (!match) return;
+      var src = match[2];
+      delivered = true;
+      if (src.indexOf('data:') === 0) {
+        var parts = parseDataUrlParts(src);
+        var mime = (parts && parts.mimeType) || 'image/png';
+        previewImageViaHost(src, getSuggestedImageFilename(mime), mime);
+      } else if (src.indexOf('blob:') === 0) {
+        readBlobUrlAsDataUrl(src)
+          .then(function (res) {
+            if (res.dataUrl) {
+              previewImageViaHost(res.dataUrl, getSuggestedImageFilename(res.mimeType), res.mimeType);
+            }
+          })
+          .catch(function () {});
+      }
+    }
+    return {
+      closed: false,
+      focus: function () {},
+      close: function () {
+        this.closed = true;
+      },
+      document: {
+        open: function () {},
+        write: function (chunk) {
+          htmlBuffer += String(chunk == null ? '' : chunk);
+          tryDeliver();
+        },
+        writeln: function (chunk) {
+          htmlBuffer += String(chunk == null ? '' : chunk) + '\n';
+          tryDeliver();
+        },
+        close: function () {
+          tryDeliver();
+        },
+      },
+    };
+  }
+
+  function handleUnifiedNewTabOpen(rawUrl, origOpenArgs) {
+    var urlStr = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+
+    // 1. Blank popup (e.g. saveimage_window PNG/JPG calling window.open() + win.document.write(<img/>))
+    if (!urlStr || urlStr.toLowerCase() === 'about:blank') {
+      if (isNativeHostEnv()) {
+        return createVirtualImagePreviewWindow();
+      }
+      return origWindowOpen ? origWindowOpen.apply(window, origOpenArgs || []) : null;
+    }
+
+    // 2. In-memory image/blob preview (e.g. saveimage_window SVG calling window.open(blobUrl))
+    if (urlStr.indexOf('blob:') === 0 || urlStr.indexOf('data:image/') === 0) {
+      if (isNativeHostEnv()) {
+        if (urlStr.indexOf('data:') === 0) {
+          var parts = parseDataUrlParts(urlStr);
+          var mime = (parts && parts.mimeType) || 'image/png';
+          previewImageViaHost(urlStr, getSuggestedImageFilename(mime), mime);
+        } else {
+          readBlobUrlAsDataUrl(urlStr)
+            .then(function (res) {
+              if (res.dataUrl) {
+                previewImageViaHost(res.dataUrl, getSuggestedImageFilename(res.mimeType), res.mimeType);
+              }
+            })
+            .catch(function () {});
+        }
+        return null;
+      }
+      return origWindowOpen ? origWindowOpen.apply(window, origOpenArgs || [urlStr, '_blank']) : null;
+    }
+
+    // 3. Any http(s) link -> open uniformly in system default browser
+    if (isAllowedExternalHttpUrl(urlStr)) {
+      var resolvedExternal = new URL(urlStr, window.location.href).href;
+      if (openExternalViaHost(resolvedExternal)) {
+        return null;
+      }
+      return origWindowOpen ? origWindowOpen.call(window, resolvedExternal, '_blank', 'noopener,noreferrer') : null;
+    }
+
+    return null;
+  }
+
+  // Unified window.open hook inside Penpa+ iframe
+  var origWindowOpen = typeof window.open === 'function' ? window.open.bind(window) : null;
+  try {
+    window.open = function (url) {
+      return handleUnifiedNewTabOpen(url, arguments);
+    };
+  } catch (_) {}
+
+  // Unified <a download> hook on non-Web hosts (intercepts programmatic downloadLink.click() too)
+  if (isNativeHostEnv() && typeof HTMLAnchorElement !== 'undefined' && HTMLAnchorElement.prototype) {
+    var origAnchorClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () {
+      if (this && this.hasAttribute && this.hasAttribute('download')) {
+        if (dispatchAnchorDownloadToHost(this)) return;
+      }
+      return origAnchorClick.apply(this, arguments);
+    };
+  }
+
+  // Unified capture-phase anchor click router:
+  // 1) a[download] -> native host download (non-Web)
+  // 2) any http(s) link click -> prevent iframe navigation and open uniformly in system browser
+  origAddEventListener(
+    'click',
+    function (e) {
+      var target = e.target;
+      if (!target || typeof target.closest !== 'function') return;
+      var anchor = target.closest('a[href]');
+      if (!anchor) return;
+
+      if (anchor.hasAttribute('download')) {
+        if (isNativeHostEnv() && dispatchAnchorDownloadToHost(anchor)) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        return;
+      }
+
+      var rawHref = (anchor.getAttribute('href') || '').trim();
+      if (!rawHref || rawHref === '#' || rawHref.toLowerCase().indexOf('javascript:') === 0) {
+        return;
+      }
+
+      var resolvedHref = '';
+      try {
+        resolvedHref = new URL(rawHref, window.location.href).href;
+      } catch (_) {
+        return;
+      }
+
+      if (isAllowedExternalHttpUrl(resolvedHref)) {
+        e.preventDefault();
+        e.stopPropagation();
+        handleUnifiedNewTabOpen(resolvedHref, [resolvedHref, '_blank']);
+      }
+    },
+    true
+  );
+
   function getUnsupportedTitle() {
     var lang = '';
     try {
@@ -164,10 +507,19 @@
       }
     }
     if (typeof window.duplicate === 'function' && !window.duplicate.__acPatched) {
-      var origDup = window.duplicate;
       var wrappedDup = function (inPlace) {
         if (inPlace) {
-          return origDup.apply(this, arguments);
+          // Use same-origin hash when updating in-place history so official external base URL
+          // never triggers a cross-origin SecurityError in history.pushState.
+          if (window.pu && typeof window.pu.maketext_duplicate === 'function') {
+            try {
+              var param = extractPenpaParamString(window.pu.maketext_duplicate());
+              if (param) {
+                window.history.pushState('', '', '#' + param);
+              }
+            } catch (_) {}
+          }
+          return;
         }
         notifyCloneUnsupported();
       };
@@ -192,13 +544,7 @@
     if (isRestoringDraft || !draftRestoreAttempted) return;
     if (!window.pu || typeof window.pu.maketext_duplicate !== 'function') return;
     try {
-      var fullUrl = window.pu.maketext_duplicate();
-      if (!fullUrl || typeof fullUrl !== 'string') return;
-      var param = '';
-      var hashIdx = fullUrl.indexOf('#');
-      var qIdx = fullUrl.indexOf('?');
-      if (hashIdx >= 0) param = fullUrl.slice(hashIdx + 1);
-      else if (qIdx >= 0) param = fullUrl.slice(qIdx + 1);
+      var param = extractPenpaParamString(window.pu.maketext_duplicate());
       if (param && param.indexOf('p=') >= 0) {
         window.localStorage.setItem(DRAFT_KEY, param);
       }
@@ -265,41 +611,60 @@
     }
   });
 
+  function patchPuzzlePrototype(proto) {
+    if (!proto || proto === Object.prototype) return;
+    if (
+      Object.prototype.hasOwnProperty.call(proto, 'maketext_baseurl') &&
+      typeof proto.maketext_baseurl === 'function' &&
+      !proto.maketext_baseurl.__acOfficialBaseUrl
+    ) {
+      var officialBaseUrlFn = function () {
+        return OFFICIAL_PENPA_BASE_URL;
+      };
+      officialBaseUrlFn.__acOfficialBaseUrl = true;
+      proto.maketext_baseurl = officialBaseUrlFn;
+    }
+    if (!patchedProtos.has(proto)) {
+      patchedProtos.add(proto);
+      if (
+        Object.prototype.hasOwnProperty.call(proto, 'redraw') &&
+        typeof proto.redraw === 'function'
+      ) {
+        var origRedraw = proto.redraw;
+        proto.redraw = function () {
+          var res = origRedraw.apply(this, arguments);
+          notifyRedraw();
+          return res;
+        };
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(proto, 'canvasxy_update') &&
+        typeof proto.canvasxy_update === 'function'
+      ) {
+        var origCanvasUpdate = proto.canvasxy_update;
+        proto.canvasxy_update = function () {
+          var res = origCanvasUpdate.apply(this, arguments);
+          notifyRedraw();
+          return res;
+        };
+      }
+    }
+  }
+
   function tryPatchPuzzleProto() {
     disableDuplicateControl();
     if (typeof window.Puzzle === 'function' && window.Puzzle.prototype) {
-      if (!patchedProtos.has(window.Puzzle.prototype)) {
-        patchedProtos.add(window.Puzzle.prototype);
-        var origRedraw = window.Puzzle.prototype.redraw;
-        if (typeof origRedraw === 'function') {
-          window.Puzzle.prototype.redraw = function () {
-            var res = origRedraw.apply(this, arguments);
-            notifyRedraw();
-            return res;
-          };
-        }
-        var origCanvasUpdate = window.Puzzle.prototype.canvasxy_update;
-        if (typeof origCanvasUpdate === 'function') {
-          window.Puzzle.prototype.canvasxy_update = function () {
-            var res = origCanvasUpdate.apply(this, arguments);
-            notifyRedraw();
-            return res;
-          };
-        }
-      }
+      patchPuzzlePrototype(window.Puzzle.prototype);
     }
-    if (window.pu && typeof window.pu.redraw === 'function') {
+    if (window.pu) {
+      // Walk the full prototype chain (e.g. Puzzle_square -> Puzzle) because ES6 `class Puzzle`
+      // is a lexical global binding rather than a `window.Puzzle` property. Patching the base
+      // `Puzzle.prototype` ensures every grid subclass (hex, tri, iso, penrose, etc.) inherits
+      // the unified official base URL and redraw hooks immediately upon creation.
       var proto = Object.getPrototypeOf(window.pu);
-      if (proto && !patchedProtos.has(proto)) {
-        patchedProtos.add(proto);
-        var orig = proto.redraw;
-        if (typeof orig === 'function') {
-          proto.redraw = function () {
-            var res = orig.apply(this, arguments);
-            notifyRedraw();
-            return res;
-          };
-        }
+      while (proto && proto !== Object.prototype) {
+        patchPuzzlePrototype(proto);
+        proto = Object.getPrototypeOf(proto);
       }
     }
   }
@@ -550,6 +915,77 @@
   }
 
   if (isAndroidOverlayEnv()) {
+    // Route all clipboard writes directly to native Android ClipboardManager in overlay mode,
+    // bypassing WebView clipboard APIs that silently fail in FLAG_NOT_FOCUSABLE overlay windows.
+    function copyViaAndroidClipboard(text) {
+      try {
+        if (
+          window.parent &&
+          window.parent.AndroidOverlay &&
+          typeof window.parent.AndroidOverlay.copyText === 'function'
+        ) {
+          return !!window.parent.AndroidOverlay.copyText(String(text == null ? '' : text));
+        }
+      } catch (_) {}
+      return false;
+    }
+
+    try {
+      var writeTextNative = function (text) {
+        copyViaAndroidClipboard(text);
+        return Promise.resolve();
+      };
+      var nativeClipboardProxy = { writeText: writeTextNative };
+      if (navigator.clipboard) {
+        try {
+          Object.defineProperty(navigator.clipboard, 'writeText', {
+            configurable: true,
+            value: writeTextNative,
+          });
+        } catch (_) {
+          Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            get: function () {
+              return nativeClipboardProxy;
+            },
+          });
+        }
+      } else {
+        Object.defineProperty(navigator, 'clipboard', {
+          configurable: true,
+          get: function () {
+            return nativeClipboardProxy;
+          },
+        });
+      }
+    } catch (_) {}
+
+    if (typeof document.execCommand === 'function') {
+      var origExecCommand = document.execCommand.bind(document);
+      document.execCommand = function (commandId) {
+        if (typeof commandId === 'string' && commandId.toLowerCase() === 'copy') {
+          var copiedText = '';
+          try {
+            var activeEl = document.activeElement;
+            if (
+              activeEl &&
+              (activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'INPUT') &&
+              typeof activeEl.value === 'string'
+            ) {
+              var selStart = typeof activeEl.selectionStart === 'number' ? activeEl.selectionStart : 0;
+              var selEnd = typeof activeEl.selectionEnd === 'number' ? activeEl.selectionEnd : activeEl.value.length;
+              copiedText = selEnd > selStart ? activeEl.value.slice(selStart, selEnd) : activeEl.value;
+            }
+            if (!copiedText && window.getSelection) {
+              copiedText = String(window.getSelection() || '');
+            }
+          } catch (_) {}
+          return copyViaAndroidClipboard(copiedText);
+        }
+        return origExecCommand.apply(document, arguments);
+      };
+    }
+
     var activeSelectMenu = null;
     function closeSelectMenu() {
       if (activeSelectMenu && activeSelectMenu.parentNode) {
@@ -656,6 +1092,17 @@
     );
   }
 
+  // Prevent Ctrl+Wheel browser zoom inside the dock iframe so dock scale stays controlled by PenpaDockWindow
+  origWinAddEventListener(
+    'wheel',
+    function (e) {
+      if (e && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+      }
+    },
+    { passive: false }
+  );
+
   origWinAddEventListener(
     'keydown',
     function (e) {
@@ -695,6 +1142,9 @@
       }
       notifyRedraw();
     },
+    officialBaseUrl: OFFICIAL_PENPA_BASE_URL,
+    extractPenpaParamString: extractPenpaParamString,
+    toOfficialPenpaUrl: toOfficialPenpaUrl,
     saveDraftNow: saveDraftNow,
     setMd3Tokens: function (tokens) {
       if (!tokens || typeof tokens !== 'object') return;
