@@ -2,6 +2,8 @@ import type { Point2D } from './homography';
 import type { BlendRenderMode } from './webglOverlay';
 import type { HotkeyBinding } from './hotkey';
 import type { AppLocale } from './i18n';
+import type { WorldViewportTransform } from './world';
+import type { CanvasImageItemMeta, MediaCrop } from './canvasItems';
 
 export interface PersistedBarState {
   xRatio: number;
@@ -19,6 +21,12 @@ export interface PersistedDockState {
   collapsed: boolean;
 }
 
+export interface PersistedLayersWindowState {
+  xRatio: number;
+  yRatio: number;
+  open: boolean;
+}
+
 export type ThemeMode = 'auto' | 'light' | 'dark';
 
 export interface PersistedAppState {
@@ -26,12 +34,25 @@ export interface PersistedAppState {
   alignTarget?: 'grid' | 'canvas';
   quadMode?: 'rect' | 'free';
   opacity?: number;
+  /** Legacy flag migrated to gridLocked = !calibrating on first load. */
   calibrating?: boolean;
+  gridLocked?: boolean;
+  gridPassThrough?: boolean;
+  gridCrop?: MediaCrop;
+  gridZIndex?: number;
   dockVisible?: boolean;
   canvasVisible?: boolean;
+  /** Absolute Root-World grid corners (CSS px). Preferred over legacy cornersNorm. */
+  worldCorners?: [Point2D, Point2D, Point2D, Point2D];
+  /** Legacy viewport-normalized corners kept for one-time migration. */
   cornersNorm?: [Point2D, Point2D, Point2D, Point2D];
+  /** Persisted pan/zoom viewport transform for Canvas mode. */
+  canvasViewport?: WorldViewportTransform;
+  /** Persisted Canvas-mode image item metadata (binary blobs live in IndexedDB). */
+  canvasItems?: CanvasImageItemMeta[];
   bar?: PersistedBarState;
   dock?: PersistedDockState;
+  layersWindow?: PersistedLayersWindowState;
   customCssEnabled?: boolean;
   customCss?: string;
   toggleHotkey?: HotkeyBinding | null;
@@ -39,6 +60,7 @@ export interface PersistedAppState {
   themeMode?: ThemeMode;
   dynamicColor?: boolean;
   customHue?: number;
+  overlayFullCanvas?: boolean;
   showUnavailableOptions?: boolean;
 }
 

@@ -160,3 +160,53 @@ export function isPointInQuad(p: Point2D, quad: [Point2D, Point2D, Point2D, Poin
   }
   return true;
 }
+
+export interface Rect2D {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Axis-aligned bounding rectangle covering all 4 quad vertices.
+ */
+export function quadToBoundingRect(
+  quad: [Point2D, Point2D, Point2D, Point2D],
+  minSize = 48,
+): Rect2D {
+  const minX = Math.min(quad[0].x, quad[1].x, quad[2].x, quad[3].x);
+  const maxX = Math.max(quad[0].x, quad[1].x, quad[2].x, quad[3].x);
+  const minY = Math.min(quad[0].y, quad[1].y, quad[2].y, quad[3].y);
+  const maxY = Math.max(quad[0].y, quad[1].y, quad[2].y, quad[3].y);
+  const w = Math.max(minSize, maxX - minX);
+  const h = Math.max(minSize, maxY - minY);
+  return { x: minX, y: minY, w, h };
+}
+
+/**
+ * Build clockwise [TL, TR, BR, BL] quad corners from an axis-aligned rectangle.
+ */
+export function rectToQuad(r: Rect2D): [Point2D, Point2D, Point2D, Point2D] {
+  return [
+    { x: r.x, y: r.y },
+    { x: r.x + r.w, y: r.y },
+    { x: r.x + r.w, y: r.y + r.h },
+    { x: r.x, y: r.y + r.h },
+  ];
+}
+
+/**
+ * Convert a 2D row-major 3x3 homography mapping [0..w]x[0..h] -> target viewport coords
+ * into a CSS matrix3d(...) transform string (transform-origin: 0 0).
+ */
+export function homographyToCssMatrix3d(H: Mat3): string {
+  const s = Math.abs(H[8]) > 1e-9 ? 1 / H[8] : 1;
+  const m = [
+    H[0] * s, H[3] * s, 0, H[6] * s,
+    H[1] * s, H[4] * s, 0, H[7] * s,
+    0, 0, 1, 0,
+    H[2] * s, H[5] * s, 0, 1,
+  ];
+  return `matrix3d(${m.map((v) => (Math.abs(v) < 1e-10 ? 0 : Number(v.toFixed(8)))).join(',')})`;
+}
