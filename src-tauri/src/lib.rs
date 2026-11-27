@@ -187,6 +187,7 @@ fn set_overlay_window_mode(
         let _ = window.set_theme(Some(if is_dark { Theme::Dark } else { Theme::Light }));
         let _ = window.set_decorations(true);
         let _ = window.set_resizable(true);
+        let _ = window.set_maximizable(true);
         let _ = window.set_shadow(true);
 
         if was_overlay {
@@ -220,6 +221,8 @@ fn set_overlay_window_mode(
     }
 
     let _ = window.set_decorations(false);
+    let _ = window.set_maximizable(false);
+    let _ = window.set_resizable(false);
     let _ = window.set_shadow(false);
     let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
     window
@@ -949,8 +952,24 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
                 let _ = window.set_shadow(false);
+                let _ = window.set_maximizable(false);
+                let _ = window.set_resizable(false);
                 let _ = window.set_ignore_cursor_events(false);
                 fit_overlay_window_to_monitor(&window);
+
+                let win_for_evt = window.clone();
+                let state_for_evt = Arc::clone(&state_for_setup);
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::ScaleFactorChanged { .. } = event {
+                        let is_overlay = state_for_evt
+                            .lock()
+                            .map(|g| g.is_overlay_mode)
+                            .unwrap_or(false);
+                        if is_overlay {
+                            fit_overlay_window_to_monitor(&win_for_evt);
+                        }
+                    }
+                });
 
                 #[cfg(windows)]
                 spawn_windows_overlay_poller(window, state_for_setup);
