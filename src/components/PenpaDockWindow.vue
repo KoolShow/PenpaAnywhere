@@ -561,6 +561,7 @@ onBeforeUnmount(() => {
 .ac-dock-sliders-inner {
   overflow: hidden;
   min-width: 0;
+  padding: 3px 2px;
   display: inline-flex;
   align-items: center;
   gap: 6px;

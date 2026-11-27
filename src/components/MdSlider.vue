@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, ref } from 'vue';
 
 const props = withDefaults(
   defineProps<{
@@ -23,7 +23,9 @@ const emit = defineEmits<{
   (e: 'update:modelValue', value: number): void;
 }>();
 
+const inputEl = ref<HTMLInputElement | null>(null);
 const pressed = ref(false);
+let activePointerDrag = false;
 
 const pct = computed(() => {
   const span = props.max - props.min;
@@ -36,12 +38,60 @@ const sliderStyle = computed(() => ({
   '--pct': String(pct.value),
 }));
 
+function blurSliderInput() {
+  const el = inputEl.value;
+  if (el && document.activeElement === el) {
+    el.blur();
+  }
+}
+
+function cleanupPointerListeners() {
+  window.removeEventListener('pointerup', onGlobalPointerEnd, true);
+  window.removeEventListener('pointercancel', onGlobalPointerEnd, true);
+}
+
+function onGlobalPointerEnd() {
+  cleanupPointerListeners();
+  pressed.value = false;
+  if (activePointerDrag) {
+    activePointerDrag = false;
+    blurSliderInput();
+    // Some engines focus <input type="range"> on click/mouseup right after pointerup
+    requestAnimationFrame(() => {
+      if (!activePointerDrag) {
+        blurSliderInput();
+      }
+    });
+  }
+}
+
+function onPointerDown() {
+  if (props.disabled) return;
+  activePointerDrag = true;
+  pressed.value = true;
+  window.addEventListener('pointerup', onGlobalPointerEnd, true);
+  window.addEventListener('pointercancel', onGlobalPointerEnd, true);
+}
+
 function onInput(e: Event) {
   const val = parseFloat((e.target as HTMLInputElement).value);
   if (Number.isFinite(val)) {
     emit('update:modelValue', val);
   }
 }
+
+function onChange() {
+  if (!activePointerDrag && pressed.value) {
+    pressed.value = false;
+  }
+  if (!activePointerDrag && inputEl.value && !inputEl.value.matches(':focus-visible')) {
+    blurSliderInput();
+  }
+}
+
+onBeforeUnmount(() => {
+  cleanupPointerListeners();
+});
 </script>
 
 <template>
@@ -49,10 +99,7 @@ function onInput(e: Event) {
     class="ac-md-slider"
     :class="{ pressed, disabled }"
     :style="sliderStyle"
-    @pointerdown="pressed = true"
-    @pointerup="pressed = false"
-    @pointercancel="pressed = false"
-    @pointerleave="pressed = false"
+    @pointerdown="onPointerDown"
   >
     <span class="ac-md-slider-active" aria-hidden="true" />
     <span class="ac-md-slider-inactive" aria-hidden="true">
@@ -60,6 +107,7 @@ function onInput(e: Event) {
     </span>
     <span class="ac-md-slider-handle" aria-hidden="true" />
     <input
+      ref="inputEl"
       class="ac-md-slider-input"
       type="range"
       :min="min"
@@ -69,6 +117,7 @@ function onInput(e: Event) {
       :disabled="disabled"
       :aria-label="ariaLabel"
       @input="onInput"
+      @change="onChange"
       @blur="pressed = false"
     />
   </span>
@@ -78,11 +127,11 @@ function onInput(e: Event) {
 /* Material Design 3 Expressive Slider (--|-) */
 .ac-md-slider {
   --pct: 0.5;
-  --handle-x: calc(3px + var(--pct) * (100% - 6px));
+  --handle-x: calc(2px + var(--pct) * (100% - 4px));
   position: relative;
   display: inline-flex;
   align-items: center;
-  height: 22px;
+  height: 24px;
   flex-shrink: 0;
   user-select: none;
   touch-action: pan-x;
@@ -109,9 +158,9 @@ function onInput(e: Event) {
 .ac-md-slider-inactive {
   position: absolute;
   top: 50%;
-  left: calc(var(--handle-x) + 5px);
   right: 0;
   height: 10px;
+  width: max(0px, calc(100% - var(--handle-x) - 5px));
   transform: translateY(-50%);
   border-radius: 2px 5px 5px 2px;
   background: var(--md-sys-color-secondary-container);
@@ -141,20 +190,19 @@ function onInput(e: Event) {
   transform: translate(-50%, -50%);
   background: var(--md-sys-color-primary);
   pointer-events: none;
-  transition: width 0.12s ease, height 0.12s ease, box-shadow 0.14s ease;
+  transition: width 0.12s cubic-bezier(0.2, 0, 0, 1);
 }
 
-@media (hover: hover) {
-  .ac-md-slider:hover .ac-md-slider-handle {
-    box-shadow: 0 0 0 4px color-mix(in srgb, var(--md-sys-color-primary) 16%, transparent);
-  }
+/* Per MD3 Expressive slider spec: no glow/highlight halo on hover or click;
+   handle simply narrows to 2dp while actively dragged. */
+.ac-md-slider.pressed .ac-md-slider-handle {
+  width: 2px;
 }
 
-.ac-md-slider.pressed .ac-md-slider-handle,
-.ac-md-slider:focus-within .ac-md-slider-handle {
-  width: 3px;
-  height: 20px;
-  box-shadow: 0 0 0 5px color-mix(in srgb, var(--md-sys-color-primary) 22%, transparent);
+/* Keyboard-only accessible focus indicator (never triggered on mouse/touch click) */
+.ac-md-slider:has(.ac-md-slider-input:focus-visible) .ac-md-slider-handle {
+  outline: 2px solid var(--md-sys-color-secondary);
+  outline-offset: 1px;
 }
 
 .ac-md-slider-input {
