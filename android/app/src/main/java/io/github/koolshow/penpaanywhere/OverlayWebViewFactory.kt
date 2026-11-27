@@ -114,7 +114,7 @@ object OverlayWebViewFactory {
 
     @SuppressLint("SetJavaScriptEnabled")
     fun create(context: Context, bridge: JsBridge): WebView {
-        WebView.setWebContentsDebuggingEnabled(true)
+        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
 
         val assetLoader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
