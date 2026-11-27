@@ -159,6 +159,33 @@ body,
   }
 }
 
+.ac-btn.has-icon {
+  gap: 5px;
+  padding-left: 9px;
+}
+
+.ac-btn.sm {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+.ac-btn.sm.has-icon {
+  gap: 4px;
+  padding-left: 7px;
+}
+
+.ac-btn.xs {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.ac-btn.xs.has-icon {
+  gap: 4px;
+  padding-left: 6px;
+}
+
 .ac-btn.unavailable {
   opacity: 0.48;
   border-style: dashed;
@@ -180,4 +207,128 @@ body,
 
 .ac-select:focus {
   border-color: var(--md-sys-color-primary);
+}
+
+/* Material Design 3 Standard Icon Button (circular, transparent resting background) */
+.ac-icon-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease, color 0.15s ease, transform 0.08s ease, opacity 0.12s ease;
+}
+
+.ac-icon-btn.sm {
+  width: 26px;
+  height: 26px;
+}
+
+.ac-icon-btn.xs {
+  width: 24px;
+  height: 24px;
+}
+
+@media (hover: hover) {
+  .ac-icon-btn:not(:disabled):hover {
+    background: color-mix(in srgb, var(--md-sys-color-on-surface) 10%, transparent);
+    color: var(--md-sys-color-on-surface);
+  }
+}
+
+.ac-icon-btn:not(:disabled):active {
+  transform: scale(0.92);
+}
+
+.ac-icon-btn.active {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+}
+
+@media (hover: hover) {
+  .ac-icon-btn.active:not(:disabled):hover {
+    background: color-mix(in srgb, var(--md-sys-color-on-primary-container) 10%, var(--md-sys-color-primary-container));
+    color: var(--md-sys-color-on-primary-container);
+  }
+}
+
+.ac-icon-btn.danger {
+  color: var(--md-sys-color-error);
+}
+
+@media (hover: hover) {
+  .ac-icon-btn.danger:not(:disabled):hover {
+    background: color-mix(in srgb, var(--md-sys-color-error) 14%, transparent);
+    color: var(--md-sys-color-error);
+  }
+}
+
+.ac-icon-btn.danger.active {
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+}
+
+.ac-icon-btn:disabled {
+  opacity: 0.32;
+  cursor: not-allowed;
+}
+
+.ac-icon-btn.unavailable {
+  opacity: 0.45;
+  cursor: help;
+}
+
+/* Compact Material Design 3 Switch (shared for PenpaDock render bar, etc.) */
+.ac-md3-switch-sm {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1.5px solid var(--md-sys-color-outline);
+  background: var(--md-sys-color-surface-container-highest);
+  cursor: pointer;
+  transition:
+    background-color 0.18s cubic-bezier(0.2, 0, 0, 1),
+    border-color 0.18s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ac-md3-switch-sm-thumb {
+  position: absolute;
+  left: 3px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--md-sys-color-outline);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    transform 0.18s cubic-bezier(0.2, 0, 0, 1),
+    width 0.16s cubic-bezier(0.2, 0, 0, 1),
+    height 0.16s cubic-bezier(0.2, 0, 0, 1),
+    background-color 0.18s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ac-md3-switch-sm.checked {
+  background: var(--md-sys-color-primary);
+  border-color: var(--md-sys-color-primary);
+}
+
+.ac-md3-switch-sm.checked .ac-md3-switch-sm-thumb {
+  width: 14px;
+  height: 14px;
+  transform: translateX(14px);
+  background: var(--md-sys-color-on-primary);
+  color: var(--md-sys-color-on-primary-container);
 }
