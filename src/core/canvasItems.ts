@@ -58,6 +58,7 @@ export interface GridElement extends WorldElementBase {
   kind: 'grid';
   blendMode: BlendRenderMode;
   opacity: number;
+  enhanceOpacity: boolean;
   dockVisible: boolean;
 }
 
@@ -85,6 +86,63 @@ export interface ScreenElement extends WorldElementBase {
 
 export type MediaElement = ImageElement | ScreenElement;
 export type WorldElement = GridElement | ImageElement | ScreenElement;
+
+export interface ElementGroup {
+  id: string;
+  label: string;
+  memberIds: string[];
+  visible: boolean;
+  locked: boolean;
+  passThrough: boolean;
+}
+
+export interface GroupSelectionTarget {
+  id: string;
+  kind: 'group';
+  label: string;
+  memberIds: string[];
+  members: WorldElement[];
+  corners: [Point2D, Point2D, Point2D, Point2D];
+  zIndex: number;
+  minZIndex: number;
+  visible: boolean;
+  locked: boolean;
+  passThrough: boolean;
+  hasGrid: boolean;
+  dockVisible: boolean;
+}
+
+export type SelectableTarget = WorldElement | GroupSelectionTarget;
+
+export function generateGroupId(): string {
+  return `grp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+export function computeCombinedWorldQuad(
+  members: ReadonlyArray<Pick<WorldElementBase, 'corners'>>,
+): [Point2D, Point2D, Point2D, Point2D] {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const m of members) {
+    for (const p of m.corners) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+  }
+  if (!Number.isFinite(minX)) {
+    return rectToQuad({ x: 0, y: 0, w: 100, h: 100 });
+  }
+  return rectToQuad({
+    x: minX,
+    y: minY,
+    w: Math.max(1, maxX - minX),
+    h: Math.max(1, maxY - minY),
+  });
+}
 
 // Backward-compatible aliases
 export type CanvasImageItemMeta = ImageElementMeta;

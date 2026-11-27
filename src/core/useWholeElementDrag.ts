@@ -15,6 +15,7 @@ interface MoveDragSession {
   captureEl: Element | null;
   startClient: { x: number; y: number };
   baseCorners: [Point2D, Point2D, Point2D, Point2D];
+  moved: boolean;
 }
 
 interface CropBgPanSession {
@@ -40,14 +41,19 @@ export function useWholeElementDrag(options: {
   isWorldBounded: () => boolean;
   onUpdateCorners: (id: string, corners: [Point2D, Point2D, Point2D, Point2D]) => void;
   onUpdateCropDraft: (draft: CropDraft) => void;
+  onMoveFinish?: (moved: boolean) => void;
 }) {
   let session: DragSession | null = null;
 
-  function endSession() {
+  function endSession(notifyMoveFinish = false) {
     if (!session) return;
-    tryReleasePointer(session.captureEl, session.pointerId);
+    const prev = session;
+    tryReleasePointer(prev.captureEl, prev.pointerId);
     session = null;
     endGlobalDrag();
+    if (notifyMoveFinish && prev.mode === 'move') {
+      options.onMoveFinish?.(prev.moved);
+    }
   }
 
   function clampDelta(dx: number, dy: number): { dx: number; dy: number } {
@@ -56,7 +62,7 @@ export function useWholeElementDrag(options: {
   }
 
   function beginDrag(e: PointerEvent) {
-    if (session) endSession();
+    if (session) endSession(false);
     const c = options.getElement().corners;
     const targetEl = e.currentTarget instanceof HTMLElement ? e.currentTarget : document.documentElement;
     const captureEl = tryCapturePointer(targetEl, e.pointerId);
@@ -67,13 +73,14 @@ export function useWholeElementDrag(options: {
       captureEl,
       startClient: { x: e.clientX, y: e.clientY },
       baseCorners: [{ ...c[0] }, { ...c[1] }, { ...c[2] }, { ...c[3] }],
+      moved: false,
     };
   }
 
   function beginCropPan(e: PointerEvent) {
     const draft = options.getCropDraft();
     if (!draft) return;
-    if (session) endSession();
+    if (session) endSession(false);
     const targetEl = e.currentTarget instanceof HTMLElement ? e.currentTarget : document.documentElement;
     const captureEl = tryCapturePointer(targetEl, e.pointerId);
     beginGlobalDrag();
@@ -92,8 +99,10 @@ export function useWholeElementDrag(options: {
     if (!session || e.pointerId !== session.pointerId) return;
     e.preventDefault();
     const z = options.getViewport().zoom || 1;
-    const rawDx = (e.clientX - session.startClient.x) / z;
-    const rawDy = (e.clientY - session.startClient.y) / z;
+    const clientDx = e.clientX - session.startClient.x;
+    const clientDy = e.clientY - session.startClient.y;
+    const rawDx = clientDx / z;
+    const rawDy = clientDy / z;
 
     if (session.mode === 'crop-bg-pan') {
       const res = applyCropBackgroundPanDrag(session.baseFullRect, session.baseCrop, rawDx, rawDy);
@@ -106,6 +115,9 @@ export function useWholeElementDrag(options: {
       return;
     }
 
+    if (!session.moved && Math.hypot(clientDx, clientDy) >= 3) {
+      session.moved = true;
+    }
     const { dx, dy } = clampDelta(rawDx, rawDy);
     const b = session.baseCorners;
     options.onUpdateCorners(options.getElement().id, [
@@ -118,11 +130,11 @@ export function useWholeElementDrag(options: {
 
   function onPointerUp(e: PointerEvent) {
     if (!session || e.pointerId !== session.pointerId) return;
-    endSession();
+    endSession(true);
   }
 
   function onWindowBlur() {
-    endSession();
+    endSession(false);
   }
 
   onMounted(() => {

@@ -32,8 +32,18 @@ uniform float u_opacity;
 uniform float u_whiteThreshold;
 uniform vec4 u_clipRect;
 uniform float u_outsideOpacity;
+uniform float u_enhanceOpacity;
 
 out vec4 outColor;
+
+// Smooth cubic opacity boost: 1 - (1 - a)^3 (equivalent to 3x self-compositing).
+// Keeps pure transparent background (a == 0) at 0.0 with bounded derivative (no background halo),
+// while strongly lifting faint/pastel strokes so semi-transparent Penpa+ elements stay crisp.
+float enhanceAlphaCurve(float a) {
+  float c = clamp(a, 0.0, 1.0);
+  float boosted = 1.0 - pow(1.0 - c, 3.0);
+  return mix(c, boosted, u_enhanceOpacity);
+}
 
 // Bi-cone HSL lightness inversion: preserves Hue (H) and HSL Saturation (S), maps L -> 1 - L.
 // Because chroma C = (1 - |2L - 1|) * S is symmetric around L = 0.5, C is invariant and
@@ -88,7 +98,7 @@ void main() {
   if (u_mode == 2) {
     float luma = dot(rgb, vec3(0.299, 0.587, 0.114));
     float rawAlpha = clamp((u_whiteThreshold - luma) / max(u_whiteThreshold, 0.01), 0.0, 1.0);
-    float a = rawAlpha * effOpacity;
+    float a = enhanceAlphaCurve(rawAlpha) * effOpacity;
     if (a < 0.004) discard;
     vec3 fg = clamp((rgb - vec3(1.0 - rawAlpha)) / max(rawAlpha, 0.001), 0.0, 1.0);
     outColor = vec4(fg * a, a);
@@ -101,7 +111,7 @@ void main() {
     float lumaInv = dot(invRgb, vec3(0.299, 0.587, 0.114));
     float blackFloor = 1.0 - u_whiteThreshold;
     float rawAlpha = clamp((lumaInv - blackFloor) / max(1.0 - blackFloor, 0.01), 0.0, 1.0);
-    float a = rawAlpha * effOpacity;
+    float a = enhanceAlphaCurve(rawAlpha) * effOpacity;
     if (a < 0.004) discard;
     vec3 fg = clamp(invRgb / max(rawAlpha, 0.001), 0.0, 1.0);
     outColor = vec4(fg * a, a);
@@ -112,7 +122,7 @@ void main() {
   if (u_mode == 4) {
     float minC = min(rgb.r, min(rgb.g, rgb.b));
     float rawAlpha = clamp((u_whiteThreshold - minC) / max(u_whiteThreshold, 0.01), 0.0, 1.0);
-    float a = rawAlpha * effOpacity;
+    float a = enhanceAlphaCurve(rawAlpha) * effOpacity;
     if (a < 0.004) discard;
     vec3 fg = clamp(1.0 - (1.0 - rgb) / max(rawAlpha, 0.001), 0.0, 1.0);
     outColor = vec4(fg * a, a);
@@ -124,7 +134,7 @@ void main() {
   float maxC = max(invRgb.r, max(invRgb.g, invRgb.b));
   float blackFloor = 1.0 - u_whiteThreshold;
   float rawAlpha = clamp((maxC - blackFloor) / max(1.0 - blackFloor, 0.01), 0.0, 1.0);
-  float a = rawAlpha * effOpacity;
+  float a = enhanceAlphaCurve(rawAlpha) * effOpacity;
   if (a < 0.004) discard;
   vec3 fg = clamp(invRgb / max(rawAlpha, 0.001), 0.0, 1.0);
   outColor = vec4(fg * a, a);
@@ -154,6 +164,7 @@ export class WebGLPerspectiveRenderer {
   private uWhiteThreshold: WebGLUniformLocation | null;
   private uClipRect: WebGLUniformLocation | null;
   private uOutsideOpacity: WebGLUniformLocation | null;
+  private uEnhanceOpacity: WebGLUniformLocation | null;
   private lastUploadedVersion = -1;
   private hasTexture = false;
   private viewportW = 0;
@@ -192,6 +203,7 @@ export class WebGLPerspectiveRenderer {
     this.uWhiteThreshold = gl.getUniformLocation(this.program, 'u_whiteThreshold');
     this.uClipRect = gl.getUniformLocation(this.program, 'u_clipRect');
     this.uOutsideOpacity = gl.getUniformLocation(this.program, 'u_outsideOpacity');
+    this.uEnhanceOpacity = gl.getUniformLocation(this.program, 'u_enhanceOpacity');
   }
 
   private compileShader(type: number, source: string): WebGLShader {
@@ -275,6 +287,7 @@ export class WebGLPerspectiveRenderer {
     whiteThreshold = 0.99,
     clipRect: [number, number, number, number] = [0, 0, 1, 1],
     outsideOpacity = 0.0,
+    enhanceOpacity = false,
   ) {
     const gl = this.gl;
     gl.clearColor(0, 0, 0, 0);
@@ -295,6 +308,7 @@ export class WebGLPerspectiveRenderer {
     gl.uniform1f(this.uWhiteThreshold, whiteThreshold);
     gl.uniform4f(this.uClipRect, clipRect[0], clipRect[1], clipRect[2], clipRect[3]);
     gl.uniform1f(this.uOutsideOpacity, outsideOpacity);
+    gl.uniform1f(this.uEnhanceOpacity, enhanceOpacity ? 1.0 : 0.0);
 
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }

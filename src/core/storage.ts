@@ -28,18 +28,30 @@ export interface PersistedLayersWindowState {
 }
 
 export type ThemeMode = 'auto' | 'light' | 'dark';
+export type ButtonDisplayMode = 'icon-only' | 'icon-text' | 'text-only';
+
+export interface PersistedElementGroup {
+  id: string;
+  label: string;
+  memberIds: string[];
+  visible: boolean;
+  locked: boolean;
+  passThrough: boolean;
+}
 
 export interface PersistedAppState {
   blendMode?: BlendRenderMode;
   alignTarget?: 'grid' | 'canvas';
   quadMode?: 'rect' | 'free';
   opacity?: number;
+  gridEnhanceOpacity?: boolean;
   /** Legacy flag migrated to gridLocked = !calibrating on first load. */
   calibrating?: boolean;
   gridLocked?: boolean;
   gridPassThrough?: boolean;
   gridCrop?: MediaCrop;
   gridZIndex?: number;
+  gridLabel?: string;
   dockVisible?: boolean;
   canvasVisible?: boolean;
   /** Absolute Root-World grid corners (CSS px). Preferred over legacy cornersNorm. */
@@ -50,6 +62,8 @@ export interface PersistedAppState {
   canvasViewport?: WorldViewportTransform;
   /** Persisted Canvas-mode image item metadata (binary blobs live in IndexedDB). */
   canvasItems?: CanvasImageItemMeta[];
+  /** Persisted element groups (atomic selection & drag units). */
+  elementGroups?: PersistedElementGroup[];
   bar?: PersistedBarState;
   dock?: PersistedDockState;
   layersWindow?: PersistedLayersWindowState;
@@ -60,6 +74,7 @@ export interface PersistedAppState {
   themeMode?: ThemeMode;
   dynamicColor?: boolean;
   customHue?: number;
+  buttonDisplayMode?: ButtonDisplayMode;
   overlayFullCanvas?: boolean;
   showUnavailableOptions?: boolean;
 }
