@@ -12,6 +12,7 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.PointF
@@ -209,6 +210,7 @@ class OverlayService : Service() {
     private var lastBoardRect: Rect? = null
     private var lastQuadPts: List<PointF> = emptyList()
     private var lastQuads: List<List<PointF>> = emptyList()
+    private var lastGizmoQuad: List<PointF> = emptyList()
     private var lastCornerPts: List<PointF> = emptyList()
     private var lastScaleX = 1f
     private var lastPayloadJson: String? = null
@@ -622,6 +624,7 @@ class OverlayService : Service() {
                 parsedQuads.add(lastQuadPts)
             }
             lastQuads = parsedQuads
+            lastGizmoQuad = parseCssPoints(json.optJSONArray("gizmoQuad"), scaleX, scaleY)
             lastCornerPts = parseCssPoints(json.optJSONArray("corners"), scaleX, scaleY)
 
             val flagsChanged = (nextPassthrough != regionPassthroughEnabled) || (nextForce != forceClickThrough)
@@ -717,9 +720,33 @@ class OverlayService : Service() {
                 lastBoardRect?.let { mask.op(it, Region.Op.UNION) }
             }
 
-            // Include circular touch targets around the 4 perspective corner handles during calibration
+            // Include stroked border touch area for the active transform gizmo (so group border edges &
+            // corners extending outside individual child quads remain fully draggable in overlay mode,
+            // while keeping the hollow interior transparent to underlying touches).
+            if (lastGizmoQuad.size == 4) {
+                val borderPath = Path().apply {
+                    moveTo(lastGizmoQuad[0].x, lastGizmoQuad[0].y)
+                    lineTo(lastGizmoQuad[1].x, lastGizmoQuad[1].y)
+                    lineTo(lastGizmoQuad[2].x, lastGizmoQuad[2].y)
+                    lineTo(lastGizmoQuad[3].x, lastGizmoQuad[3].y)
+                    close()
+                }
+                val strokePaint = Paint().apply {
+                    style = Paint.Style.STROKE
+                    strokeWidth = (32f * lastScaleX).coerceAtLeast(44f)
+                    strokeCap = Paint.Cap.ROUND
+                    strokeJoin = Paint.Join.ROUND
+                }
+                val strokedBorderPath = Path()
+                strokePaint.getFillPath(borderPath, strokedBorderPath)
+                val borderRegion = Region()
+                borderRegion.setPath(strokedBorderPath, clip)
+                mask.op(borderRegion, Region.Op.UNION)
+            }
+
+            // Include circular touch targets around the perspective corner/edge handles during calibration
             if (calibrating && lastCornerPts.isNotEmpty()) {
-                val handleRadiusPx = (22f * lastScaleX).coerceAtLeast(32f)
+                val handleRadiusPx = (24f * lastScaleX).coerceAtLeast(36f)
                 val handlePath = Path()
                 for (pt in lastCornerPts) {
                     handlePath.addCircle(pt.x, pt.y, handleRadiusPx, Path.Direction.CW)

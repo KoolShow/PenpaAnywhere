@@ -39,7 +39,9 @@ export function useWholeElementDrag(options: {
   getCropDraft: () => CropDraft | null;
   getViewport: () => WorldViewportTransform;
   isWorldBounded: () => boolean;
-  onUpdateCorners: (id: string, corners: [Point2D, Point2D, Point2D, Point2D]) => void;
+  onUpdateCorners?: (id: string, corners: [Point2D, Point2D, Point2D, Point2D]) => void;
+  onMoveStart?: (id: string) => void;
+  onTranslateBy?: (id: string, dxWorld: number, dyWorld: number) => void;
   onUpdateCropDraft: (draft: CropDraft) => void;
   onMoveFinish?: (moved: boolean) => void;
 }) {
@@ -63,10 +65,12 @@ export function useWholeElementDrag(options: {
 
   function beginDrag(e: PointerEvent) {
     if (session) endSession(false);
-    const c = options.getElement().corners;
+    const el = options.getElement();
+    const c = el.corners;
     const targetEl = e.currentTarget instanceof HTMLElement ? e.currentTarget : document.documentElement;
     const captureEl = tryCapturePointer(targetEl, e.pointerId);
     beginGlobalDrag();
+    options.onMoveStart?.(el.id);
     session = {
       mode: 'move',
       pointerId: e.pointerId,
@@ -119,8 +123,12 @@ export function useWholeElementDrag(options: {
       session.moved = true;
     }
     const { dx, dy } = clampDelta(rawDx, rawDy);
+    if (options.onTranslateBy) {
+      options.onTranslateBy(options.getElement().id, dx, dy);
+      return;
+    }
     const b = session.baseCorners;
-    options.onUpdateCorners(options.getElement().id, [
+    options.onUpdateCorners?.(options.getElement().id, [
       { x: b[0].x + dx, y: b[0].y + dy },
       { x: b[1].x + dx, y: b[1].y + dy },
       { x: b[2].x + dx, y: b[2].y + dy },

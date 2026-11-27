@@ -21,26 +21,56 @@ body {
   overflow: visible !important;
 }
 
-/* Show Penpa+ header cleanly inside the dock with responsive flex layout */
-#header {
+/* Hide #header on the main window before JS relocates it into #modal-settings */
+body > #header {
+  display: none !important;
+}
+
+/* Display relocated Penpa+ #header cleanly as the top bar of the Penpa+ Settings modal */
+#modal-settings-content {
+  padding: 0 10px 10px !important;
+}
+
+#modal-settings-content > #header {
+  position: static !important;
   display: flex !important;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 0 10px !important;
-  min-height: 28px !important;
+  gap: 6px 10px;
+  margin: 0 -10px !important;
+  padding: 6px 14px !important;
+  min-height: 30px !important;
   height: auto !important;
-  line-height: 1.5 !important;
+  line-height: 1.4 !important;
+  border-radius: 16px 16px 0 0 !important;
   box-sizing: border-box;
 }
 
-#title,
-#version-info {
+#modal-settings-content > #header #title,
+#modal-settings-content > #header #version-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   white-space: nowrap;
+  text-align: left;
+}
+
+#modal-settings-content > .modal-header {
+  position: static !important;
+  margin: 0 -10px 8px -10px !important;
+  height: 28px !important;
+  line-height: 28px !important;
+  border-radius: 0 !important;
+}
+
+/* Keep Help modal cleanly above Settings modal when triggered via #page_help inside #modal-settings */
+#modal-help {
+  z-index: 5 !important;
 }
 
 #app-container {
-  margin-top: 32px !important;
+  margin-top: 4px !important;
   padding: 4px 6px 10px 6px !important;
 }
 

@@ -7,7 +7,13 @@ import PerspectiveOverlay from './components/PerspectiveOverlay.vue';
 import TransformGizmo from './components/TransformGizmo.vue';
 import PenpaDockWindow from './components/PenpaDockWindow.vue';
 import SettingsDialog from './components/SettingsDialog.vue';
-import { isPointInQuad, quadToBoundingRect, rectToQuad, type Point2D } from './core/homography';
+import {
+  isPointInQuad,
+  quadToBoundingRect,
+  rectToQuad,
+  type Point2D,
+  type Rect2D,
+} from './core/homography';
 import type { BlendRenderMode } from './core/webglOverlay';
 import type { GridBoundsNormalized, PenpaIframeBridge } from './core/penpaBridge';
 import { DEFAULT_PENPA_MD3_CSS } from './core/defaultPenpaCss';
@@ -35,9 +41,13 @@ import {
   createDefaultCrop,
   generateCanvasItemId,
   generateGroupId,
+  getDescendantGroupIds,
+  getDescendantLeafIds,
+  getParentGroup,
   isElementPassThrough,
   isItemCropped,
   resetElementSizeCorners,
+  resolveTopLevelTargetId,
   sanitizeCrop,
   sanitizeQuad,
   toCanvasImageMeta,
@@ -207,6 +217,42 @@ const buttonDisplayMode = ref<ButtonDisplayMode>(
     ? savedState.buttonDisplayMode
     : 'icon-text',
 );
+const globalScale = ref<number>(
+  typeof savedState.globalScale === 'number' &&
+    savedState.globalScale >= 0.7 &&
+    savedState.globalScale <= 1.5
+    ? savedState.globalScale
+    : 1,
+);
+const penpaScale = ref<number>(
+  typeof savedState.penpaScale === 'number' &&
+    savedState.penpaScale >= 0.5 &&
+    savedState.penpaScale <= 1.25
+    ? savedState.penpaScale
+    : typeof savedState.dock?.scale === 'number' &&
+        savedState.dock.scale >= 0.5 &&
+        savedState.dock.scale <= 1.25
+      ? savedState.dock.scale
+      : 1,
+);
+const penpaBlurOpacity = ref<number>(
+  typeof savedState.penpaBlurOpacity === 'number' &&
+    savedState.penpaBlurOpacity >= 0.2 &&
+    savedState.penpaBlurOpacity <= 1
+    ? savedState.penpaBlurOpacity
+    : 0.85,
+);
+const iframeInteractTick = ref(0);
+
+watch(
+  globalScale,
+  (s) => {
+    const clamped = Math.max(0.7, Math.min(1.5, Number.isFinite(s) ? s : 1));
+    document.documentElement.style.setProperty('--ac-ui-scale', String(clamped));
+  },
+  { immediate: true },
+);
+
 const overlayFullCanvas = ref(savedState.overlayFullCanvas ?? false);
 const fullCanvasEnabled = computed(
   () => backdropMode.value === 'canvas' || overlayFullCanvas.value,
@@ -217,26 +263,31 @@ const gridElements = computed<GridElement[]>(() =>
 );
 const primaryGrid = computed<GridElement>(() => gridElements.value[0]);
 
+// Stable DOM insertion order for template v-for so zIndex / group reordering NEVER detaches
+// live WebGL2 <canvas> or <video> elements (visual stacking is controlled via CSS zIndex).
+const visibleElementsStable = computed<WorldElement[]>(() =>
+  elements.value.filter((e) => e.visible && (fullCanvasEnabled.value || e.kind === 'grid')),
+);
+
 const sortedVisibleElements = computed<WorldElement[]>(() =>
-  [...elements.value]
-    .filter((e) => e.visible && (fullCanvasEnabled.value || e.kind === 'grid'))
-    .sort((a, b) => a.zIndex - b.zIndex),
+  [...visibleElementsStable.value].sort((a, b) => a.zIndex - b.zIndex),
 );
 
 function getGroupForElement(elementId: string): ElementGroup | null {
-  return groups.value.find((g) => g.memberIds.includes(elementId)) ?? null;
+  return getParentGroup(elementId, groups.value);
 }
 
 function resolveTargetId(id: string): string {
-  const g = getGroupForElement(id);
-  return g ? g.id : id;
+  return resolveTopLevelTargetId(id, groups.value);
 }
 
 function buildGroupTarget(g: ElementGroup): GroupSelectionTarget | null {
   const byId = new Map(elements.value.map((e) => [e.id, e]));
+  const elementIdSet = new Set(byId.keys());
+  const leafIds = getDescendantLeafIds(g.id, groups.value, elementIdSet);
   const members: WorldElement[] = [];
-  for (const mid of g.memberIds) {
-    const el = byId.get(mid);
+  for (const lid of leafIds) {
+    const el = byId.get(lid);
     if (el) members.push(el);
   }
   if (members.length < 2) return null;
@@ -256,7 +307,7 @@ function buildGroupTarget(g: ElementGroup): GroupSelectionTarget | null {
     id: g.id,
     kind: 'group',
     label: g.label,
-    memberIds: members.map((m) => m.id),
+    memberIds: [...g.memberIds],
     members,
     corners: computeCombinedWorldQuad(members),
     zIndex: maxZ,
@@ -269,19 +320,22 @@ function buildGroupTarget(g: ElementGroup): GroupSelectionTarget | null {
   };
 }
 
-// Top-level selectable targets (each group is ONE indivisible entry; ungrouped elements are individual entries)
+// Top-level selectable targets (each top-level group is ONE indivisible entry; nested child groups stay inside)
 const allLayerTargets = computed<SelectableTarget[]>(() => {
-  const groupedMemberSet = new Set<string>();
+  const childIdSet = new Set<string>();
+  for (const g of groups.value) {
+    for (const mid of g.memberIds) childIdSet.add(mid);
+  }
   const targets: SelectableTarget[] = [];
   for (const g of groups.value) {
+    if (childIdSet.has(g.id)) continue; // nested inside a parent group
     const gt = buildGroupTarget(g);
     if (gt) {
       targets.push(gt);
-      for (const mid of gt.memberIds) groupedMemberSet.add(mid);
     }
   }
   for (const el of elements.value) {
-    if (!groupedMemberSet.has(el.id)) {
+    if (!childIdSet.has(el.id)) {
       targets.push(el);
     }
   }
@@ -316,10 +370,12 @@ watch(alwaysOnTop, (pinned) => {
 });
 
 function startCropMode(id: string) {
-  if (getGroupForElement(id)) return;
+  if (fullCanvasEnabled.value && (getGroupForElement(id) || groups.value.some((g) => g.id === id))) {
+    return;
+  }
   const el = elements.value.find((e) => e.id === id);
   if (!el || el.locked || !el.visible) return;
-  selectedTargetIds.value = [id];
+  selectedTargetIds.value = [el.id];
   cropDraft.value = createCropDraft(el);
 }
 
@@ -353,7 +409,7 @@ watch(fullCanvasEnabled, (enabled) => {
     layersVisible.value = false;
     if (cropDraft.value) {
       const target = elements.value.find((e) => e.id === cropDraft.value?.elementId);
-      if (target && target.kind !== 'grid') cancelCropDraft();
+      if (!target || target.kind !== 'grid') cancelCropDraft();
     }
     const validGridIds = new Set(gridElements.value.map((g) => g.id));
     const filtered = selectedTargetIds.value.filter((id) => validGridIds.has(id));
@@ -560,24 +616,60 @@ function selectElement(id: string | null, additive = false) {
 }
 
 function pruneInvalidGroups() {
-  const validIds = new Set(elements.value.map((e) => e.id));
-  const nextGroups: ElementGroup[] = [];
-  let changed = false;
-  for (const g of groups.value) {
-    const kept = g.memberIds.filter((mid) => validIds.has(mid));
-    if (kept.length >= 2) {
-      if (kept.length !== g.memberIds.length) {
-        changed = true;
-        nextGroups.push({ ...g, memberIds: kept });
-      } else {
-        nextGroups.push(g);
+  const validElementIds = new Set(elements.value.map((e) => e.id));
+  let curGroups = groups.value.map((g) => ({ ...g, memberIds: [...g.memberIds] }));
+  let anyChanged = false;
+
+  for (let pass = 0; pass < 32; pass++) {
+    const validGroupIds = new Set(curGroups.map((g) => g.id));
+    const dissolvedPromote = new Map<string, string | null>();
+    let passChanged = false;
+
+    for (const g of curGroups) {
+      const seen = new Set<string>();
+      const kept: string[] = [];
+      for (const mid of g.memberIds) {
+        if (mid === g.id || seen.has(mid)) {
+          passChanged = true;
+          continue;
+        }
+        if (validElementIds.has(mid) || validGroupIds.has(mid)) {
+          seen.add(mid);
+          kept.push(mid);
+        } else {
+          passChanged = true;
+        }
       }
-    } else {
-      changed = true;
+      g.memberIds = kept;
+      if (kept.length < 2) {
+        dissolvedPromote.set(g.id, kept.length === 1 ? kept[0] : null);
+        passChanged = true;
+      }
     }
+
+    if (dissolvedPromote.size > 0) {
+      curGroups = curGroups
+        .filter((g) => !dissolvedPromote.has(g.id))
+        .map((g) => {
+          const nextIds: string[] = [];
+          for (const mid of g.memberIds) {
+            if (dissolvedPromote.has(mid)) {
+              const promoted = dissolvedPromote.get(mid);
+              if (promoted) nextIds.push(promoted);
+            } else {
+              nextIds.push(mid);
+            }
+          }
+          return { ...g, memberIds: nextIds };
+        });
+    }
+
+    if (passChanged) anyChanged = true;
+    else break;
   }
-  if (changed) {
-    groups.value = nextGroups;
+
+  if (anyChanged) {
+    groups.value = curGroups;
   }
 }
 
@@ -605,46 +697,48 @@ function groupSelectedTargets() {
   const targets = selectedTargets.value;
   if (targets.length < 2) return;
 
-  const memberIds: string[] = [];
-  const seen = new Set<string>();
-  const absorbedGroupIds = new Set<string>();
+  // True nested ("套娃") grouping: keep child groups intact instead of flattening!
   const sortedTargets = [...targets].sort((a, b) => a.zIndex - b.zIndex);
+  const directMemberIds = sortedTargets.map((t) => t.id);
 
-  for (const t of sortedTargets) {
-    if (t.kind === 'group') {
-      absorbedGroupIds.add(t.id);
-      const sortedMembers = [...t.members].sort((a, b) => a.zIndex - b.zIndex);
-      for (const m of sortedMembers) {
-        if (!seen.has(m.id)) {
-          seen.add(m.id);
-          memberIds.push(m.id);
-        }
-      }
-    } else if (!seen.has(t.id)) {
-      seen.add(t.id);
-      memberIds.push(t.id);
-    }
-  }
-
-  if (memberIds.length < 2) return;
   cancelCropDraft();
 
   const newGroup: ElementGroup = {
     id: generateGroupId(),
     label: '',
-    memberIds,
+    memberIds: directMemberIds,
     visible: true,
     locked: false,
     passThrough: false,
   };
 
-  // Unlock & show all members when creating a new group so the group can be moved immediately
-  elements.value = elements.value.map((el) =>
-    seen.has(el.id) ? ({ ...el, visible: true, locked: false, passThrough: false } as WorldElement) : el,
-  );
-  groups.value = [...groups.value.filter((g) => !absorbedGroupIds.has(g.id)), newGroup];
+  const descendantGroupIds = new Set<string>();
+  const descendantLeafIds = new Set<string>();
+  for (const t of sortedTargets) {
+    if (t.kind === 'group') {
+      for (const gid of getDescendantGroupIds(t.id, groups.value)) descendantGroupIds.add(gid);
+      for (const m of t.members) descendantLeafIds.add(m.id);
+    } else {
+      descendantLeafIds.add(t.id);
+    }
+  }
 
-  // Make the grouped members contiguous in zIndex at the top member's slot
+  // Unlock & show all nested descendants without touching their corners, quadMode, or crop!
+  elements.value = elements.value.map((el) =>
+    descendantLeafIds.has(el.id)
+      ? ({ ...el, visible: true, locked: false, passThrough: false } as WorldElement)
+      : el,
+  );
+  groups.value = [
+    ...groups.value.map((g) =>
+      descendantGroupIds.has(g.id)
+        ? { ...g, visible: true, locked: false, passThrough: false }
+        : g,
+    ),
+    newGroup,
+  ];
+
+  // Make all grouped descendant leaves contiguous in zIndex at the group's slot
   const ordered = [...allLayerTargets.value];
   applyLayerTargetOrder(ordered);
   clearHoverLocked();
@@ -654,9 +748,18 @@ function groupSelectedTargets() {
 function ungroupTarget(groupId: string) {
   const grp = groups.value.find((g) => g.id === groupId);
   if (!grp) return;
-  groups.value = groups.value.filter((g) => g.id !== groupId);
-  const validIds = new Set(elements.value.map((e) => e.id));
-  const released = grp.memberIds.filter((mid) => validIds.has(mid));
+  if (cropDraft.value?.elementId === groupId) cancelCropDraft();
+
+  // Remove ONLY the outer group modifier; every direct child (leaf or nested child group)
+  // immediately restores 100% to its exact untouched original geometry & crop!
+  const remainingGroups = groups.value.filter((g) => g.id !== groupId);
+  groups.value = remainingGroups;
+
+  const validElementIds = new Set(elements.value.map((e) => e.id));
+  const validGroupIds = new Set(remainingGroups.map((g) => g.id));
+  const released = grp.memberIds.filter(
+    (mid) => validElementIds.has(mid) || validGroupIds.has(mid),
+  );
   if (hoveredLockedId.value === groupId) clearHoverLocked();
   selectedTargetIds.value = grp.locked ? [] : released;
 }
@@ -664,11 +767,19 @@ function ungroupTarget(groupId: string) {
 function handleLockElement(id: string) {
   const grp = groups.value.find((g) => g.id === id);
   if (grp) {
-    const memberSet = new Set(grp.memberIds);
-    if (cropDraft.value && memberSet.has(cropDraft.value.elementId)) cancelCropDraft();
-    groups.value = groups.value.map((g) => (g.id === id ? { ...g, locked: true } : g));
+    const descGroupIds = new Set(getDescendantGroupIds(grp.id, groups.value));
+    const descLeafIds = new Set(
+      getDescendantLeafIds(grp.id, groups.value, new Set(elements.value.map((e) => e.id))),
+    );
+    if (
+      cropDraft.value &&
+      (descGroupIds.has(cropDraft.value.elementId) || descLeafIds.has(cropDraft.value.elementId))
+    ) {
+      cancelCropDraft();
+    }
+    groups.value = groups.value.map((g) => (descGroupIds.has(g.id) ? { ...g, locked: true } : g));
     elements.value = elements.value.map((el) =>
-      memberSet.has(el.id) ? ({ ...el, locked: true } as WorldElement) : el,
+      descLeafIds.has(el.id) ? ({ ...el, locked: true } as WorldElement) : el,
     );
     if (selectedTargetIds.value.length > 1 && selectedTargetIds.value.includes(id)) {
       selectedTargetIds.value = selectedTargetIds.value.filter((x) => x !== id);
@@ -689,12 +800,15 @@ function handleLockElement(id: string) {
 function handleUnlockElement(id: string) {
   const grp = groups.value.find((g) => g.id === id);
   if (grp) {
-    const memberSet = new Set(grp.memberIds);
+    const descGroupIds = new Set(getDescendantGroupIds(grp.id, groups.value));
+    const descLeafIds = new Set(
+      getDescendantLeafIds(grp.id, groups.value, new Set(elements.value.map((e) => e.id))),
+    );
     groups.value = groups.value.map((g) =>
-      g.id === id ? { ...g, locked: false, passThrough: false } : g,
+      descGroupIds.has(g.id) ? { ...g, locked: false, passThrough: false } : g,
     );
     elements.value = elements.value.map((el) =>
-      memberSet.has(el.id) ? ({ ...el, locked: false, passThrough: false } as WorldElement) : el,
+      descLeafIds.has(el.id) ? ({ ...el, locked: false, passThrough: false } as WorldElement) : el,
     );
     clearHoverLocked();
     selectedTargetIds.value = [id];
@@ -713,6 +827,83 @@ function updateElement(id: string, patch: Partial<WorldElement>) {
   );
 }
 
+function updateGroup(id: string, patch: Partial<ElementGroup>) {
+  groups.value = groups.value.map((g) => (g.id === id ? { ...g, ...patch } : g));
+}
+
+// Session-baseline snapshot for drift-free group rect scaling applied directly to descendant leaves
+let activeGroupResizeSnapshot: {
+  groupId: string;
+  baseRect: Rect2D;
+  leafCorners: Map<string, [Point2D, Point2D, Point2D, Point2D]>;
+} | null = null;
+
+function handleResizeStart(id: string) {
+  const grp = groups.value.find((g) => g.id === id);
+  if (!grp) {
+    activeGroupResizeSnapshot = null;
+    return;
+  }
+  const gt = buildGroupTarget(grp);
+  if (!gt) {
+    activeGroupResizeSnapshot = null;
+    return;
+  }
+  const leafCorners = new Map<string, [Point2D, Point2D, Point2D, Point2D]>();
+  for (const m of gt.members) {
+    leafCorners.set(m.id, cloneQuad(m.corners));
+  }
+  activeGroupResizeSnapshot = {
+    groupId: id,
+    baseRect: quadToBoundingRect(gt.corners, 1),
+    leafCorners,
+  };
+}
+
+function handleResizeEnd() {
+  activeGroupResizeSnapshot = null;
+}
+
+function applyGroupRectScale(groupId: string, nextCorners: [Point2D, Point2D, Point2D, Point2D]) {
+  if (!activeGroupResizeSnapshot || activeGroupResizeSnapshot.groupId !== groupId) {
+    handleResizeStart(groupId);
+  }
+  const snap = activeGroupResizeSnapshot;
+  if (!snap || snap.leafCorners.size === 0) return;
+
+  const oldRect = snap.baseRect;
+  const newRect = quadToBoundingRect(nextCorners, 48);
+  const oldW = Math.max(1, oldRect.w);
+  const oldH = Math.max(1, oldRect.h);
+  const mapPt = (p: Point2D): Point2D => ({
+    x: newRect.x + ((p.x - oldRect.x) / oldW) * newRect.w,
+    y: newRect.y + ((p.y - oldRect.y) / oldH) * newRect.h,
+  });
+
+  elements.value = elements.value.map((el) => {
+    const base = snap.leafCorners.get(el.id);
+    if (!base) return el;
+    return {
+      ...el,
+      corners: [mapPt(base[0]), mapPt(base[1]), mapPt(base[2]), mapPt(base[3])],
+    } as WorldElement;
+  });
+}
+
+function updateTarget(id: string, patch: Partial<WorldElement>) {
+  const grp = groups.value.find((g) => g.id === id);
+  if (grp) {
+    if (patch.corners) {
+      applyGroupRectScale(id, patch.corners);
+    }
+    if (typeof patch.label === 'string') {
+      updateGroup(id, { label: patch.label });
+    }
+    return;
+  }
+  updateElement(id, patch);
+}
+
 function focusMultiMember(id: string) {
   const targetId = fullCanvasEnabled.value ? resolveTargetId(id) : id;
   if (!selectedTargetIds.value.includes(targetId)) return;
@@ -726,69 +917,67 @@ function focusMultiMember(id: string) {
 function renameTarget(id: string, nextLabel: string) {
   const grp = groups.value.find((g) => g.id === id);
   if (grp) {
-    groups.value = groups.value.map((g) => (g.id === id ? { ...g, label: nextLabel } : g));
+    updateGroup(id, { label: nextLabel });
     return;
   }
   updateElement(id, { label: nextLabel });
 }
 
-function updateElementCorners(id: string, corners: [Point2D, Point2D, Point2D, Point2D]) {
-  const source = elements.value.find((e) => e.id === id);
-  if (!source) return;
+// Session-baseline translation snapshot: translates descendant leaf elements directly with zero drift!
+let activeMoveSnapshot: Map<string, [Point2D, Point2D, Point2D, Point2D]> | null = null;
 
-  // Multi-selection drag: translate ALL unlocked members of ALL selected targets together!
-  if (selectedTargetIds.value.length >= 2 && isElementVisuallySelected(id)) {
-    const dx = corners[0].x - source.corners[0].x;
-    const dy = corners[0].y - source.corners[0].y;
-    const moveIds = new Set<string>();
-    for (const target of selectedTargets.value) {
-      if (target.locked) continue;
-      if (target.kind === 'group') {
-        for (const m of target.members) {
-          if (!m.locked) moveIds.add(m.id);
-        }
-      } else {
-        moveIds.add(target.id);
+function handleMoveStart(leafId: string) {
+  const elMap = new Map<string, [Point2D, Point2D, Point2D, Point2D]>();
+
+  const captureTarget = (t: SelectableTarget) => {
+    if (t.locked) return;
+    if (t.kind === 'group') {
+      for (const m of t.members) {
+        if (!m.locked) elMap.set(m.id, cloneQuad(m.corners));
       }
+    } else {
+      elMap.set(t.id, cloneQuad(t.corners));
     }
-    if (moveIds.size > 0) {
-      elements.value = elements.value.map((el) => {
-        if (!moveIds.has(el.id)) return el;
-        const c = el.corners;
-        return {
-          ...el,
-          corners: [
-            { x: c[0].x + dx, y: c[0].y + dy },
-            { x: c[1].x + dx, y: c[1].y + dy },
-            { x: c[2].x + dx, y: c[2].y + dy },
-            { x: c[3].x + dx, y: c[3].y + dy },
-          ],
-        } as WorldElement;
-      });
-      return;
+  };
+
+  if (selectedTargetIds.value.length >= 2 && isElementVisuallySelected(leafId)) {
+    for (const target of selectedTargets.value) {
+      captureTarget(target);
     }
+  } else {
+    const targetId = fullCanvasEnabled.value ? resolveTargetId(leafId) : leafId;
+    const target = activeLayerTargets.value.find((t) => t.id === targetId);
+    if (target) captureTarget(target);
   }
 
-  const grp = fullCanvasEnabled.value ? getGroupForElement(id) : null;
-  if (grp) {
-    const dx = corners[0].x - source.corners[0].x;
-    const dy = corners[0].y - source.corners[0].y;
-    const memberSet = new Set(grp.memberIds);
-    elements.value = elements.value.map((el) => {
-      if (!memberSet.has(el.id)) return el;
-      const c = el.corners;
-      return {
-        ...el,
-        corners: [
-          { x: c[0].x + dx, y: c[0].y + dy },
-          { x: c[1].x + dx, y: c[1].y + dy },
-          { x: c[2].x + dx, y: c[2].y + dy },
-          { x: c[3].x + dx, y: c[3].y + dy },
-        ],
-      } as WorldElement;
-    });
-    return;
-  }
+  activeMoveSnapshot = elMap;
+}
+
+function handleTranslateBy(leafId: string, dxWorld: number, dyWorld: number) {
+  if (!activeMoveSnapshot) handleMoveStart(leafId);
+  if (!activeMoveSnapshot || activeMoveSnapshot.size === 0) return;
+
+  const snap = activeMoveSnapshot;
+  elements.value = elements.value.map((el) => {
+    const b = snap.get(el.id);
+    if (!b) return el;
+    return {
+      ...el,
+      corners: [
+        { x: b[0].x + dxWorld, y: b[0].y + dyWorld },
+        { x: b[1].x + dxWorld, y: b[1].y + dyWorld },
+        { x: b[2].x + dxWorld, y: b[2].y + dyWorld },
+        { x: b[3].x + dxWorld, y: b[3].y + dyWorld },
+      ],
+    } as WorldElement;
+  });
+}
+
+function handleMoveEnd() {
+  activeMoveSnapshot = null;
+}
+
+function updateElementCorners(id: string, corners: [Point2D, Point2D, Point2D, Point2D]) {
   updateElement(id, { corners });
 }
 
@@ -865,12 +1054,18 @@ function toggleElementVisible(id: string) {
   const grp = groups.value.find((g) => g.id === id);
   if (grp) {
     const nextVis = !grp.visible;
-    const memberSet = new Set(grp.memberIds);
-    groups.value = groups.value.map((g) => (g.id === id ? { ...g, visible: nextVis } : g));
+    const descGroupIds = new Set(getDescendantGroupIds(grp.id, groups.value));
+    const descLeafIds = new Set(
+      getDescendantLeafIds(grp.id, groups.value, new Set(elements.value.map((e) => e.id))),
+    );
+    groups.value = groups.value.map((g) =>
+      descGroupIds.has(g.id) ? { ...g, visible: nextVis } : g,
+    );
     elements.value = elements.value.map((el) =>
-      memberSet.has(el.id) ? ({ ...el, visible: nextVis } as WorldElement) : el,
+      descLeafIds.has(el.id) ? ({ ...el, visible: nextVis } as WorldElement) : el,
     );
     if (!nextVis) {
+      if (cropDraft.value?.elementId === id) cancelCropDraft();
       selectedTargetIds.value = selectedTargetIds.value.filter((x) => x !== id);
     }
     return;
@@ -880,6 +1075,7 @@ function toggleElementVisible(id: string) {
   const nextVis = !el.visible;
   updateElement(id, { visible: nextVis });
   if (!nextVis) {
+    if (cropDraft.value?.elementId === id) cancelCropDraft();
     selectedTargetIds.value = selectedTargetIds.value.filter((x) => x !== id);
   }
 }
@@ -905,10 +1101,15 @@ function toggleElementPassThrough(id: string) {
   if (grp) {
     if (!grp.locked) return;
     const nextPt = !grp.passThrough;
-    const memberSet = new Set(grp.memberIds);
-    groups.value = groups.value.map((g) => (g.id === id ? { ...g, passThrough: nextPt } : g));
+    const descGroupIds = new Set(getDescendantGroupIds(grp.id, groups.value));
+    const descLeafIds = new Set(
+      getDescendantLeafIds(grp.id, groups.value, new Set(elements.value.map((e) => e.id))),
+    );
+    groups.value = groups.value.map((g) =>
+      descGroupIds.has(g.id) ? { ...g, passThrough: nextPt } : g,
+    );
     elements.value = elements.value.map((el) =>
-      memberSet.has(el.id) ? ({ ...el, passThrough: nextPt } as WorldElement) : el,
+      descLeafIds.has(el.id) ? ({ ...el, passThrough: nextPt } as WorldElement) : el,
     );
     return;
   }
@@ -920,8 +1121,11 @@ function toggleElementPassThrough(id: string) {
 function toggleGridDock(id: string) {
   const grp = groups.value.find((g) => g.id === id);
   if (grp) {
+    const descLeafIds = new Set(
+      getDescendantLeafIds(grp.id, groups.value, new Set(elements.value.map((e) => e.id))),
+    );
     const grids = elements.value.filter(
-      (e): e is GridElement => e.kind === 'grid' && grp.memberIds.includes(e.id),
+      (e): e is GridElement => e.kind === 'grid' && descLeafIds.has(e.id),
     );
     if (grids.length === 0) return;
     const nextDock = !grids.some((g) => g.dockVisible);
@@ -954,19 +1158,30 @@ function disposeMediaElementResources(el: WorldElement) {
 function removeElement(id: string) {
   const grp = groups.value.find((g) => g.id === id);
   if (grp) {
-    const memberSet = new Set(grp.memberIds);
-    const members = elements.value.filter((e) => memberSet.has(e.id));
-    // Never delete a group that contains a Penpa+ grid
+    const descGroupIds = new Set(getDescendantGroupIds(grp.id, groups.value));
+    const descLeafIds = new Set(
+      getDescendantLeafIds(grp.id, groups.value, new Set(elements.value.map((e) => e.id))),
+    );
+    const members = elements.value.filter((e) => descLeafIds.has(e.id));
+    // Never delete a group that contains a Penpa+ grid at any nesting depth
     if (members.some((m) => m.kind === 'grid')) return;
+    if (
+      cropDraft.value &&
+      (descGroupIds.has(cropDraft.value.elementId) || descLeafIds.has(cropDraft.value.elementId))
+    ) {
+      cancelCropDraft();
+    }
     for (const m of members) disposeMediaElementResources(m);
-    groups.value = groups.value.filter((g) => g.id !== id);
-    elements.value = elements.value.filter((e) => !memberSet.has(e.id));
-    selectedTargetIds.value = selectedTargetIds.value.filter((x) => x !== id);
+    groups.value = groups.value.filter((g) => !descGroupIds.has(g.id));
+    elements.value = elements.value.filter((e) => !descLeafIds.has(e.id));
+    pruneInvalidGroups();
+    selectedTargetIds.value = selectedTargetIds.value.filter((x) => !descGroupIds.has(x));
     return;
   }
 
   const el = elements.value.find((e) => e.id === id);
   if (!el || el.kind === 'grid') return;
+  if (cropDraft.value?.elementId === id) cancelCropDraft();
   disposeMediaElementResources(el);
   elements.value = elements.value.filter((e) => e.id !== id);
   pruneInvalidGroups();
@@ -981,6 +1196,9 @@ function removeElement(id: string) {
       canvasViewport,
       layersVisible,
       buttonDisplayMode,
+      globalScale,
+      penpaScale,
+      penpaBlurOpacity,
       overlayFullCanvas,
       showUnavailableOptions,
       customCssEnabled,
@@ -1003,6 +1221,9 @@ function removeElement(id: string) {
         canvasVisible: g.visible,
         layersWindow: { xRatio: 0, yRatio: 0, open: layersVisible.value },
         buttonDisplayMode: buttonDisplayMode.value,
+        globalScale: globalScale.value,
+        penpaScale: penpaScale.value,
+        penpaBlurOpacity: penpaBlurOpacity.value,
         overlayFullCanvas: overlayFullCanvas.value,
         showUnavailableOptions: showUnavailableOptions.value,
         worldCorners: cloneQuad(g.corners),
@@ -1164,6 +1385,26 @@ async function syncOverlayHitRegions() {
     }
   }
 
+  // Active unlocked transform/crop gizmo quad: gives its 4 edges & 4 corners an explicit OS touchable
+  // border strip in Overlay mode (essential for Groups whose bounding corners/edges may lie outside
+  // every individual child element), while keeping hollow interiors pass-through.
+  let gizmoQuad: [Point2D, Point2D, Point2D, Point2D] | null = null;
+  if (cropDraft.value) {
+    gizmoQuad = worldQuadToViewport(
+      rectToQuad(cropDraft.value.croppedRect),
+      effectiveViewportTransform.value,
+    );
+  } else if (
+    singleSelectedTarget.value &&
+    singleSelectedTarget.value.visible &&
+    !singleSelectedTarget.value.locked
+  ) {
+    gizmoQuad = worldQuadToViewport(
+      singleSelectedTarget.value.corners,
+      effectiveViewportTransform.value,
+    );
+  }
+
   if (platform === 'tauri') {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
@@ -1174,6 +1415,7 @@ async function syncOverlayHitRegions() {
         dockRect: primaryDock,
         uiRects: extraUiRects,
         quads: interactiveQuads,
+        gizmoQuad,
       });
     } catch {
       // Non-fatal in web/dev fallback
@@ -1184,12 +1426,13 @@ async function syncOverlayHitRegions() {
   if (platform === 'android-overlay' && window.AndroidOverlay?.updateHitRegions) {
     let boardRect = { x: 0, y: 0, w: 0, h: 0 };
     const androidHandlePts: Point2D[] = [];
-    if (interactiveQuads.length > 0) {
+    const boundsQuads = gizmoQuad ? [...interactiveQuads, gizmoQuad] : interactiveQuads;
+    if (boundsQuads.length > 0) {
       let minX = Infinity;
       let minY = Infinity;
       let maxX = -Infinity;
       let maxY = -Infinity;
-      for (const q of interactiveQuads) {
+      for (const q of boundsQuads) {
         for (const p of q) {
           if (p.x < minX) minX = p.x;
           if (p.y < minY) minY = p.y;
@@ -1197,7 +1440,7 @@ async function syncOverlayHitRegions() {
           if (p.y > maxY) maxY = p.y;
         }
       }
-      const pad = selectedElement.value && !selectedElement.value.locked ? 26 : 10;
+      const pad = gizmoQuad ? 26 : 10;
       if (isFinite(minX) && maxX > minX && maxY > minY) {
         boardRect = {
           x: Math.max(0, minX - pad),
@@ -1207,14 +1450,13 @@ async function syncOverlayHitRegions() {
         };
       }
     }
-    if (selectedElement.value && !selectedElement.value.locked && !isElementPassThrough(selectedElement.value)) {
-      const c = worldQuadToViewport(selectedElement.value.corners, effectiveViewportTransform.value);
+    if (gizmoQuad) {
       androidHandlePts.push(
-        ...c,
-        { x: (c[0].x + c[1].x) * 0.5, y: (c[0].y + c[1].y) * 0.5 },
-        { x: (c[1].x + c[2].x) * 0.5, y: (c[1].y + c[2].y) * 0.5 },
-        { x: (c[2].x + c[3].x) * 0.5, y: (c[2].y + c[3].y) * 0.5 },
-        { x: (c[3].x + c[0].x) * 0.5, y: (c[3].y + c[0].y) * 0.5 },
+        ...gizmoQuad,
+        { x: (gizmoQuad[0].x + gizmoQuad[1].x) * 0.5, y: (gizmoQuad[0].y + gizmoQuad[1].y) * 0.5 },
+        { x: (gizmoQuad[1].x + gizmoQuad[2].x) * 0.5, y: (gizmoQuad[1].y + gizmoQuad[2].y) * 0.5 },
+        { x: (gizmoQuad[2].x + gizmoQuad[3].x) * 0.5, y: (gizmoQuad[2].y + gizmoQuad[3].y) * 0.5 },
+        { x: (gizmoQuad[3].x + gizmoQuad[0].x) * 0.5, y: (gizmoQuad[3].y + gizmoQuad[0].y) * 0.5 },
       );
     }
 
@@ -1229,6 +1471,7 @@ async function syncOverlayHitRegions() {
       uiRects: extraUiRects,
       boardRect,
       quads: interactiveQuads,
+      gizmoQuad,
       corners: androidHandlePts,
     };
     try {
@@ -1254,6 +1497,7 @@ watch(
     unavailableReasonKey,
     layersVisible,
     selectedTargetIds,
+    cropDraft,
     hoveredLockedId,
     barRect,
     toolbarRect,
@@ -1348,40 +1592,88 @@ async function hydratePersistedImages() {
   if (restored.length > 0) {
     elements.value = [...elements.value, ...restored];
   }
-  // Restore persisted element groups once all images are hydrated
+  // Restore persisted nested element groups once all images are hydrated
   const savedGroups = savedState.elementGroups;
   if (Array.isArray(savedGroups) && savedGroups.length > 0) {
-    const validIds = new Set(elements.value.map((e) => e.id));
-    const usedMembers = new Set<string>();
-    const restoredGroups: ElementGroup[] = [];
+    const elById = new Map(elements.value.map((e) => [e.id, e]));
+    const rawById = new Map<string, (typeof savedGroups)[number]>();
     for (const rawG of savedGroups) {
-      if (!rawG || typeof rawG.id !== 'string' || !Array.isArray(rawG.memberIds)) continue;
-      const memberIds = rawG.memberIds.filter(
-        (mid): mid is string => typeof mid === 'string' && validIds.has(mid) && !usedMembers.has(mid),
-      );
-      if (memberIds.length < 2) continue;
-      memberIds.forEach((mid) => usedMembers.add(mid));
-      restoredGroups.push({
+      if (rawG && typeof rawG.id === 'string' && Array.isArray(rawG.memberIds)) {
+        rawById.set(rawG.id, rawG);
+      }
+    }
+
+    const usedChildren = new Set<string>();
+    const restoredMap = new Map<string, ElementGroup>();
+    const visiting = new Set<string>();
+
+    const restoreGroupRec = (gid: string): ElementGroup | null => {
+      if (restoredMap.has(gid)) return restoredMap.get(gid)!;
+      if (visiting.has(gid)) return null; // cycle guard
+      const rawG = rawById.get(gid);
+      if (!rawG) return null;
+      visiting.add(gid);
+
+      const memberIds: string[] = [];
+      for (const mid of rawG.memberIds) {
+        if (typeof mid !== 'string' || mid === gid || usedChildren.has(mid)) continue;
+        if (elById.has(mid)) {
+          memberIds.push(mid);
+        } else if (rawById.has(mid)) {
+          const childGrp = restoreGroupRec(mid);
+          if (childGrp) {
+            memberIds.push(mid);
+          }
+        }
+      }
+      visiting.delete(gid);
+      if (memberIds.length < 2) return null;
+      memberIds.forEach((mid) => usedChildren.add(mid));
+
+      const grp: ElementGroup = {
         id: rawG.id,
         label: typeof rawG.label === 'string' ? rawG.label : '',
         memberIds,
         visible: rawG.visible !== false,
         locked: !!rawG.locked,
         passThrough: !!rawG.passThrough,
-      });
+      };
+      restoredMap.set(gid, grp);
+      return grp;
+    };
+
+    for (const rawG of savedGroups) {
+      if (rawG && typeof rawG.id === 'string') {
+        restoreGroupRec(rawG.id);
+      }
     }
+
+    const restoredGroups = Array.from(restoredMap.values());
     if (restoredGroups.length > 0) {
       groups.value = restoredGroups;
-      // Ensure member states stay synchronized with their group
-      const groupByMember = new Map<string, ElementGroup>();
+      // Sync top-level group visible/locked/passThrough states down to all nested descendants
+      const childIds = new Set<string>();
       for (const grp of restoredGroups) {
-        for (const mid of grp.memberIds) groupByMember.set(mid, grp);
+        for (const mid of grp.memberIds) childIds.add(mid);
       }
+      const elementIdSet = new Set(elById.keys());
+      const leafOverride = new Map<string, { visible: boolean; locked: boolean; passThrough: boolean }>();
+      const groupOverride = new Map<string, { visible: boolean; locked: boolean; passThrough: boolean }>();
+      for (const grp of restoredGroups) {
+        if (childIds.has(grp.id)) continue;
+        const st = { visible: grp.visible, locked: grp.locked, passThrough: grp.passThrough };
+        for (const gid of getDescendantGroupIds(grp.id, restoredGroups)) groupOverride.set(gid, st);
+        for (const lid of getDescendantLeafIds(grp.id, restoredGroups, elementIdSet)) {
+          leafOverride.set(lid, st);
+        }
+      }
+      groups.value = restoredGroups.map((g) => {
+        const st = groupOverride.get(g.id);
+        return st ? { ...g, ...st } : g;
+      });
       elements.value = elements.value.map((el) => {
-        const grp = groupByMember.get(el.id);
-        return grp
-          ? ({ ...el, visible: grp.visible, locked: grp.locked, passThrough: grp.passThrough } as WorldElement)
-          : el;
+        const st = leafOverride.get(el.id);
+        return st ? ({ ...el, ...st } as WorldElement) : el;
       });
     }
   }
@@ -2023,7 +2315,28 @@ function onWindowContextMenu(e: MouseEvent) {
   }
 }
 
+// Unified click-outside deselection: clicking ANY surface outside the selected canvas element(s),
+// their transform gizmo/toolbar, or the Layers table rows immediately cancels selection.
+function onGlobalPointerDownDeselect(e: PointerEvent) {
+  if (e.button === 1) return; // keep selection when middle-mouse panning
+  if (selectedTargetIds.value.length === 0 && !cropDraft.value) return;
+  const target = e.target instanceof Element ? e.target : null;
+  if (!target) {
+    selectElement(null);
+    return;
+  }
+  if (
+    target.closest(
+      '.ac-gizmo-layer, .ac-canvas-item, .ac-crop-ghost, .ac-draw-hit-poly, .ac-layers-scroll',
+    )
+  ) {
+    return;
+  }
+  selectElement(null);
+}
+
 onMounted(async () => {
+  window.addEventListener('pointerdown', onGlobalPointerDownDeselect, true);
   window.addEventListener('paste', onPaste);
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
@@ -2088,6 +2401,12 @@ onMounted(async () => {
     }
     return true;
   };
+  window.__PENPAANYWHERE_ON_IFRAME_INTERACT__ = () => {
+    iframeInteractTick.value++;
+    if (selectedTargetIds.value.length > 0 || cropDraft.value) {
+      selectElement(null);
+    }
+  };
 
   isDebugBuild = await getIsDebugBuild();
   window.__PENPAANYWHERE_IS_DEBUG__ = isDebugBuild;
@@ -2128,6 +2447,7 @@ onBeforeUnmount(() => {
   unlistenWindowFocus?.();
   unlistenWindowFocus = null;
   delete window.__PENPAANYWHERE_TOGGLE_DEVTOOLS__;
+  delete window.__PENPAANYWHERE_ON_IFRAME_INTERACT__;
   delete window.__PENPAANYWHERE_OPEN_EXTERNAL__;
   delete window.__PENPAANYWHERE_DOWNLOAD__;
   delete window.__PENPAANYWHERE_PREVIEW_IMAGE__;
@@ -2135,6 +2455,7 @@ onBeforeUnmount(() => {
     window.clearTimeout(toastTimer);
     toastTimer = 0;
   }
+  window.removeEventListener('pointerdown', onGlobalPointerDownDeselect, true);
   window.removeEventListener('paste', onPaste);
   window.removeEventListener('keydown', onKeyDown);
   window.removeEventListener('keyup', onKeyUp);
@@ -2186,8 +2507,8 @@ onBeforeUnmount(() => {
       @select="(id) => selectElement(id, false)"
     />
 
-    <!-- Unified World Elements rendered as direct siblings in true shared zIndex order (BOTH Overlay & Canvas modes!) -->
-    <template v-for="el in sortedVisibleElements" :key="el.id">
+    <!-- Unified World Elements rendered as direct siblings in stable DOM order (true shared zIndex via CSS!) -->
+    <template v-for="el in visibleElementsStable" :key="el.id">
       <PerspectiveOverlay
         v-if="el.kind === 'grid'"
         :ref="(inst) => setOverlayRef(el.id, inst as InstanceType<typeof PerspectiveOverlay> | null)"
@@ -2203,6 +2524,9 @@ onBeforeUnmount(() => {
         :space-panning="backdropMode === 'canvas' && spacePanning"
         @select="selectElement"
         @focus-multi-member="focusMultiMember"
+        @move-start="handleMoveStart"
+        @translate-by="handleTranslateBy"
+        @move-end="handleMoveEnd"
         @update-corners="updateElementCorners"
         @update-crop-draft="updateCropDraft"
         @toggle-crop="(id) => { if (fullCanvasEnabled && getGroupForElement(id)) return; cropDraft?.elementId === id ? cancelCropDraft() : startCropMode(id); }"
@@ -2222,6 +2546,9 @@ onBeforeUnmount(() => {
         :space-panning="backdropMode === 'canvas' && spacePanning"
         @select="selectElement"
         @focus-multi-member="focusMultiMember"
+        @move-start="handleMoveStart"
+        @translate-by="handleTranslateBy"
+        @move-end="handleMoveEnd"
         @update-corners="updateElementCorners"
         @update-crop-draft="updateCropDraft"
         @update-natural-size="handleMediaNaturalSizeChange"
@@ -2239,7 +2566,9 @@ onBeforeUnmount(() => {
       :show-layer-order-actions="fullCanvasEnabled"
       :button-display-mode="buttonDisplayMode"
       :grid-bounds="selectedElement?.kind === 'grid' ? gridBoundsMap.get(selectedElement.id) : undefined"
-      @update-element="updateElement"
+      @resize-start="handleResizeStart"
+      @resize-end="handleResizeEnd"
+      @update-element="updateTarget"
       @update-quad-mode="updateElementQuadMode"
       @reset-size="resetElementSize"
       @start-crop="startCropMode"
@@ -2270,6 +2599,10 @@ onBeforeUnmount(() => {
       :board-opacity="grid.opacity"
       :enhance-opacity="grid.enhanceOpacity"
       :show-unavailable-options="showUnavailableOptions"
+      :global-scale="globalScale"
+      :penpa-scale="penpaScale"
+      :blur-opacity="penpaBlurOpacity"
+      :iframe-interact-tick="iframeInteractTick"
       @update:visible="(v) => updateElement(grid.id, { dockVisible: v })"
       @update:blend-mode="(v) => updateElement(grid.id, { blendMode: v })"
       @update:board-opacity="(v) => updateElement(grid.id, { opacity: v })"
@@ -2292,6 +2625,7 @@ onBeforeUnmount(() => {
       :elements="activeLayerTargets"
       :selected-ids="selectedTargetIds"
       :button-display-mode="buttonDisplayMode"
+      :global-scale="globalScale"
       :show-unavailable-options="showUnavailableOptions"
       @update:backdrop-mode="handleBackdropModeUpdate"
       @unavailable-click="handleUnavailableClick"
@@ -2317,6 +2651,9 @@ onBeforeUnmount(() => {
       v-model:custom-css-enabled="customCssEnabled"
       v-model:custom-css="customCss"
       v-model:button-display-mode="buttonDisplayMode"
+      v-model:global-scale="globalScale"
+      v-model:penpa-scale="penpaScale"
+      v-model:penpa-blur-opacity="penpaBlurOpacity"
       v-model:overlay-full-canvas="overlayFullCanvas"
       v-model:show-unavailable-options="showUnavailableOptions"
       :platform="platform"
@@ -2460,21 +2797,29 @@ onBeforeUnmount(() => {
   border-radius: 6px;
 }
 
+/* Material Design 3 Snackbar (Inverse Surface + Extra-Small 4dp corners + Level 3 shadow) */
 .ac-host-toast {
   position: fixed;
   left: 50%;
   bottom: calc(20px + var(--ac-safe-bottom, 0px));
-  transform: translateX(-50%);
+  transform: translateX(-50%) scale(var(--ac-ui-scale, 1));
+  transform-origin: bottom center;
   z-index: 1300;
-  max-width: min(460px, 90vw);
-  padding: 8px 16px;
-  border-radius: 999px;
+  max-width: min(460px, calc(90vw / var(--ac-ui-scale, 1)));
+  min-height: 40px;
+  padding: 10px 16px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
   background: var(--md-sys-color-inverse-surface);
   color: var(--md-sys-color-inverse-on-surface);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 400;
   line-height: 1.4;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.36);
+  letter-spacing: 0.015em;
+  box-shadow:
+    0 4px 8px 3px color-mix(in srgb, var(--md-sys-color-shadow) 15%, transparent),
+    0 1px 3px color-mix(in srgb, var(--md-sys-color-shadow) 30%, transparent);
   pointer-events: none;
   white-space: nowrap;
   overflow: hidden;
@@ -2482,7 +2827,9 @@ onBeforeUnmount(() => {
 }
 
 .ac-prompt-card {
-  width: min(380px, 100%);
+  width: min(380px, calc((100vw - 32px) / var(--ac-ui-scale, 1)));
+  transform: scale(var(--ac-ui-scale, 1));
+  transform-origin: center center;
   padding: 16px 18px;
   border-radius: 20px;
   background: var(--md-sys-color-surface-container);

@@ -40,6 +40,7 @@ struct HitState {
     dock_rect: HitRect,
     ui_rects: Vec<HitRect>,
     quads: Vec<Vec<Point2D>>,
+    gizmo_quad: Option<Vec<Point2D>>,
     last_ignore: Option<bool>,
     saved_normal_bounds: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
 }
@@ -72,24 +73,41 @@ fn point_to_segment_dist_sq(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64
     dx * dx + dy * dy
 }
 
-fn point_in_quad_padded(px: f64, py: f64, quad: &[Point2D], corner_pad: f64) -> bool {
+fn point_on_quad_border(
+    px: f64,
+    py: f64,
+    quad: &[Point2D],
+    corner_pad: f64,
+    edge_pad: f64,
+) -> bool {
     if quad.len() != 4 {
         return false;
     }
+    let corner_pad_sq = corner_pad * corner_pad;
     for pt in quad {
         let dx = px - pt.x;
         let dy = py - pt.y;
-        if dx * dx + dy * dy <= corner_pad * corner_pad {
+        if dx * dx + dy * dy <= corner_pad_sq {
             return true;
         }
     }
-    let edge_pad_sq = 14.0 * 14.0;
+    let edge_pad_sq = edge_pad * edge_pad;
     for i in 0..4 {
         let a = &quad[i];
         let b = &quad[(i + 1) % 4];
         if point_to_segment_dist_sq(px, py, a.x, a.y, b.x, b.y) <= edge_pad_sq {
             return true;
         }
+    }
+    false
+}
+
+fn point_in_quad_padded(px: f64, py: f64, quad: &[Point2D], corner_pad: f64) -> bool {
+    if point_on_quad_border(px, py, quad, corner_pad, 16.0) {
+        return true;
+    }
+    if quad.len() != 4 {
+        return false;
     }
     let mut has_pos = false;
     let mut has_neg = false;
@@ -259,6 +277,7 @@ fn update_hit_regions(
     ui_rects: Option<Vec<HitRect>>,
     quads: Option<Vec<Vec<Point2D>>>,
     quad: Option<Vec<Point2D>>,
+    gizmo_quad: Option<Vec<Point2D>>,
 ) -> Result<(), String> {
     if let Ok(mut guard) = state.0.lock() {
         guard.auto_passthrough = enabled;
@@ -275,6 +294,7 @@ fn update_hit_regions(
             }
         }
         guard.quads = next_quads;
+        guard.gizmo_quad = gizmo_quad.filter(|q| q.len() == 4);
         guard.initialized = guard.bar_rect.w > 0.0 && guard.bar_rect.h > 0.0;
         if !enabled {
             guard.last_ignore = Some(false);
@@ -1026,7 +1046,7 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
         loop {
             thread::sleep(Duration::from_millis(12));
 
-            let (is_overlay, initialized, auto_enabled, force_ct, drag_active, bar_rect, dock_rect, ui_rects, quads, last_ignore) = {
+            let (is_overlay, initialized, auto_enabled, force_ct, drag_active, bar_rect, dock_rect, ui_rects, quads, gizmo_quad, last_ignore) = {
                 let Ok(guard) = state.lock() else {
                     continue;
                 };
@@ -1040,6 +1060,7 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
                     guard.dock_rect.clone(),
                     guard.ui_rects.clone(),
                     guard.quads.clone(),
+                    guard.gizmo_quad.clone(),
                     guard.last_ignore,
                 )
             };
@@ -1106,7 +1127,11 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
                 let hit_board = quads
                     .iter()
                     .any(|q| point_in_quad_padded(local_x, local_y, q, 26.0));
-                !(hit_ui || hit_board)
+                let hit_gizmo = gizmo_quad
+                    .as_deref()
+                    .map(|q| point_on_quad_border(local_x, local_y, q, 24.0, 16.0))
+                    .unwrap_or(false);
+                !(hit_ui || hit_board || hit_gizmo)
             };
 
             if last_ignore != Some(should_ignore) {
@@ -1325,7 +1350,7 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
         loop {
             thread::sleep(Duration::from_millis(25));
 
-            let (initialized, auto_enabled, force_ct, bar_rect, dock_rect, ui_rects, quads, last_ignore) = {
+            let (initialized, auto_enabled, force_ct, bar_rect, dock_rect, ui_rects, quads, gizmo_quad, last_ignore) = {
                 let Ok(guard) = state.lock() else {
                     continue;
                 };
@@ -1337,6 +1362,7 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
                     guard.dock_rect.clone(),
                     guard.ui_rects.clone(),
                     guard.quads.clone(),
+                    guard.gizmo_quad.clone(),
                     guard.last_ignore,
                 )
             };
@@ -1392,7 +1418,11 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
                 let hit_board = quads
                     .iter()
                     .any(|q| point_in_quad_padded(local_x, local_y, q, 26.0));
-                !(hit_ui || hit_board)
+                let hit_gizmo = gizmo_quad
+                    .as_deref()
+                    .map(|q| point_on_quad_border(local_x, local_y, q, 24.0, 16.0))
+                    .unwrap_or(false);
+                !(hit_ui || hit_board || hit_gizmo)
             };
 
             if last_ignore != Some(should_ignore) {
@@ -1698,5 +1728,26 @@ mod io_utils_tests {
         // Auto-hidden taskbar (work_area == full monitor) -> all 0
         let hidden = compute_work_area_insets((0, 0), (1920, 1079), (0, 0), (1920, 1080), 1.0);
         assert_eq!(hidden, SafeAreaInsets::default());
+    }
+
+    #[test]
+    fn gizmo_border_hit_test_covers_edges_and_corners_not_hollow_interior() {
+        let quad = vec![
+            Point2D { x: 100.0, y: 100.0 },
+            Point2D { x: 500.0, y: 100.0 },
+            Point2D { x: 500.0, y: 400.0 },
+            Point2D { x: 100.0, y: 400.0 },
+        ];
+        // Empty corner of a diagonal group's bounding box -> HIT
+        assert!(point_on_quad_border(500.0, 100.0, &quad, 24.0, 16.0));
+        assert!(point_on_quad_border(516.0, 86.0, &quad, 24.0, 16.0));
+        // Empty span along top & left edges -> HIT
+        assert!(point_on_quad_border(300.0, 100.0, &quad, 24.0, 16.0));
+        assert!(point_on_quad_border(100.0, 260.0, &quad, 24.0, 16.0));
+        assert!(point_on_quad_border(300.0, 114.0, &quad, 24.0, 16.0));
+        // Hollow interior far from edges -> PASS THROUGH (false)
+        assert!(!point_on_quad_border(300.0, 250.0, &quad, 24.0, 16.0));
+        // Outside far from edges -> PASS THROUGH (false)
+        assert!(!point_on_quad_border(300.0, 60.0, &quad, 24.0, 16.0));
     }
 }

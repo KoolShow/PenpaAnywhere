@@ -19,6 +19,10 @@ const props = defineProps<{
   boardOpacity: number;
   enhanceOpacity: boolean;
   showUnavailableOptions: boolean;
+  globalScale: number;
+  penpaScale: number;
+  blurOpacity: number;
+  iframeInteractTick: number;
 }>();
 
 const emit = defineEmits<{
@@ -31,7 +35,121 @@ const emit = defineEmits<{
   (e: 'bounds-change', rect: { x: number; y: number; w: number; h: number }): void;
 }>();
 
+const dockEl = ref<HTMLElement | null>(null);
+const iframeEl = ref<HTMLIFrameElement | null>(null);
+
 const blendMenuOpen = ref(false);
+const headerHovered = ref(false);
+const renderBarHovered = ref(false);
+const renderBarHoverHold = ref(false);
+const renderBarInteracting = ref(false);
+const touchRenderBarPinned = ref(false);
+const dockHovered = ref(false);
+const dockFocused = ref(false);
+let hoverCloseTimer = 0;
+
+function cancelHoverClose() {
+  if (hoverCloseTimer) {
+    window.clearTimeout(hoverCloseTimer);
+    hoverCloseTimer = 0;
+  }
+}
+
+function scheduleHoverClose() {
+  cancelHoverClose();
+  renderBarHoverHold.value = true;
+  hoverCloseTimer = window.setTimeout(() => {
+    hoverCloseTimer = 0;
+    renderBarHoverHold.value = false;
+    if (!headerHovered.value && !renderBarHovered.value && !renderBarInteracting.value) {
+      blendMenuOpen.value = false;
+    }
+  }, 140);
+}
+
+function onDockPointerEnter(e: PointerEvent) {
+  if (e.pointerType === 'touch') return;
+  dockHovered.value = true;
+}
+
+function onDockPointerLeave(e: PointerEvent) {
+  if (e.pointerType === 'touch') return;
+  dockHovered.value = false;
+}
+
+function onDockPointerDown() {
+  dockFocused.value = true;
+}
+
+function onDockFocusIn() {
+  dockFocused.value = true;
+}
+
+function onGlobalPointerDownForDockFocus(e: PointerEvent) {
+  if (!dockFocused.value) return;
+  const target = e.target instanceof Node ? e.target : null;
+  if (target && dockEl.value?.contains(target)) return;
+  dockFocused.value = false;
+}
+
+watch(
+  () => props.iframeInteractTick,
+  (tick) => {
+    if (tick > 0 && props.visible) {
+      dockFocused.value = true;
+    }
+  },
+);
+
+function onHeaderPointerEnter(e: PointerEvent) {
+  if (e.pointerType === 'touch') return;
+  cancelHoverClose();
+  renderBarHoverHold.value = false;
+  headerHovered.value = true;
+}
+
+function onHeaderPointerLeave(e: PointerEvent) {
+  if (e.pointerType === 'touch') return;
+  headerHovered.value = false;
+  scheduleHoverClose();
+}
+
+function onRenderBarPointerEnter(e: PointerEvent) {
+  if (e.pointerType === 'touch') return;
+  cancelHoverClose();
+  renderBarHoverHold.value = false;
+  renderBarHovered.value = true;
+}
+
+function onRenderBarPointerLeave(e: PointerEvent) {
+  if (e.pointerType === 'touch') return;
+  renderBarHovered.value = false;
+  scheduleHoverClose();
+}
+
+function onRenderBarPointerDown() {
+  cancelHoverClose();
+  renderBarHoverHold.value = false;
+  renderBarInteracting.value = true;
+}
+
+function onWindowRenderBarPointerEnd() {
+  if (!renderBarInteracting.value) return;
+  renderBarInteracting.value = false;
+  if (!headerHovered.value && !renderBarHovered.value) {
+    scheduleHoverClose();
+  }
+}
+
+function closeRenderBarMenus() {
+  cancelHoverClose();
+  headerHovered.value = false;
+  renderBarHovered.value = false;
+  renderBarHoverHold.value = false;
+  renderBarInteracting.value = false;
+  touchRenderBarPinned.value = false;
+  blendMenuOpen.value = false;
+}
 
 const blendOptions = computed<Array<{ value: BlendRenderMode; label: string; unavailable: boolean }>>(() => {
   const isOverlay = props.backdropMode === 'overlay';
@@ -63,23 +181,45 @@ function selectBlend(opt: { value: BlendRenderMode; unavailable: boolean }) {
   blendMenuOpen.value = false;
 }
 
+function formatPercent(v: number): string {
+  return `${Math.round(v * 100)}%`;
+}
+
 const savedDock = loadPersistedState().dock;
 const hasSavedDock = !!savedDock;
 
-const iframeEl = ref<HTMLIFrameElement | null>(null);
 const collapsed = ref(savedDock?.collapsed ?? false);
-const dockOpacity = ref(
-  typeof savedDock?.opacity === 'number' && savedDock.opacity >= 0.35 && savedDock.opacity <= 1
-    ? savedDock.opacity
-    : 0.96,
-);
-const scale = ref(
-  typeof savedDock?.scale === 'number' && savedDock.scale >= 0.5 && savedDock.scale <= 1.15
-    ? savedDock.scale
-    : 1,
-);
 const readyState = ref(false);
 const isInteracting = ref(false);
+
+const renderBarOpen = computed(
+  () =>
+    !collapsed.value &&
+    !isInteracting.value &&
+    (headerHovered.value ||
+      renderBarHovered.value ||
+      renderBarHoverHold.value ||
+      renderBarInteracting.value ||
+      blendMenuOpen.value ||
+      touchRenderBarPinned.value),
+);
+
+const effectiveDockOpacity = computed(() => {
+  if (
+    dockHovered.value ||
+    dockFocused.value ||
+    isInteracting.value ||
+    blendMenuOpen.value ||
+    renderBarInteracting.value ||
+    touchRenderBarPinned.value
+  ) {
+    return 1;
+  }
+  return Math.max(0.2, Math.min(1, props.blurOpacity));
+});
+
+const collapsedW = computed(() => Math.round(168 * (props.globalScale || 1)));
+const collapsedH = computed(() => Math.round(36 * (props.globalScale || 1)));
 
 // Default floating tool window size fits Penpa+ native 600px #buttons with zero layout distortion
 const pos = ref({
@@ -106,8 +246,8 @@ function persistDockState() {
       yRatio: pos.value.y / vh,
       w: size.value.w,
       h: size.value.h,
-      scale: scale.value,
-      opacity: dockOpacity.value,
+      scale: props.penpaScale,
+      opacity: props.blurOpacity,
       collapsed: collapsed.value,
     },
   });
@@ -123,8 +263,8 @@ function emitBounds() {
   emit('bounds-change', {
     x: pos.value.x,
     y: pos.value.y,
-    w: collapsed.value ? 156 : size.value.w,
-    h: collapsed.value ? 36 : size.value.h,
+    w: collapsed.value ? collapsedW.value : size.value.w,
+    h: collapsed.value ? collapsedH.value : size.value.h,
   });
 }
 
@@ -140,7 +280,6 @@ function clampPosition(isInitial = false) {
   if (vw < 700 && isInitial && !hasSavedDock) {
     size.value.w = Math.max(260, safeW - 12);
     size.value.h = Math.min(300, Math.round(safeH * 0.36));
-    scale.value = Math.max(0.52, Math.min(1, (size.value.w - 14) / 640));
     pos.value.x = safe.left + 6;
     pos.value.y = Math.max(minY + 56, vh - safe.bottom - size.value.h - 12);
   } else {
@@ -148,7 +287,7 @@ function clampPosition(isInitial = false) {
     const effectiveH = Math.min(size.value.h, Math.max(160, safeH - 48));
     size.value.w = effectiveW;
     size.value.h = effectiveH;
-    const maxX = Math.max(minX, vw - safe.right - Math.min(collapsed.value ? 156 : effectiveW, 100));
+    const maxX = Math.max(minX, vw - safe.right - Math.min(collapsed.value ? collapsedW.value : effectiveW, 100));
     const maxY = Math.max(minY, vh - safe.bottom - 40);
     pos.value.x = Math.max(minX, Math.min(maxX, pos.value.x));
     pos.value.y = Math.max(minY, Math.min(maxY, pos.value.y));
@@ -159,19 +298,28 @@ function clampPosition(isInitial = false) {
 let dragMode: 'move' | 'resize' | null = null;
 let dragPointerId: number | null = null;
 let dragCapturedEl: Element | null = null;
+let dragPointerType = 'mouse';
+let dragMoved = false;
 let dragStart = { x: 0, y: 0, origX: 0, origY: 0, origW: 0, origH: 0 };
 
 function finishDockDrag(persist: boolean) {
   if (!dragMode) return;
+  const wasTouchTapOnHeader = dragMode === 'move' && dragPointerType === 'touch' && !dragMoved;
   if (dragPointerId !== null) {
     tryReleasePointer(dragCapturedEl, dragPointerId);
   }
   dragMode = null;
   dragPointerId = null;
   dragCapturedEl = null;
+  dragMoved = false;
   isInteracting.value = false;
   endGlobalDrag();
-  if (persist) persistDockState();
+  if (wasTouchTapOnHeader && !collapsed.value) {
+    touchRenderBarPinned.value = !touchRenderBarPinned.value;
+    if (!touchRenderBarPinned.value) blendMenuOpen.value = false;
+  } else if (persist) {
+    persistDockState();
+  }
 }
 
 function startMove(e: PointerEvent) {
@@ -181,6 +329,8 @@ function startMove(e: PointerEvent) {
   if (dragMode) finishDockDrag(false);
   dragMode = 'move';
   dragPointerId = e.pointerId;
+  dragPointerType = e.pointerType || 'mouse';
+  dragMoved = false;
   isInteracting.value = true;
   dragStart = {
     x: e.clientX,
@@ -222,8 +372,11 @@ function onDragMove(e: PointerEvent) {
   const minY = safe.top + 4;
   const dx = e.clientX - dragStart.x;
   const dy = e.clientY - dragStart.y;
+  if (!dragMoved && Math.hypot(dx, dy) >= 5) {
+    dragMoved = true;
+  }
   if (dragMode === 'move') {
-    const curW = collapsed.value ? 156 : size.value.w;
+    const curW = collapsed.value ? collapsedW.value : size.value.w;
     const maxX = Math.max(minX, window.innerWidth - safe.right - Math.min(curW, 100));
     const maxY = Math.max(minY, window.innerHeight - safe.bottom - 40);
     pos.value.x = Math.max(minX, Math.min(maxX, dragStart.origX + dx));
@@ -244,10 +397,20 @@ function onDragEnd(e: PointerEvent) {
 
 function onWindowDockBlur() {
   finishDockDrag(true);
+  closeRenderBarMenus();
+  window.setTimeout(() => {
+    if (!document.hasFocus()) {
+      dockFocused.value = false;
+      dockHovered.value = false;
+    } else if (document.activeElement === iframeEl.value) {
+      dockFocused.value = true;
+    }
+  }, 0);
 }
 
 function toggleCollapsed() {
   collapsed.value = !collapsed.value;
+  if (collapsed.value) closeRenderBarMenus();
   emitBounds();
   persistDockState();
 }
@@ -266,7 +429,7 @@ function onIframeLoad() {
 }
 
 const iframeStyle = computed(() => {
-  const s = scale.value;
+  const s = Math.max(0.5, Math.min(1.25, props.penpaScale || 1));
   return {
     width: `${100 / s}%`,
     height: `${100 / s}%`,
@@ -281,37 +444,45 @@ function onWindowResize() {
 
 onMounted(() => {
   clampPosition(true);
+  window.addEventListener('pointerdown', onGlobalPointerDownForDockFocus, true);
   window.addEventListener('pointermove', onDragMove);
   window.addEventListener('pointerup', onDragEnd);
   window.addEventListener('pointercancel', onDragEnd);
+  window.addEventListener('pointerup', onWindowRenderBarPointerEnd);
+  window.addEventListener('pointercancel', onWindowRenderBarPointerEnd);
   window.addEventListener('blur', onWindowDockBlur);
   window.addEventListener('resize', onWindowResize);
 });
 
 watch(
-  safeAreaInsets,
+  [safeAreaInsets, () => props.globalScale],
   () => {
     clampPosition(false);
   },
   { deep: true },
 );
 
-watch([scale, dockOpacity], () => {
-  persistDockState();
-});
-
 watch(
   () => props.visible,
-  () => {
+  (vis) => {
+    if (!vis) {
+      dockFocused.value = false;
+      dockHovered.value = false;
+      closeRenderBarMenus();
+    }
     emitBounds();
   },
 );
 
 onBeforeUnmount(() => {
   finishDockDrag(false);
+  cancelHoverClose();
+  window.removeEventListener('pointerdown', onGlobalPointerDownForDockFocus, true);
   window.removeEventListener('pointermove', onDragMove);
   window.removeEventListener('pointerup', onDragEnd);
   window.removeEventListener('pointercancel', onDragEnd);
+  window.removeEventListener('pointerup', onWindowRenderBarPointerEnd);
+  window.removeEventListener('pointercancel', onWindowRenderBarPointerEnd);
   window.removeEventListener('blur', onWindowDockBlur);
   window.removeEventListener('resize', onWindowResize);
   if (pollTimer) window.clearInterval(pollTimer);
@@ -321,74 +492,61 @@ onBeforeUnmount(() => {
 <template>
   <!-- Keep mounted even when hidden so Penpa+ state & canvas never reset -->
   <section
+    ref="dockEl"
     class="ac-dock"
     :class="{ collapsed, hidden: !visible, animating: !isInteracting }"
     :style="{
       left: `${pos.x}px`,
       top: `${pos.y}px`,
-      width: collapsed ? '156px' : `${size.w}px`,
-      height: collapsed ? '36px' : `${size.h}px`,
-      opacity: dockOpacity,
+      width: collapsed ? `${collapsedW}px` : `${size.w}px`,
+      height: collapsed ? `${collapsedH}px` : `${size.h}px`,
+      opacity: effectiveDockOpacity,
     }"
+    @pointerenter="onDockPointerEnter"
+    @pointerleave="onDockPointerLeave"
+    @pointerdown="onDockPointerDown"
+    @focusin="onDockFocusIn"
   >
     <header
       class="ac-dock-header"
       @pointerdown="startMove"
+      @pointerenter="onHeaderPointerEnter"
+      @pointerleave="onHeaderPointerLeave"
     >
       <div class="ac-dock-title">
         <span class="ac-dot" :class="{ ready: readyState }" />
         <span>{{ title || 'Penpa+' }}</span>
       </div>
-      <div class="ac-dock-actions">
-        <div class="ac-dock-sliders" :class="{ closed: collapsed }" :inert="collapsed">
-          <div class="ac-dock-sliders-inner">
-            <label class="ac-mini-slider" :title="messages.dock.zoomTitle">
-              <span>{{ messages.dock.zoom }}</span>
-              <MdSlider
-                v-model="scale"
-                :min="0.5"
-                :max="1.15"
-                :step="0.05"
-                width="54px"
-                :aria-label="messages.dock.zoomTitle"
-              />
-            </label>
-            <label class="ac-mini-slider" :title="messages.dock.opacityTitle">
-              <span>{{ messages.dock.opacity }}</span>
-              <MdSlider
-                v-model="dockOpacity"
-                :min="0.35"
-                :max="1"
-                :step="0.05"
-                width="54px"
-                :aria-label="messages.dock.opacityTitle"
-              />
-            </label>
-          </div>
-        </div>
-        <div class="ac-dock-btns">
-          <button
-            class="ac-icon-btn xs"
-            :title="collapsed ? messages.dock.expand : messages.dock.collapse"
-            :aria-label="collapsed ? messages.dock.expand : messages.dock.collapse"
-            @click="toggleCollapsed"
-          >
-            <MdIcon :name="collapsed ? 'keyboard_arrow_down' : 'keyboard_arrow_up'" :size="18" />
-          </button>
-          <button
-            class="ac-icon-btn xs"
-            :title="messages.dock.hide"
-            :aria-label="messages.dock.hide"
-            @click="emit('update:visible', false)"
-          >
-            <MdIcon name="close" :size="16" />
-          </button>
-        </div>
+      <div class="ac-dock-btns">
+        <button
+          class="ac-icon-btn xs"
+          :title="collapsed ? messages.dock.expand : messages.dock.collapse"
+          :aria-label="collapsed ? messages.dock.expand : messages.dock.collapse"
+          @click="toggleCollapsed"
+        >
+          <MdIcon :name="collapsed ? 'keyboard_arrow_down' : 'keyboard_arrow_up'" :size="18" />
+        </button>
+        <button
+          class="ac-icon-btn xs"
+          :title="messages.dock.hide"
+          :aria-label="messages.dock.hide"
+          @click="emit('update:visible', false)"
+        >
+          <MdIcon name="close" :size="16" />
+        </button>
       </div>
     </header>
 
-    <!-- Per-grid render settings sub-bar (Blend mode & Board opacity, isolated per Penpa+ instance) -->
-    <div v-if="!collapsed" class="ac-dock-render-bar">
+    <!-- Per-grid render settings sub-bar (expands on title bar hover, floats over body with zero layout shift) -->
+    <div
+      v-if="!collapsed"
+      class="ac-dock-render-bar"
+      :class="{ open: renderBarOpen }"
+      :inert="!renderBarOpen"
+      @pointerenter="onRenderBarPointerEnter"
+      @pointerleave="onRenderBarPointerLeave"
+      @pointerdown="onRenderBarPointerDown"
+    >
       <div class="ac-dock-render-row">
         <button
           class="ac-btn ac-dock-blend-btn"
@@ -425,7 +583,9 @@ onBeforeUnmount(() => {
               :min="0.1"
               :max="1"
               :step="0.02"
+              size="sm"
               width="86px"
+              :format-value="formatPercent"
               :aria-label="messages.dock.boardOpacityTitle"
               @update:model-value="emit('update:boardOpacity', $event)"
             />
@@ -482,7 +642,7 @@ onBeforeUnmount(() => {
   transition:
     width 0.24s cubic-bezier(0.2, 0, 0, 1),
     height 0.24s cubic-bezier(0.2, 0, 0, 1),
-    opacity 0.18s ease;
+    opacity 0.2s cubic-bezier(0.2, 0, 0, 1);
 }
 
 .ac-dock.hidden {
@@ -492,8 +652,11 @@ onBeforeUnmount(() => {
 }
 
 .ac-dock-header {
+  position: relative;
+  z-index: 22;
   height: 36px;
   flex-shrink: 0;
+  zoom: var(--ac-ui-scale, 1);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -533,57 +696,11 @@ onBeforeUnmount(() => {
   background: var(--md-sys-color-tertiary);
 }
 
-.ac-dock-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  flex-shrink: 1;
-}
-
-.ac-dock-sliders {
-  display: inline-grid;
-  grid-template-columns: 1fr;
-  min-width: 0;
-  flex-shrink: 1;
-  opacity: 1;
-  transition:
-    grid-template-columns 0.22s cubic-bezier(0.2, 0, 0, 1),
-    opacity 0.16s ease;
-}
-
-.ac-dock-sliders.closed {
-  grid-template-columns: 0fr;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.ac-dock-sliders-inner {
-  overflow: hidden;
-  min-width: 0;
-  padding: 3px 2px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-
 .ac-dock-btns {
   display: inline-flex;
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
-}
-
-.ac-mini-slider {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  line-height: 1;
-  color: var(--md-sys-color-on-surface-variant);
-  flex-shrink: 1;
-  min-width: 0;
 }
 
 .ac-dock-body {
@@ -597,13 +714,35 @@ onBeforeUnmount(() => {
 }
 
 .ac-dock-render-bar {
-  flex-shrink: 0;
+  position: absolute;
+  top: 36px;
+  left: 0;
+  right: 0;
+  z-index: 21;
+  zoom: var(--ac-ui-scale, 1);
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 5px 10px;
-  background: var(--md-sys-color-surface-container-low);
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-high) 96%, transparent);
+  backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.36);
+  opacity: 0;
+  transform: translateY(-8px);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 0.16s cubic-bezier(0.2, 0, 0, 1),
+    transform 0.18s cubic-bezier(0.2, 0, 0, 1),
+    visibility 0.18s linear;
+}
+
+.ac-dock-render-bar.open {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .ac-dock-render-row {

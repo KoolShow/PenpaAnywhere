@@ -42,6 +42,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'select', id: string, additive: boolean): void;
   (e: 'focus-multi-member', id: string): void;
+  (e: 'move-start', id: string): void;
+  (e: 'translate-by', id: string, dxWorld: number, dyWorld: number): void;
+  (e: 'move-end'): void;
   (e: 'update-corners', id: string, corners: [Point2D, Point2D, Point2D, Point2D]): void;
   (e: 'update-crop-draft', draft: CropDraft): void;
   (e: 'toggle-crop', id: string): void;
@@ -309,9 +312,12 @@ const { beginDrag, beginCropPan } = useWholeElementDrag({
   getCropDraft: () => props.cropDraft,
   getViewport: () => effectiveViewport.value,
   isWorldBounded: () => props.worldBoundedToViewport,
+  onMoveStart: (id) => emit('move-start', id),
+  onTranslateBy: (id, dx, dy) => emit('translate-by', id, dx, dy),
   onUpdateCorners: (id, corners) => emit('update-corners', id, corners),
   onUpdateCropDraft: (draft) => emit('update-crop-draft', draft),
   onMoveFinish: (moved) => {
+    emit('move-end');
     if (pendingSingleSelectOnClick) {
       pendingSingleSelectOnClick = false;
       if (!moved) {
@@ -449,9 +455,28 @@ function onSurfaceDoubleClick(e: MouseEvent) {
   emit('toggle-crop', props.element.id);
 }
 
+function onContextLost(e: Event) {
+  e.preventDefault();
+  renderer?.destroy();
+  renderer = null;
+}
+
+function onContextRestored() {
+  if (!glCanvasEl.value) return;
+  try {
+    renderer = new WebGLPerspectiveRenderer(glCanvasEl.value);
+    handleResize();
+    needsRender = true;
+  } catch (err) {
+    glError.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
 onMounted(() => {
   try {
     if (glCanvasEl.value) {
+      glCanvasEl.value.addEventListener('webglcontextlost', onContextLost);
+      glCanvasEl.value.addEventListener('webglcontextrestored', onContextRestored);
       renderer = new WebGLPerspectiveRenderer(glCanvasEl.value);
       handleResize();
       rafId = requestAnimationFrame(renderLoop);
@@ -468,6 +493,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(rafId);
+  glCanvasEl.value?.removeEventListener('webglcontextlost', onContextLost);
+  glCanvasEl.value?.removeEventListener('webglcontextrestored', onContextRestored);
   resizeObserver?.disconnect();
   resizeObserver = null;
   window.removeEventListener('resize', handleResize);
@@ -522,7 +549,7 @@ defineExpose({
   />
 
   <svg
-    v-if="element.visible && !effectivePassThrough"
+    v-if="element.visible && !effectivePassThrough && hitPolyPointsSvg"
     class="ac-draw-hit-svg"
     :style="{ zIndex: element.zIndex }"
   >

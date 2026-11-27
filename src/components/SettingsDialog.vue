@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { DEFAULT_PENPA_MD3_CSS } from '../core/defaultPenpaCss';
 import HueRingPicker from './HueRingPicker.vue';
 import MdIcon from './MdIcon.vue';
+import MdSlider from './MdSlider.vue';
 import type { UnavailableReasonKey } from './ControlBar.vue';
 import {
   openExternalLink,
@@ -39,6 +40,9 @@ const props = defineProps<{
   customCssEnabled: boolean;
   customCss: string;
   buttonDisplayMode: ButtonDisplayMode;
+  globalScale: number;
+  penpaScale: number;
+  penpaBlurOpacity: number;
   overlayFullCanvas: boolean;
   showUnavailableOptions: boolean;
   androidScreenshotStatus?: AndroidScreenshotCompositeStatus | null;
@@ -49,12 +53,19 @@ const emit = defineEmits<{
   (e: 'update:customCssEnabled', v: boolean): void;
   (e: 'update:customCss', v: string): void;
   (e: 'update:buttonDisplayMode', v: ButtonDisplayMode): void;
+  (e: 'update:globalScale', v: number): void;
+  (e: 'update:penpaScale', v: number): void;
+  (e: 'update:penpaBlurOpacity', v: number): void;
   (e: 'update:overlayFullCanvas', v: boolean): void;
   (e: 'update:showUnavailableOptions', v: boolean): void;
   (e: 'unavailable-click', key: UnavailableReasonKey): void;
   (e: 'toggle-android-screenshot-composite', enabled: boolean): void;
   (e: 'request-android-all-files'): void;
 }>();
+
+function formatPercent(v: number): string {
+  return `${Math.round(v * 100)}%`;
+}
 
 const canOverlayMode = computed(() => supportsOverlaySwitch(props.platform));
 const showDynamicColorRow = computed(() => dynamicColorSupported.value || props.showUnavailableOptions);
@@ -336,6 +347,57 @@ onBeforeUnmount(() => {
                 </button>
               </div>
             </div>
+
+            <div class="ac-setting-row ac-row-gap-top ac-slider-setting-row">
+              <div class="ac-setting-label">{{ messages.settings.globalScaleLabel }}</div>
+              <div class="ac-setting-slider-ctrl">
+                <MdSlider
+                  :model-value="globalScale"
+                  :min="0.7"
+                  :max="1.5"
+                  :step="0.05"
+                  width="156px"
+                  :format-value="formatPercent"
+                  :aria-label="messages.settings.globalScaleLabel"
+                  @update:model-value="emit('update:globalScale', $event)"
+                />
+                <span class="ac-setting-slider-val">{{ formatPercent(globalScale) }}</span>
+              </div>
+            </div>
+
+            <div class="ac-setting-row ac-row-gap-top ac-slider-setting-row">
+              <div class="ac-setting-label">{{ messages.settings.penpaScaleLabel }}</div>
+              <div class="ac-setting-slider-ctrl">
+                <MdSlider
+                  :model-value="penpaScale"
+                  :min="0.5"
+                  :max="1.25"
+                  :step="0.05"
+                  width="156px"
+                  :format-value="formatPercent"
+                  :aria-label="messages.settings.penpaScaleLabel"
+                  @update:model-value="emit('update:penpaScale', $event)"
+                />
+                <span class="ac-setting-slider-val">{{ formatPercent(penpaScale) }}</span>
+              </div>
+            </div>
+
+            <div class="ac-setting-row ac-row-gap-top ac-slider-setting-row">
+              <div class="ac-setting-label">{{ messages.settings.penpaBlurOpacityLabel }}</div>
+              <div class="ac-setting-slider-ctrl">
+                <MdSlider
+                  :model-value="penpaBlurOpacity"
+                  :min="0.2"
+                  :max="1"
+                  :step="0.05"
+                  width="156px"
+                  :format-value="formatPercent"
+                  :aria-label="messages.settings.penpaBlurOpacityLabel"
+                  @update:model-value="emit('update:penpaBlurOpacity', $event)"
+                />
+                <span class="ac-setting-slider-val">{{ formatPercent(penpaBlurOpacity) }}</span>
+              </div>
+            </div>
           </div>
 
           <div class="ac-divider" />
@@ -596,7 +658,7 @@ onBeforeUnmount(() => {
 
 .ac-settings-modal-enter-from .ac-settings-card,
 .ac-settings-modal-leave-to .ac-settings-card {
-  transform: scale(0.96) translateY(8px);
+  transform: scale(calc(var(--ac-ui-scale, 1) * 0.96)) translateY(8px);
   opacity: 0;
 }
 
@@ -614,8 +676,10 @@ onBeforeUnmount(() => {
 }
 
 .ac-settings-card {
-  width: min(560px, 100%);
-  max-height: min(82vh, 640px);
+  width: min(560px, calc((100vw - 32px) / var(--ac-ui-scale, 1)));
+  max-height: calc(min(84vh, 680px) / var(--ac-ui-scale, 1));
+  transform: scale(var(--ac-ui-scale, 1));
+  transform-origin: center center;
   display: flex;
   flex-direction: column;
   border-radius: 20px;
@@ -734,6 +798,26 @@ onBeforeUnmount(() => {
 .ac-hue-row {
   padding-top: 2px;
   align-items: center;
+}
+
+.ac-slider-setting-row {
+  align-items: center;
+}
+
+.ac-setting-slider-ctrl {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.ac-setting-slider-val {
+  min-width: 40px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--md-sys-color-on-surface-variant);
 }
 
 .ac-lang-segmented {

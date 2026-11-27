@@ -79,6 +79,8 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  (e: 'resize-start', id: string): void;
+  (e: 'resize-end'): void;
   (e: 'update-element', id: string, patch: Partial<WorldElement>): void;
   (e: 'update-quad-mode', id: string, mode: QuadMode): void;
   (e: 'reset-size', id: string): void;
@@ -280,8 +282,9 @@ function computeFloatingToolbarPos(
   const vw = viewportSize.value.w;
   const vh = viewportSize.value.h;
   const cx = (minX + maxX) * 0.5;
-  const tbW = elRef?.offsetWidth || fallbackW;
-  const tbH = elRef?.offsetHeight || 36;
+  const tbRect = elRef?.getBoundingClientRect();
+  const tbW = tbRect && tbRect.width > 1 ? tbRect.width : fallbackW;
+  const tbH = tbRect && tbRect.height > 1 ? tbRect.height : 36;
   const halfW = tbW * 0.5;
   const minLeft = safe.left + halfW + 8;
   const maxLeft = Math.max(minLeft, vw - safe.right - halfW - 8);
@@ -515,6 +518,7 @@ function releaseGizmoPointer(pointerId: number) {
 }
 
 function clearAllDrags() {
+  const hadQuadDrags = activeQuadDrags.size > 0;
   for (const [pid, el] of capturedGizmoPointers.entries()) {
     tryReleasePointer(el, pid);
   }
@@ -523,6 +527,7 @@ function clearAllDrags() {
   activeCropDrag = null;
   dragBaselineCorners = null;
   syncActiveHandleKeys();
+  if (hadQuadDrags) emit('resize-end');
 }
 
 function resnapshotQuadDrags(corners: [Point2D, Point2D, Point2D, Point2D]) {
@@ -962,34 +967,36 @@ function applyMultiTouchFreeDrag(
 }
 
 function applyActiveQuadDrags() {
-  const el = singleElement.value;
-  if (!el || !dragBaselineCorners || activeQuadDrags.size === 0) return;
+  const target = singleTarget.value;
+  if (!target || !dragBaselineCorners || activeQuadDrags.size === 0) return;
   const bounds = getSafeWorldBounds();
   const base = dragBaselineCorners;
   const drags = Array.from(activeQuadDrags.values());
 
-  if (el.quadMode === 'rect') {
+  // Groups ALWAYS resize in axis-aligned rect mode (free perspective disabled on groups!)
+  const mode = target.kind === 'group' ? 'rect' : target.quadMode;
+  if (mode === 'rect') {
     const next =
       drags.length === 1
         ? applySingleRectDrag(drags[0], base, bounds)
         : applyMultiTouchRectDrag(drags, base, bounds);
-    emit('update-element', el.id, { corners: next });
+    emit('update-element', target.id, { corners: next });
     return;
   }
 
   const next =
     drags.length === 1
       ? applySingleFreeDrag(drags[0], base, bounds)
-      : applyMultiTouchFreeDrag(drags, base, el.corners, bounds);
+      : applyMultiTouchFreeDrag(drags, base, target.corners, bounds);
   if (next) {
-    emit('update-element', el.id, { corners: next });
+    emit('update-element', target.id, { corners: next });
   }
 }
 
-// --- Unified Handle Drag Starters (ONE path for Grid, Image, Screen!) ---
+// --- Unified Handle Drag Starters (ONE path for Grid, Image, Screen, and Group rect resize!) ---
 function startHandleDrag(kind: 'corner' | 'edge', idx: number, e: PointerEvent) {
-  const el = singleElement.value;
-  if (!el || el.locked) return;
+  const target = singleTarget.value;
+  if (!target || target.locked) return;
   if (e.button !== 0 && e.pointerType === 'mouse') return;
   e.preventDefault();
   e.stopPropagation();
@@ -1014,8 +1021,13 @@ function startHandleDrag(kind: 'corner' | 'edge', idx: number, e: PointerEvent) 
   }
   shiftPressed = e.shiftKey;
   altPressed = e.altKey;
-  if (activeQuadDrags.size === 0) dragBaselineCorners = cloneQuad(el.corners);
-  else resnapshotQuadDrags(el.corners);
+  if (activeQuadDrags.size === 0) {
+    dragBaselineCorners = cloneQuad(target.corners);
+    emit('resize-start', target.id);
+  } else {
+    resnapshotQuadDrags(target.corners);
+    emit('resize-start', target.id);
+  }
 
   activeQuadDrags.set(e.pointerId, {
     pointerId: e.pointerId,
@@ -1026,7 +1038,7 @@ function startHandleDrag(kind: 'corner' | 'edge', idx: number, e: PointerEvent) 
     currentPointer: { ...ptr },
     grabOffset:
       kind === 'corner'
-        ? { x: el.corners[idx].x - ptr.x, y: el.corners[idx].y - ptr.y }
+        ? { x: target.corners[idx].x - ptr.x, y: target.corners[idx].y - ptr.y }
         : { x: 0, y: 0 },
   });
   captureGizmoPointer(e.pointerId);
@@ -1044,7 +1056,7 @@ function onGizmoPointerMove(e: PointerEvent) {
     return;
   }
 
-  if (activeCropDrag && e.pointerId === activeCropDrag.pointerId && singleElement.value) {
+  if (activeCropDrag && e.pointerId === activeCropDrag.pointerId && singleTarget.value) {
     e.preventDefault();
     const z = props.viewportTransform.zoom || 1;
     const dxWorld = (e.clientX - activeCropDrag.startClient.x) / z;
@@ -1072,8 +1084,10 @@ function onGizmoPointerEnd(e: PointerEvent) {
     syncActiveHandleKeys();
     if (activeQuadDrags.size === 0) {
       dragBaselineCorners = null;
-    } else if (singleElement.value) {
-      resnapshotQuadDrags(singleElement.value.corners);
+      emit('resize-end');
+    } else if (singleTarget.value) {
+      resnapshotQuadDrags(singleTarget.value.corners);
+      emit('resize-start', singleTarget.value.id);
     }
     return;
   }
@@ -1221,7 +1235,7 @@ onBeforeUnmount(() => {
       />
     </svg>
 
-    <!-- Single-target SVG Gizmo (non-blocking visual border + interactive 8 corner/edge handles for non-group elements) -->
+    <!-- Single-target SVG Gizmo (non-blocking visual border + interactive 8 corner/edge handles for elements & groups) -->
     <svg v-else-if="singleTarget && viewportCorners" class="ac-gizmo-svg">
       <!-- Pure visual boundary outline (pointer-events: none so higher-z sibling elements ALWAYS stay clickable!) -->
       <polygon
@@ -1240,8 +1254,8 @@ onBeforeUnmount(() => {
         <circle :cx="quadCenter.x" :cy="quadCenter.y" r="1.6" class="ac-reticle-dot" />
       </g>
 
-      <!-- Unified Interactive Edge Midpoint Bars & Corner Handles (ONLY for unlocked non-group elements!) -->
-      <template v-if="!isLocked && !isGroupTarget">
+      <!-- Unified Interactive Edge Midpoint Bars & Corner Handles (ALL unlocked elements & groups!) -->
+      <template v-if="!isLocked">
         <g v-for="eb in edgeBars" :key="eb.edge">
           <line
             :x1="eb.bx1"
@@ -1419,7 +1433,7 @@ onBeforeUnmount(() => {
           </button>
         </template>
 
-        <!-- State 3: Unlocked Group -> NO resize/stretch/crop/reset; Ungroup + layer order + tools + lock + delete -->
+        <!-- State 3: Unlocked Group -> rect move/resize via handles; crop & free transform disabled -->
         <template v-else-if="singleTarget && isGroupTarget">
           <MdActionBtn
             icon="stack"
@@ -1485,7 +1499,7 @@ onBeforeUnmount(() => {
           />
         </template>
 
-        <!-- State 4: Unlocked Single Element -> Rect|Free, Reset (text-only), Crop, Front, Back, Tools, Lock, Delete -->
+        <!-- State 4: Unlocked Single Element -> Rect|Free, Reset, Crop, Front, Back, Tools, Lock, Delete -->
         <template v-else-if="singleElement">
           <div
             class="ac-segmented"
@@ -1730,7 +1744,7 @@ onBeforeUnmount(() => {
 .ac-edge-hitline {
   fill: none;
   stroke: transparent;
-  stroke-width: 24;
+  stroke-width: 28;
   stroke-linecap: round;
   pointer-events: stroke;
   touch-action: none;
@@ -1773,7 +1787,8 @@ onBeforeUnmount(() => {
 
 .ac-element-toolbar {
   position: absolute;
-  transform: translateX(-50%);
+  transform: translateX(-50%) scale(var(--ac-ui-scale, 1));
+  transform-origin: top center;
   pointer-events: auto;
   display: flex;
   flex-direction: column;

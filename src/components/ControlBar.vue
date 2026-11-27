@@ -32,6 +32,7 @@ const props = defineProps<{
   elements: SelectableTarget[];
   selectedIds: string[];
   buttonDisplayMode: ButtonDisplayMode;
+  globalScale: number;
   showUnavailableOptions: boolean;
 }>();
 
@@ -187,8 +188,9 @@ function persistBarState() {
 
 function getSafeDragLimits() {
   const safe = safeAreaInsets.value;
-  const bw = barEl.value?.offsetWidth || 160;
-  const bh = barEl.value?.offsetHeight || 40;
+  const r = barEl.value?.getBoundingClientRect();
+  const bw = r && r.width > 1 ? r.width : 160;
+  const bh = r && r.height > 1 ? r.height : 40;
   const minX = safe.left + 4;
   const minY = safe.top + 4;
   const maxX = Math.max(
@@ -342,7 +344,7 @@ function toggleCompact() {
 }
 
 watch(
-  [safeAreaInsets, currentLocale],
+  [safeAreaInsets, currentLocale, () => props.globalScale],
   () => {
     requestAnimationFrame(clampBarToViewport);
   },
@@ -656,10 +658,12 @@ onBeforeUnmount(() => {
 .ac-control-bar {
   position: fixed;
   z-index: 1150;
+  transform: scale(var(--ac-ui-scale, 1));
+  transform-origin: top left;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  max-width: calc(100vw - var(--ac-safe-left, 0px) - var(--ac-safe-right, 0px) - 16px);
+  max-width: calc((100vw - var(--ac-safe-left, 0px) - var(--ac-safe-right, 0px) - 16px) / var(--ac-ui-scale, 1));
   padding: 6px 10px;
   border-radius: 18px;
   background: color-mix(in srgb, var(--md-sys-color-surface-container) 92%, transparent);

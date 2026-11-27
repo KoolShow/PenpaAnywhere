@@ -90,6 +90,7 @@ export type WorldElement = GridElement | ImageElement | ScreenElement;
 export interface ElementGroup {
   id: string;
   label: string;
+  /** Direct children IDs: may reference WorldElement IDs OR nested child ElementGroup IDs */
   memberIds: string[];
   visible: boolean;
   locked: boolean;
@@ -100,7 +101,9 @@ export interface GroupSelectionTarget {
   id: string;
   kind: 'group';
   label: string;
+  /** Direct child IDs (WorldElement IDs and/or nested child ElementGroup IDs) */
   memberIds: string[];
+  /** All descendant leaf WorldElements (flattened recursively) */
   members: WorldElement[];
   corners: [Point2D, Point2D, Point2D, Point2D];
   zIndex: number;
@@ -113,6 +116,88 @@ export interface GroupSelectionTarget {
 }
 
 export type SelectableTarget = WorldElement | GroupSelectionTarget;
+
+export function getParentGroup(
+  id: string,
+  groups: ReadonlyArray<ElementGroup>,
+): ElementGroup | null {
+  return groups.find((g) => g.memberIds.includes(id)) ?? null;
+}
+
+export function getAncestorGroupChain(
+  id: string,
+  groups: ReadonlyArray<ElementGroup>,
+): ElementGroup[] {
+  const chain: ElementGroup[] = [];
+  const visited = new Set<string>([id]);
+  let curId = id;
+  while (true) {
+    const parent = getParentGroup(curId, groups);
+    if (!parent || visited.has(parent.id)) break;
+    visited.add(parent.id);
+    chain.push(parent);
+    curId = parent.id;
+  }
+  return chain;
+}
+
+export function resolveTopLevelTargetId(
+  id: string,
+  groups: ReadonlyArray<ElementGroup>,
+): string {
+  const chain = getAncestorGroupChain(id, groups);
+  return chain.length > 0 ? chain[chain.length - 1].id : id;
+}
+
+export function getDescendantGroupIds(
+  groupId: string,
+  groups: ReadonlyArray<ElementGroup>,
+): string[] {
+  const byId = new Map(groups.map((g) => [g.id, g]));
+  const result: string[] = [];
+  const visited = new Set<string>();
+  const walk = (gid: string) => {
+    if (visited.has(gid)) return;
+    const g = byId.get(gid);
+    if (!g) return;
+    visited.add(gid);
+    result.push(gid);
+    for (const mid of g.memberIds) {
+      if (byId.has(mid)) walk(mid);
+    }
+  };
+  walk(groupId);
+  return result;
+}
+
+export function getDescendantLeafIds(
+  groupId: string,
+  groups: ReadonlyArray<ElementGroup>,
+  elementIdSet: ReadonlySet<string>,
+): string[] {
+  const byId = new Map(groups.map((g) => [g.id, g]));
+  const leaves: string[] = [];
+  const visitedGroups = new Set<string>();
+  const seenLeaves = new Set<string>();
+  const walk = (gid: string) => {
+    if (visitedGroups.has(gid)) return;
+    const g = byId.get(gid);
+    if (!g) return;
+    visitedGroups.add(gid);
+    for (const mid of g.memberIds) {
+      if (elementIdSet.has(mid)) {
+        if (!seenLeaves.has(mid)) {
+          seenLeaves.add(mid);
+          leaves.push(mid);
+        }
+      } else if (byId.has(mid)) {
+        walk(mid);
+      }
+    }
+  };
+  walk(groupId);
+  return leaves;
+}
 
 export function generateGroupId(): string {
   return `grp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -439,7 +524,9 @@ export function applyRectCropDrag(
   };
 }
 
-export function createCropDraft(el: WorldElement): CropDraft {
+export function createCropDraft(
+  el: Pick<WorldElementBase, 'id' | 'corners' | 'quadMode' | 'crop'>,
+): CropDraft {
   const work = getCropWorkBounds(el);
   return {
     elementId: el.id,

@@ -33,6 +33,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'select', id: string, additive: boolean): void;
   (e: 'focus-multi-member', id: string): void;
+  (e: 'move-start', id: string): void;
+  (e: 'translate-by', id: string, dxWorld: number, dyWorld: number): void;
+  (e: 'move-end'): void;
   (e: 'update-corners', id: string, corners: [Point2D, Point2D, Point2D, Point2D]): void;
   (e: 'update-crop-draft', draft: CropDraft): void;
   (e: 'update-natural-size', id: string, w: number, h: number): void;
@@ -152,9 +155,12 @@ const { beginDrag, beginCropPan } = useWholeElementDrag({
   getCropDraft: () => props.cropDraft,
   getViewport: () => props.viewportTransform,
   isWorldBounded: () => props.worldBoundedToViewport,
+  onMoveStart: (id) => emit('move-start', id),
+  onTranslateBy: (id, dx, dy) => emit('translate-by', id, dx, dy),
   onUpdateCorners: (id, corners) => emit('update-corners', id, corners),
   onUpdateCropDraft: (draft) => emit('update-crop-draft', draft),
   onMoveFinish: (moved) => {
+    emit('move-end');
     if (pendingSingleSelectOnClick) {
       pendingSingleSelectOnClick = false;
       if (!moved) {

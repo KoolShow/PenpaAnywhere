@@ -485,6 +485,15 @@
     } catch (_) {}
   }
 
+  function relocateHeaderIntoSettingsModal() {
+    var header = document.getElementById('header');
+    var modalContent = document.getElementById('modal-settings-content');
+    if (!header || !modalContent) return;
+    if (header.parentNode !== modalContent) {
+      modalContent.insertBefore(header, modalContent.firstChild);
+    }
+  }
+
   function disableDuplicateControl() {
     var btn = document.getElementById('duplicate');
     if (btn) {
@@ -652,6 +661,7 @@
   }
 
   function tryPatchPuzzleProto() {
+    relocateHeaderIntoSettingsModal();
     disableDuplicateControl();
     if (typeof window.Puzzle === 'function' && window.Puzzle.prototype) {
       patchPuzzlePrototype(window.Puzzle.prototype);
@@ -876,6 +886,13 @@
     };
   }
 
+  // Relocate #header into #modal-settings as early as DOM is ready so it never flashes in the main bar
+  if (document.readyState === 'loading') {
+    origAddEventListener('DOMContentLoaded', relocateHeaderIntoSettingsModal);
+  } else {
+    relocateHeaderIntoSettingsModal();
+  }
+
   // Poll until Penpa finishes boot(), then hook redraw and restore saved draft
   var bootTimer = setInterval(function () {
     tryPatchPuzzleProto();
@@ -885,6 +902,21 @@
       notifyRedraw();
     }
   }, 80);
+
+  // Notify host app whenever user interacts inside the Penpa+ iframe so canvas selection clears
+  // and unfocused dock opacity restores immediately.
+  function notifyHostIframeInteract() {
+    try {
+      if (
+        window.parent &&
+        window.parent !== window &&
+        typeof window.parent.__PENPAANYWHERE_ON_IFRAME_INTERACT__ === 'function'
+      ) {
+        window.parent.__PENPAANYWHERE_ON_IFRAME_INTERACT__();
+      }
+    } catch (_) {}
+  }
+  origAddEventListener('pointerdown', notifyHostIframeInteract, true);
 
   // Also re-check prototype hooking on any button click inside dock (e.g. New Grid changes pu subclass)
   origAddEventListener(

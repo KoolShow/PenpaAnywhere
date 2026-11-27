@@ -73,6 +73,9 @@ export interface PersistedAppState {
   dynamicColor?: boolean;
   customHue?: number;
   buttonDisplayMode?: ButtonDisplayMode;
+  globalScale?: number;
+  penpaScale?: number;
+  penpaBlurOpacity?: number;
   overlayFullCanvas?: boolean;
   showUnavailableOptions?: boolean;
 }

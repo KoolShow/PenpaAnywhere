@@ -316,6 +316,8 @@ onBeforeUnmount(() => {
   z-index: 1020;
   left: calc(14px + var(--ac-safe-left, 0px));
   bottom: calc(14px + var(--ac-safe-bottom, 0px));
+  transform: scale(var(--ac-ui-scale, 1));
+  transform-origin: bottom left;
   pointer-events: auto;
   display: inline-flex;
   align-items: center;
