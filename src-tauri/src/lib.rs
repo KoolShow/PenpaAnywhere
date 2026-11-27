@@ -42,13 +42,16 @@ impl Default for HotkeyConfig {
 #[derive(Debug, Default)]
 struct HitState {
     is_overlay_mode: bool,
+    always_on_top: bool,
     window_is_dark: bool,
     auto_passthrough: bool,
     force_click_through: bool,
+    drag_active: bool,
     initialized: bool,
     bar_rect: HitRect,
     dock_rect: HitRect,
-    quad: Vec<Point2D>,
+    ui_rects: Vec<HitRect>,
+    quads: Vec<Vec<Point2D>>,
     last_ignore: Option<bool>,
     toggle_hotkey: Option<HotkeyConfig>,
     saved_normal_bounds: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
@@ -144,7 +147,14 @@ fn set_click_through(
 }
 
 #[tauri::command]
-fn set_always_on_top(window: WebviewWindow, always_on_top: bool) -> Result<(), String> {
+fn set_always_on_top(
+    window: WebviewWindow,
+    state: State<'_, AppOverlayState>,
+    always_on_top: bool,
+) -> Result<(), String> {
+    if let Ok(mut guard) = state.0.lock() {
+        guard.always_on_top = always_on_top;
+    }
     window
         .set_always_on_top(always_on_top)
         .map_err(|e| e.to_string())
@@ -156,7 +166,7 @@ fn set_overlay_window_mode(
     state: State<'_, AppOverlayState>,
     overlay: bool,
 ) -> Result<(), String> {
-    let (was_overlay, saved_bounds, is_dark) = {
+    let (was_overlay, saved_bounds, is_dark, always_on_top) = {
         let mut guard = state
             .0
             .lock()
@@ -170,13 +180,13 @@ fn set_overlay_window_mode(
         } else {
             guard.last_ignore = None;
         }
-        (prev, guard.saved_normal_bounds, guard.window_is_dark)
+        (prev, guard.saved_normal_bounds, guard.window_is_dark, guard.always_on_top)
     };
 
     if !overlay {
         let _ = window.set_ignore_cursor_events(false);
         window
-            .set_always_on_top(false)
+            .set_always_on_top(always_on_top)
             .map_err(|e| e.to_string())?;
         let bg = if is_dark {
             Color(17, 19, 24, 255)
@@ -226,7 +236,7 @@ fn set_overlay_window_mode(
     let _ = window.set_shadow(false);
     let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
     window
-        .set_always_on_top(true)
+        .set_always_on_top(always_on_top)
         .map_err(|e| e.to_string())?;
     fit_overlay_window_to_monitor(&window);
     Ok(())
@@ -240,19 +250,38 @@ fn update_hit_regions(
     force_click_through: bool,
     bar_rect: HitRect,
     dock_rect: HitRect,
-    quad: Vec<Point2D>,
+    ui_rects: Option<Vec<HitRect>>,
+    quads: Option<Vec<Vec<Point2D>>>,
+    quad: Option<Vec<Point2D>>,
 ) -> Result<(), String> {
     if let Ok(mut guard) = state.0.lock() {
         guard.auto_passthrough = enabled;
         guard.force_click_through = force_click_through;
         guard.bar_rect = bar_rect;
         guard.dock_rect = dock_rect;
-        guard.quad = quad;
+        guard.ui_rects = ui_rects.unwrap_or_default();
+        let mut next_quads = quads.unwrap_or_default();
+        if next_quads.is_empty() {
+            if let Some(q) = quad {
+                if q.len() == 4 {
+                    next_quads.push(q);
+                }
+            }
+        }
+        guard.quads = next_quads;
         guard.initialized = guard.bar_rect.w > 0.0 && guard.bar_rect.h > 0.0;
         if !enabled {
             guard.last_ignore = Some(false);
             let _ = window.set_ignore_cursor_events(false);
         }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_drag_active(state: State<'_, AppOverlayState>, active: bool) -> Result<(), String> {
+    if let Ok(mut guard) = state.0.lock() {
+        guard.drag_active = active;
     }
     Ok(())
 }
@@ -561,7 +590,8 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
     use std::time::Duration;
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_CONTROL, VK_LBUTTON, VK_LWIN, VK_MENU, VK_RBUTTON, VK_RWIN, VK_SHIFT,
+        GetAsyncKeyState, VK_CONTROL, VK_LBUTTON, VK_LWIN, VK_MBUTTON, VK_MENU, VK_RBUTTON,
+        VK_RWIN, VK_SHIFT,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
@@ -569,12 +599,13 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
         let mut prev_hotkey_down = false;
         let mut prev_accent = read_windows_accent_hex();
         let mut accent_tick: u32 = 0;
+        let mut last_emitted_cursor: (f64, f64) = (-10000.0, -10000.0);
         loop {
-            thread::sleep(Duration::from_millis(25));
+            thread::sleep(Duration::from_millis(12));
 
             // Poll Windows system accent color every ~2s so theme changes apply live
             accent_tick = accent_tick.wrapping_add(1);
-            if accent_tick % 80 == 0 {
+            if accent_tick % 160 == 0 {
                 let current = read_windows_accent_hex();
                 if current != prev_accent {
                     prev_accent = current.clone();
@@ -584,7 +615,7 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
                 }
             }
 
-            let (initialized, auto_enabled, force_ct, bar_rect, dock_rect, quad, last_ignore, toggle_hotkey) = {
+            let (initialized, auto_enabled, force_ct, drag_active, bar_rect, dock_rect, ui_rects, quads, last_ignore, toggle_hotkey) = {
                 let Ok(guard) = state.lock() else {
                     continue;
                 };
@@ -592,9 +623,11 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
                     guard.initialized,
                     guard.auto_passthrough,
                     guard.force_click_through,
+                    guard.drag_active,
                     guard.bar_rect.clone(),
                     guard.dock_rect.clone(),
-                    guard.quad.clone(),
+                    guard.ui_rects.clone(),
+                    guard.quads.clone(),
                     guard.last_ignore,
                     guard.toggle_hotkey.clone(),
                 )
@@ -643,8 +676,15 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
             let mouse_down = unsafe {
                 (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0
                     || (GetAsyncKeyState(VK_RBUTTON as i32) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(VK_MBUTTON as i32) as u16 & 0x8000) != 0
             };
-            if mouse_down && last_ignore == Some(false) {
+            if mouse_down && (last_ignore == Some(false) || drag_active) {
+                if last_ignore != Some(false) {
+                    apply_ignore_cursor(&window, false);
+                    if let Ok(mut guard) = state.lock() {
+                        guard.last_ignore = Some(false);
+                    }
+                }
                 continue;
             }
 
@@ -660,14 +700,27 @@ fn spawn_windows_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState
             let local_x = (pt.x - win_pos.x) as f64 / scale;
             let local_y = (pt.y - win_pos.y) as f64 / scale;
 
+            if (local_x - last_emitted_cursor.0).abs() >= 2.0
+                || (local_y - last_emitted_cursor.1).abs() >= 2.0
+            {
+                last_emitted_cursor = (local_x, local_y);
+                let _ = window.emit("overlay-cursor-pos", (local_x, local_y));
+            }
+
             let hit_bar = point_in_rect_padded(local_x, local_y, &bar_rect, 14.0);
+            let hit_dock = point_in_rect_padded(local_x, local_y, &dock_rect, 14.0);
+            let hit_extra_ui = ui_rects
+                .iter()
+                .any(|r| point_in_rect_padded(local_x, local_y, r, 10.0));
+            let hit_ui = hit_bar || hit_dock || hit_extra_ui;
             let should_ignore = if force_ct {
-                // Locked pass-through: board & dock pass through, but top control bar remains clickable!
-                !hit_bar
+                // Element-level pass-through never disables UI windows (ControlBar, PenpaDock, Layers, Toolbar)
+                !hit_ui
             } else {
-                let hit_dock = point_in_rect_padded(local_x, local_y, &dock_rect, 14.0);
-                let hit_board = point_in_quad_padded(local_x, local_y, &quad, 28.0);
-                !(hit_bar || hit_dock || hit_board)
+                let hit_board = quads
+                    .iter()
+                    .any(|q| point_in_quad_padded(local_x, local_y, q, 26.0));
+                !(hit_ui || hit_board)
             };
 
             if last_ignore != Some(should_ignore) {
@@ -803,6 +856,7 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
         let mut prev_hotkey_down = false;
         let mut prev_accent = read_macos_accent_hex();
         let mut accent_tick: u32 = 0;
+        let mut last_emitted_cursor: (f64, f64) = (-10000.0, -10000.0);
         loop {
             thread::sleep(Duration::from_millis(25));
 
@@ -816,7 +870,7 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
                 }
             }
 
-            let (initialized, auto_enabled, force_ct, bar_rect, dock_rect, quad, last_ignore, toggle_hotkey) = {
+            let (initialized, auto_enabled, force_ct, bar_rect, dock_rect, ui_rects, quads, last_ignore, toggle_hotkey) = {
                 let Ok(guard) = state.lock() else {
                     continue;
                 };
@@ -826,7 +880,8 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
                     guard.force_click_through,
                     guard.bar_rect.clone(),
                     guard.dock_rect.clone(),
-                    guard.quad.clone(),
+                    guard.ui_rects.clone(),
+                    guard.quads.clone(),
                     guard.last_ignore,
                     guard.toggle_hotkey.clone(),
                 )
@@ -903,13 +958,26 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
             let local_x = pt.x - win_logical_x;
             let local_y = pt.y - win_logical_y;
 
+            if (local_x - last_emitted_cursor.0).abs() >= 2.0
+                || (local_y - last_emitted_cursor.1).abs() >= 2.0
+            {
+                last_emitted_cursor = (local_x, local_y);
+                let _ = window.emit("overlay-cursor-pos", (local_x, local_y));
+            }
+
             let hit_bar = point_in_rect_padded(local_x, local_y, &bar_rect, 14.0);
+            let hit_dock = point_in_rect_padded(local_x, local_y, &dock_rect, 14.0);
+            let hit_extra_ui = ui_rects
+                .iter()
+                .any(|r| point_in_rect_padded(local_x, local_y, r, 10.0));
+            let hit_ui = hit_bar || hit_dock || hit_extra_ui;
             let should_ignore = if force_ct {
-                !hit_bar
+                !hit_ui
             } else {
-                let hit_dock = point_in_rect_padded(local_x, local_y, &dock_rect, 14.0);
-                let hit_board = point_in_quad_padded(local_x, local_y, &quad, 28.0);
-                !(hit_bar || hit_dock || hit_board)
+                let hit_board = quads
+                    .iter()
+                    .any(|q| point_in_quad_padded(local_x, local_y, q, 26.0));
+                !(hit_ui || hit_board)
             };
 
             if last_ignore != Some(should_ignore) {
@@ -944,6 +1012,7 @@ pub fn run() {
             set_window_theme,
             open_external_url,
             update_hit_regions,
+            set_drag_active,
             get_system_accent_color,
             set_toggle_hotkey,
             close_app
@@ -954,6 +1023,7 @@ pub fn run() {
                 let _ = window.set_shadow(false);
                 let _ = window.set_maximizable(false);
                 let _ = window.set_resizable(false);
+                let _ = window.set_always_on_top(false);
                 let _ = window.set_ignore_cursor_events(false);
                 fit_overlay_window_to_monitor(&window);
 

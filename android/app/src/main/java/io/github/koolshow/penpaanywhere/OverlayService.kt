@@ -194,6 +194,8 @@ class OverlayService : Service() {
     // Legacy proxies only used on Android < 13 (API < 33)
     private var boardProxy: TouchProxyWindow? = null
     private var dockProxy: TouchProxyWindow? = null
+    private var layersProxy: TouchProxyWindow? = null
+    private var toolbarProxy: TouchProxyWindow? = null
     private var barProxy: TouchProxyWindow? = null
 
     private var regionPassthroughEnabled = true
@@ -203,8 +205,10 @@ class OverlayService : Service() {
 
     private var lastBarRect: Rect? = null
     private var lastDockRect: Rect? = null
+    private var lastUiRects: List<Rect> = emptyList()
     private var lastBoardRect: Rect? = null
     private var lastQuadPts: List<PointF> = emptyList()
+    private var lastQuads: List<List<PointF>> = emptyList()
     private var lastCornerPts: List<PointF> = emptyList()
     private var lastScaleX = 1f
     private var lastPayloadJson: String? = null
@@ -413,6 +417,8 @@ class OverlayService : Service() {
         if (!useNativeTouchMask) {
             boardProxy = TouchProxyWindow("board").also { it.attach() }
             dockProxy = TouchProxyWindow("dock").also { it.attach() }
+            layersProxy = TouchProxyWindow("layers").also { it.attach() }
+            toolbarProxy = TouchProxyWindow("toolbar").also { it.attach() }
             barProxy = TouchProxyWindow("bar").also { it.attach() }
         }
 
@@ -586,8 +592,28 @@ class OverlayService : Service() {
             val dockPad = if (useNativeTouchMask) 2 else 4
             lastBarRect = parseCssRect(json.optJSONObject("barRect"), scaleX, scaleY, barPad)
             lastDockRect = parseCssRect(json.optJSONObject("dockRect"), scaleX, scaleY, dockPad)
+            val uiArr = json.optJSONArray("uiRects")
+            val parsedUi = ArrayList<Rect>()
+            if (uiArr != null) {
+                for (i in 0 until uiArr.length()) {
+                    parseCssRect(uiArr.optJSONObject(i), scaleX, scaleY, dockPad)?.let { parsedUi.add(it) }
+                }
+            }
+            lastUiRects = parsedUi
             lastBoardRect = parseCssRect(json.optJSONObject("boardRect"), scaleX, scaleY, 4)
             lastQuadPts = parseCssPoints(json.optJSONArray("quad"), scaleX, scaleY)
+            val quadsArr = json.optJSONArray("quads")
+            val parsedQuads = ArrayList<List<PointF>>()
+            if (quadsArr != null) {
+                for (i in 0 until quadsArr.length()) {
+                    val pts = parseCssPoints(quadsArr.optJSONArray(i), scaleX, scaleY)
+                    if (pts.size == 4) parsedQuads.add(pts)
+                }
+            }
+            if (parsedQuads.isEmpty() && lastQuadPts.size == 4) {
+                parsedQuads.add(lastQuadPts)
+            }
+            lastQuads = parsedQuads
             lastCornerPts = parseCssPoints(json.optJSONArray("corners"), scaleX, scaleY)
 
             val flagsChanged = (nextPassthrough != regionPassthroughEnabled) || (nextForce != forceClickThrough)
@@ -614,17 +640,17 @@ class OverlayService : Service() {
         if (!regionPassthroughEnabled) {
             boardProxy?.updateRect(null)
             dockProxy?.updateRect(null)
+            layersProxy?.updateRect(null)
+            toolbarProxy?.updateRect(null)
             barProxy?.updateRect(null)
             return
         }
-        if (forceClickThrough) {
-            boardProxy?.updateRect(null)
-            dockProxy?.updateRect(null)
-            barProxy?.updateRect(lastBarRect)
-            return
-        }
-        boardProxy?.updateRect(lastBoardRect)
+        // PenpaDockWindow, LayersWindow, ElementToolbar & ControlBar never pass through;
+        // only boardProxy is excluded when grid element passThrough is enabled.
+        boardProxy?.updateRect(if (forceClickThrough) null else lastBoardRect)
         dockProxy?.updateRect(lastDockRect)
+        layersProxy?.updateRect(lastUiRects.getOrNull(0))
+        toolbarProxy?.updateRect(lastUiRects.getOrNull(1))
         barProxy?.updateRect(lastBarRect)
     }
 
@@ -657,25 +683,28 @@ class OverlayService : Service() {
 
         val mask = Region()
 
-        // Always keep top control bar interactive so user can unlock passthrough / switch modes
+        // Always keep ControlBar, PenpaDockWindow(s), LayersWindow, and Element Floating Toolbar interactive
         lastBarRect?.let { mask.op(it, Region.Op.UNION) }
+        lastDockRect?.let { mask.op(it, Region.Op.UNION) }
+        for (uiRect in lastUiRects) {
+            mask.op(uiRect, Region.Op.UNION)
+        }
 
         if (!forceClickThrough) {
-            lastDockRect?.let { mask.op(it, Region.Op.UNION) }
-
-            // Exact arbitrary perspective quad mask (matches distorted trapezoid/quadrilateral!)
-            val polyPts = if (lastQuadPts.size == 4) lastQuadPts else lastCornerPts
-            if (polyPts.size == 4) {
-                val polyPath = Path().apply {
-                    moveTo(polyPts[0].x, polyPts[0].y)
-                    lineTo(polyPts[1].x, polyPts[1].y)
-                    lineTo(polyPts[2].x, polyPts[2].y)
-                    lineTo(polyPts[3].x, polyPts[3].y)
-                    close()
+            // Exact arbitrary perspective quad masks for ALL interactive world elements (grids, images, screens)
+            if (lastQuads.isNotEmpty()) {
+                for (polyPts in lastQuads) {
+                    val polyPath = Path().apply {
+                        moveTo(polyPts[0].x, polyPts[0].y)
+                        lineTo(polyPts[1].x, polyPts[1].y)
+                        lineTo(polyPts[2].x, polyPts[2].y)
+                        lineTo(polyPts[3].x, polyPts[3].y)
+                        close()
+                    }
+                    val polyRegion = Region()
+                    polyRegion.setPath(polyPath, clip)
+                    mask.op(polyRegion, Region.Op.UNION)
                 }
-                val polyRegion = Region()
-                polyRegion.setPath(polyPath, clip)
-                mask.op(polyRegion, Region.Op.UNION)
             } else {
                 lastBoardRect?.let { mask.op(it, Region.Op.UNION) }
             }
@@ -892,9 +921,13 @@ class OverlayService : Service() {
         ImagePickerActivity.onImagePicked = null
         barProxy?.detach()
         dockProxy?.detach()
+        layersProxy?.detach()
+        toolbarProxy?.detach()
         boardProxy?.detach()
         barProxy = null
         dockProxy = null
+        layersProxy = null
+        toolbarProxy = null
         boardProxy = null
         rootContainer?.let { root ->
             try {
