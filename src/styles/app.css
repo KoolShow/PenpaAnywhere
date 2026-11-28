@@ -82,7 +82,7 @@ body,
 }
 
 @media (hover: hover) {
-  .ac-btn:hover {
+  .ac-btn:not(:disabled):hover {
     background: var(--md-sys-color-surface-container-highest);
     border-color: var(--md-sys-color-outline);
     color: var(--md-sys-color-on-surface);
@@ -117,13 +117,13 @@ body,
 }
 
 @media (hover: hover) {
-  .ac-btn.action:hover {
+  .ac-btn.action:not(:disabled):hover {
     background: color-mix(in srgb, var(--md-sys-color-on-surface) 14%, var(--md-sys-color-surface-container-highest));
     border-color: transparent;
   }
 }
 
-.ac-btn.action:active {
+.ac-btn.action:not(:disabled):active {
   transform: scale(0.96);
 }
 
@@ -134,7 +134,7 @@ body,
 }
 
 @media (hover: hover) {
-  .ac-btn.action.primary:hover {
+  .ac-btn.action.primary:not(:disabled):hover {
     background: color-mix(in srgb, var(--md-sys-color-on-primary) 10%, var(--md-sys-color-primary));
   }
 }
@@ -145,7 +145,7 @@ body,
 }
 
 @media (hover: hover) {
-  .ac-btn.action.tonal:hover {
+  .ac-btn.action.tonal:not(:disabled):hover {
     background: color-mix(in srgb, var(--md-sys-color-on-secondary-container) 12%, var(--md-sys-color-secondary-container));
   }
 }
@@ -157,9 +157,14 @@ body,
 }
 
 @media (hover: hover) {
-  .ac-btn.action.danger:hover {
+  .ac-btn.action.danger:not(:disabled):hover {
     background: color-mix(in srgb, var(--md-sys-color-on-error-container) 12%, var(--md-sys-color-error-container));
   }
+}
+
+.ac-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
 }
 
 .ac-btn.has-icon {

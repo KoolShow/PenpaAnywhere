@@ -112,10 +112,65 @@ export interface GroupSelectionTarget {
   locked: boolean;
   passThrough: boolean;
   hasGrid: boolean;
+  gridCount: number;
   dockVisible: boolean;
 }
 
 export type SelectableTarget = WorldElement | GroupSelectionTarget;
+
+export interface TargetSetCapabilities {
+  count: number;
+  hasGrid: boolean;
+  anyDockVisible: boolean;
+  canBringFront: boolean;
+  canSendBack: boolean;
+  canLock: boolean;
+  canDelete: boolean;
+}
+
+/**
+ * Single source of truth for per-target deletion eligibility.
+ * Shared by single selection, groups, and multi-selection.
+ */
+export function canDeleteSingleTarget(
+  target: SelectableTarget | null,
+  allowDelete = true,
+): boolean {
+  return allowDelete && !!target;
+}
+
+/**
+ * Unified capability inspection shared by both Group targets and Multi-Selection sets.
+ */
+export function inspectTargetSet(
+  targets: ReadonlyArray<SelectableTarget>,
+  allowDelete = true,
+): TargetSetCapabilities {
+  let hasGrid = false;
+  let anyDockVisible = false;
+  let canLock = false;
+  let canDelete = allowDelete && targets.length > 0;
+  for (const t of targets) {
+    if (t.kind === 'grid') {
+      hasGrid = true;
+      if (t.dockVisible) anyDockVisible = true;
+    } else if (t.kind === 'group') {
+      if (t.hasGrid) hasGrid = true;
+      if (t.dockVisible) anyDockVisible = true;
+    }
+    if (!t.locked) canLock = true;
+    if (!canDeleteSingleTarget(t, allowDelete)) canDelete = false;
+  }
+  return {
+    count: targets.length,
+    hasGrid,
+    anyDockVisible,
+    canBringFront: targets.length > 0,
+    canSendBack: targets.length > 0,
+    canLock,
+    canDelete,
+  };
+}
 
 export function getParentGroup(
   id: string,

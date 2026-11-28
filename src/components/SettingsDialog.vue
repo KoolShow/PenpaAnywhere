@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { DEFAULT_PENPA_MD3_CSS } from '../core/defaultPenpaCss';
 import HueRingPicker from './HueRingPicker.vue';
 import MdIcon from './MdIcon.vue';
@@ -45,6 +45,8 @@ const props = defineProps<{
   penpaBlurOpacity: number;
   overlayFullCanvas: boolean;
   showUnavailableOptions: boolean;
+  highlightKey?: 'overlayFullCanvas' | null;
+  highlightTick?: number;
   androidScreenshotStatus?: AndroidScreenshotCompositeStatus | null;
 }>();
 
@@ -114,6 +116,43 @@ function handleOpenExternal(url: string) {
 const cssDraft = ref(props.customCss);
 const cssEditorHeight = ref(220);
 const cssResizing = ref(false);
+const overlayFullCanvasRowEl = ref<HTMLElement | null>(null);
+const flashingKey = ref<'overlayFullCanvas' | null>(null);
+let flashTimer = 0;
+
+function clearHighlightFlash() {
+  if (flashTimer) {
+    window.clearTimeout(flashTimer);
+    flashTimer = 0;
+  }
+  flashingKey.value = null;
+}
+
+function triggerHighlightFlash() {
+  if (!props.open || props.highlightKey !== 'overlayFullCanvas') return;
+  clearHighlightFlash();
+  void nextTick(() => {
+    overlayFullCanvasRowEl.value?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    requestAnimationFrame(() => {
+      flashingKey.value = 'overlayFullCanvas';
+      flashTimer = window.setTimeout(() => {
+        flashTimer = 0;
+        flashingKey.value = null;
+      }, 1900);
+    });
+  });
+}
+
+watch(
+  [() => props.open, () => props.highlightTick],
+  ([isOpen]) => {
+    if (!isOpen) {
+      clearHighlightFlash();
+    } else if (props.highlightKey) {
+      triggerHighlightFlash();
+    }
+  },
+);
 
 let resizeSession: {
   pointerId: number;
@@ -231,6 +270,7 @@ function clearCss() {
 }
 
 onBeforeUnmount(() => {
+  clearHighlightFlash();
   finishCssResize();
 });
 </script>
@@ -406,7 +446,11 @@ onBeforeUnmount(() => {
           <div class="ac-setting-section ac-setting-section-animated">
             <div class="ac-collapse" :class="{ open: showOverlayFullCanvasRow }" :inert="!showOverlayFullCanvasRow">
               <div class="ac-collapse-inner ac-collapse-pad-bottom">
-                <div class="ac-setting-row">
+                <div
+                  ref="overlayFullCanvasRowEl"
+                  class="ac-setting-row ac-setting-row-highlightable"
+                  :class="{ 'ac-setting-row-flash': flashingKey === 'overlayFullCanvas' }"
+                >
                   <div>
                     <div class="ac-setting-label">{{ messages.settings.overlayFullCanvasLabel }}</div>
                     <div class="ac-setting-desc">{{ messages.settings.overlayFullCanvasDesc }}</div>
@@ -788,6 +832,28 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 10px 12px;
+}
+
+.ac-setting-row-highlightable {
+  padding: 6px 8px;
+  margin: -6px -8px;
+  border-radius: 12px;
+}
+
+.ac-setting-row-flash {
+  animation: ac-setting-attention-pulse 0.6s cubic-bezier(0.2, 0, 0, 1) 3;
+}
+
+@keyframes ac-setting-attention-pulse {
+  0%,
+  100% {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px transparent;
+  }
+  45% {
+    background: color-mix(in srgb, var(--md-sys-color-primary-container) 78%, transparent);
+    box-shadow: inset 0 0 0 1.5px var(--md-sys-color-primary);
+  }
 }
 
 .ac-setting-row > div:first-child {
