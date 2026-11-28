@@ -313,10 +313,17 @@ export class WebGLPerspectiveRenderer {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
-  destroy() {
+  destroy(releaseContext = false) {
     const gl = this.gl;
     gl.deleteTexture(this.texture);
     if (this.vao) gl.deleteVertexArray(this.vao);
     gl.deleteProgram(this.program);
+    if (releaseContext) {
+      try {
+        gl.getExtension('WEBGL_lose_context')?.loseContext();
+      } catch {
+        // ignore if unsupported
+      }
+    }
   }
 }

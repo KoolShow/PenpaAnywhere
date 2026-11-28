@@ -57,7 +57,8 @@ declare global {
     __PENPAANYWHERE_PREVIEW_IMAGE__?: (dataUrl: string, filename: string, mimeType: string) => void;
     __PENPAANYWHERE_IS_DEBUG__?: boolean;
     __PENPAANYWHERE_TOGGLE_DEVTOOLS__?: (shouldToggle?: boolean) => boolean;
-    __PENPAANYWHERE_ON_IFRAME_INTERACT__?: () => void;
+    __PENPAANYWHERE_ON_IFRAME_INTERACT__?: (gridId?: string) => void;
+    __PENPAANYWHERE_CLONE_GRID__?: (sourceGridId: string, penpaParam: string) => void;
   }
 }
 

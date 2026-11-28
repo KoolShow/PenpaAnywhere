@@ -5,6 +5,17 @@
   // with `this._expDate` (undefined in forEach / 2147483647 days -> Invalid Date), making every
   // cookie session-only so settings reset on app restart. Back document.cookie with localStorage
   // so every Penpa+ UserSettings preference persists across Web, Tauri, and Android restarts.
+  // Identify this Penpa+ iframe instance from its host-assigned data-grid-id attribute
+  // (never use location.search/hash so upstream Penpa+ boot() never treats gridId as a puzzle URL).
+  var GRID_ID = 'grid_primary';
+  try {
+    var fe = window.frameElement;
+    var attrId = fe && typeof fe.getAttribute === 'function' ? fe.getAttribute('data-grid-id') : '';
+    if (attrId && typeof attrId === 'string' && attrId.trim()) {
+      GRID_ID = attrId.trim();
+    }
+  } catch (_) {}
+
   var COOKIE_STORAGE_KEY = 'penpaanywhere:penpa_cookies_v1';
   var nativeCookieDesc =
     Object.getOwnPropertyDescriptor(Document.prototype, 'cookie') ||
@@ -55,6 +66,7 @@
       configurable: true,
       enumerable: true,
       get: function () {
+        cookieStore = readCookieStore();
         var keys = Object.keys(cookieStore);
         var pairs = [];
         for (var i = 0; i < keys.length; i++) {
@@ -89,6 +101,7 @@
           }
         }
 
+        cookieStore = readCookieStore();
         if (isDelete) {
           delete cookieStore[name];
         } else {
@@ -463,26 +476,18 @@
     true
   );
 
-  function getUnsupportedTitle() {
-    var lang = '';
-    try {
-      lang = (typeof UserSettings !== 'undefined' && UserSettings.app_language) || cookieStore.app_language || '';
-    } catch (_) {}
-    if (lang === 'EN') return 'Not supported yet';
-    if (lang === 'JP') return '現在サポートされていません';
-    return '暂不支持';
-  }
-
-  function notifyCloneUnsupported() {
+  function cloneGridViaHost(param) {
     try {
       if (
         window.parent &&
         window.parent !== window &&
-        typeof window.parent.__PENPAANYWHERE_ON_UNAVAILABLE__ === 'function'
+        typeof window.parent.__PENPAANYWHERE_CLONE_GRID__ === 'function'
       ) {
-        window.parent.__PENPAANYWHERE_ON_UNAVAILABLE__('penpaCloneUnsupported');
+        window.parent.__PENPAANYWHERE_CLONE_GRID__(GRID_ID, param || '');
+        return true;
       }
     } catch (_) {}
+    return false;
   }
 
   function relocateHeaderIntoSettingsModal() {
@@ -494,43 +499,33 @@
     }
   }
 
-  function disableDuplicateControl() {
-    var btn = document.getElementById('duplicate');
-    if (btn) {
-      btn.removeAttribute('onclick');
-      btn.setAttribute('aria-disabled', 'true');
-      btn.classList.add('ac-penpa-disabled');
-      btn.title = getUnsupportedTitle();
-      if (!btn.__acCloneDisabledBound) {
-        btn.__acCloneDisabledBound = true;
-        btn.addEventListener(
-          'click',
-          function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-            notifyCloneUnsupported();
-          },
-          true
-        );
-      }
-    }
+  function patchDuplicateControl() {
     if (typeof window.duplicate === 'function' && !window.duplicate.__acPatched) {
       var wrappedDup = function (inPlace) {
+        if (!window.pu || typeof window.pu.maketext_duplicate !== 'function') return;
+        var rawAddr = '';
+        try {
+          rawAddr = window.pu.maketext_duplicate();
+          if (window.pu.mmode === 'solve') {
+            rawAddr = rawAddr + '&l=solvedup';
+          }
+        } catch (_) {
+          return;
+        }
+        var param = extractPenpaParamString(rawAddr);
         if (inPlace) {
           // Use same-origin hash when updating in-place history so official external base URL
           // never triggers a cross-origin SecurityError in history.pushState.
-          if (window.pu && typeof window.pu.maketext_duplicate === 'function') {
+          if (param) {
             try {
-              var param = extractPenpaParamString(window.pu.maketext_duplicate());
-              if (param) {
-                window.history.pushState('', '', '#' + param);
-              }
+              window.history.pushState('', '', '#' + param);
             } catch (_) {}
           }
           return;
         }
-        notifyCloneUnsupported();
+        if (param) {
+          cloneGridViaHost(param);
+        }
       };
       wrappedDup.__acPatched = true;
       window.duplicate = wrappedDup;
@@ -540,17 +535,32 @@
   var frameVersion = 1;
   var listeners = new Set();
   var patchedProtos = new WeakSet();
-  var DRAFT_KEY = 'penpaanywhere:penpa_draft_v1';
+  var DRAFT_KEY =
+    GRID_ID === 'grid_primary'
+      ? 'penpaanywhere:penpa_draft_v1'
+      : 'penpaanywhere:penpa_draft_v1:' + GRID_ID;
   var draftSaveTimer = 0;
   var isRestoringDraft = false;
   var draftRestoreAttempted = false;
+  var draftSuppressed = false;
+
+  function suppressDraftSave() {
+    draftSuppressed = true;
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = 0;
+    }
+    try {
+      window.localStorage.removeItem(DRAFT_KEY);
+    } catch (_) {}
+  }
 
   function saveDraftNow() {
     if (draftSaveTimer) {
       clearTimeout(draftSaveTimer);
       draftSaveTimer = 0;
     }
-    if (isRestoringDraft || !draftRestoreAttempted) return;
+    if (draftSuppressed || isRestoringDraft || !draftRestoreAttempted) return;
     if (!window.pu || typeof window.pu.maketext_duplicate !== 'function') return;
     try {
       var param = extractPenpaParamString(window.pu.maketext_duplicate());
@@ -561,7 +571,7 @@
   }
 
   function scheduleDraftSave() {
-    if (isRestoringDraft || !draftRestoreAttempted) return;
+    if (draftSuppressed || isRestoringDraft || !draftRestoreAttempted) return;
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
     draftSaveTimer = setTimeout(function () {
       draftSaveTimer = 0;
@@ -662,7 +672,7 @@
 
   function tryPatchPuzzleProto() {
     relocateHeaderIntoSettingsModal();
-    disableDuplicateControl();
+    patchDuplicateControl();
     if (typeof window.Puzzle === 'function' && window.Puzzle.prototype) {
       patchPuzzlePrototype(window.Puzzle.prototype);
     }
@@ -912,7 +922,7 @@
         window.parent !== window &&
         typeof window.parent.__PENPAANYWHERE_ON_IFRAME_INTERACT__ === 'function'
       ) {
-        window.parent.__PENPAANYWHERE_ON_IFRAME_INTERACT__();
+        window.parent.__PENPAANYWHERE_ON_IFRAME_INTERACT__(GRID_ID);
       }
     } catch (_) {}
   }
@@ -1178,6 +1188,7 @@
     extractPenpaParamString: extractPenpaParamString,
     toOfficialPenpaUrl: toOfficialPenpaUrl,
     saveDraftNow: saveDraftNow,
+    suppressDraftSave: suppressDraftSave,
     setMd3Tokens: function (tokens) {
       if (!tokens || typeof tokens !== 'object') return;
       var rootStyle = document.documentElement && document.documentElement.style;
@@ -1209,7 +1220,7 @@
       try {
         if (typeof UserSettings !== 'undefined') {
           UserSettings.app_language = lang;
-          disableDuplicateControl();
+          patchDuplicateControl();
           return;
         }
       } catch (_) {}
@@ -1220,7 +1231,7 @@
           opt.dispatchEvent(new Event('change', { bubbles: true }));
         }
       } catch (_) {}
-      disableDuplicateControl();
+      patchDuplicateControl();
     },
     subscribe: function (fn) {
       listeners.add(fn);

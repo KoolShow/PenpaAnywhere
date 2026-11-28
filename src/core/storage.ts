@@ -38,7 +38,28 @@ export interface PersistedElementGroup {
   passThrough: boolean;
 }
 
+export interface PersistedGridElement {
+  id: string;
+  worldId: string;
+  label: string;
+  corners: [Point2D, Point2D, Point2D, Point2D];
+  quadMode: 'rect' | 'free';
+  crop: MediaCrop;
+  blendMode: BlendRenderMode;
+  opacity: number;
+  enhanceOpacity: boolean;
+  dockVisible: boolean;
+  visible: boolean;
+  locked: boolean;
+  passThrough: boolean;
+  zIndex: number;
+}
+
 export interface PersistedAppState {
+  /** Persisted Penpa+ Grid elements (multi-grid). Migrated from legacy top-level fields on first load. */
+  gridItems?: PersistedGridElement[];
+  /** Per-grid floating Penpa+ tool window geometry (keyed by grid.id). */
+  gridDocks?: Record<string, PersistedDockState>;
   blendMode?: BlendRenderMode;
   alignTarget?: 'grid' | 'canvas';
   quadMode?: 'rect' | 'free';
@@ -81,6 +102,24 @@ export interface PersistedAppState {
 }
 
 const STORAGE_KEY = 'penpaanywhere:ui_state_v1';
+export const PRIMARY_GRID_ID = 'grid_primary';
+const LEGACY_PENPA_DRAFT_KEY = 'penpaanywhere:penpa_draft_v1';
+
+export function getPenpaDraftStorageKey(gridId: string): string {
+  return gridId === PRIMARY_GRID_ID
+    ? LEGACY_PENPA_DRAFT_KEY
+    : `${LEGACY_PENPA_DRAFT_KEY}:${gridId}`;
+}
+
+export function deletePenpaDraftStorage(gridId: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(getPenpaDraftStorageKey(gridId));
+  } catch {
+    // ignore storage errors
+  }
+}
+
 let cachedState: PersistedAppState | null = null;
 let saveTimer = 0;
 

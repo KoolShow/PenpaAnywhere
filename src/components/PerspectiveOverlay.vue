@@ -42,6 +42,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'select', id: string, additive: boolean): void;
   (e: 'focus-multi-member', id: string): void;
+  (e: 'draw-interact', id: string): void;
   (e: 'move-start', id: string): void;
   (e: 'translate-by', id: string, dxWorld: number, dyWorld: number): void;
   (e: 'move-end'): void;
@@ -378,6 +379,7 @@ function onSurfacePointerDown(e: PointerEvent) {
   }
 
   // Locked grid: draw in Penpa+
+  emit('draw-interact', props.element.id);
   if (!props.bridge || !props.bridge.isReady()) return;
   const uv = clientToPenpaUv(e.clientX, e.clientY);
   if (!uv) return;
@@ -499,11 +501,11 @@ onBeforeUnmount(() => {
   resizeObserver = null;
   window.removeEventListener('resize', handleResize);
   if (unsubscribeBridge) unsubscribeBridge();
-  renderer?.destroy();
+  renderer?.destroy(true);
   renderer = null;
 });
 
-function captureOverlayPng(): string | null {
+function renderFrameNow(): HTMLCanvasElement | null {
   if (!glCanvasEl.value || !renderer) return null;
   const invH = homographyState.value.invH;
   if (invH) {
@@ -519,14 +521,21 @@ function captureOverlayPng(): string | null {
       props.element.enhanceOpacity,
     );
   }
+  return glCanvasEl.value;
+}
+
+function captureOverlayPng(): string | null {
+  const canvas = renderFrameNow();
+  if (!canvas) return null;
   try {
-    return glCanvasEl.value.toDataURL('image/png');
+    return canvas.toDataURL('image/png');
   } catch {
     return null;
   }
 }
 
 defineExpose({
+  renderFrameNow,
   captureOverlayPng,
 });
 </script>

@@ -94,12 +94,3 @@ body > #header {
   padding-top: 4px !important;
   padding-bottom: 4px !important;
 }
-
-/* Clone (#duplicate) button is disabled in PenpaAnywhere (not supported yet) */
-#duplicate.ac-penpa-disabled,
-#duplicate.ac-penpa-disabled:hover,
-#duplicate.ac-penpa-disabled:active {
-  opacity: 0.42 !important;
-  border-style: dashed !important;
-  cursor: not-allowed !important;
-}

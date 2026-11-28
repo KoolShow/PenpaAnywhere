@@ -52,6 +52,7 @@ export interface PenpaIframeBridge {
   dispatchKey(type: 'keydown' | 'keyup', opts: PenpaKeyOpts): void;
   forceRedraw(): void;
   saveDraftNow?(): void;
+  suppressDraftSave?(): void;
   setMd3Tokens?(tokens: Record<string, string>): void;
   setCustomCss?(css: string): void;
   setLanguage?(lang: 'ZH' | 'EN' | 'JP'): void;
