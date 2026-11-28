@@ -85,6 +85,7 @@ export interface PersistedAppState {
   /** Persisted element groups (atomic selection & drag units). */
   elementGroups?: PersistedElementGroup[];
   bar?: PersistedBarState;
+  barByMonitor?: Record<string, PersistedBarState>;
   dock?: PersistedDockState;
   layersWindow?: PersistedLayersWindowState;
   customCssEnabled?: boolean;
@@ -98,6 +99,7 @@ export interface PersistedAppState {
   penpaScale?: number;
   penpaBlurOpacity?: number;
   overlayFullCanvas?: boolean;
+  multiMonitorEnabled?: boolean;
   showUnavailableOptions?: boolean;
 }
 

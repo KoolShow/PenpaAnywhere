@@ -273,6 +273,19 @@ export class WebGLPerspectiveRenderer {
     return true;
   }
 
+  uploadRawRgbaIfNeeded(rgba: Uint8Array, width: number, height: number, version: number): boolean {
+    if (width <= 0 || height <= 0 || rgba.byteLength < width * height * 4) return false;
+    if (this.hasTexture && version === this.lastUploadedVersion) return false;
+
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    this.lastUploadedVersion = version;
+    this.hasTexture = true;
+    return true;
+  }
+
   clear() {
     const gl = this.gl;
     gl.clearColor(0, 0, 0, 0);

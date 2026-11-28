@@ -119,8 +119,8 @@ export function initSafeAreaBridge(): void {
         // ignore if command unavailable
       }
       try {
-        const { listen } = await import('@tauri-apps/api/event');
-        await listen<SafeAreaInsets>('safe-area-insets-changed', (ev) => {
+        const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+        await getCurrentWebviewWindow().listen<SafeAreaInsets>('safe-area-insets-changed', (ev) => {
           if (ev.payload) {
             applySafeAreaInsets(ev.payload, true);
           }

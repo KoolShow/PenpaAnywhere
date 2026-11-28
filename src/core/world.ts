@@ -152,6 +152,199 @@ export function multiplyMat3(a: Mat3, b: Mat3): Mat3 {
 /**
  * Pan viewport by a delta measured in viewport pixels.
  */
+export interface PhysicalRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Snapshot of a connected physical display reported by the OS.
+ * Explicitly distinguishes OS System Primary Monitor (`isPrimary`) from the
+ * App Launch Monitor (`isLaunch`, where the user started the application).
+ */
+export interface MonitorDescriptor {
+  id: string;
+  name: string;
+  physRect: PhysicalRect;
+  workArea: PhysicalRect;
+  scale: number;
+  isPrimary: boolean;
+  isLaunch: boolean;
+}
+
+/**
+ * Build a WorldViewportTransform that projects Desktop Physical Coordinates directly into a
+ * specific monitor's local CSS viewport:
+ *   cssX = (physX - monitor.physRect.x) / monitor.scale
+ *   cssY = (physY - monitor.physRect.y) / monitor.scale
+ *
+ * Because adjacent monitors share exact edges in Windows physical pixel space (and macOS logical
+ * point space when scale=1), seams across mixed-DPI displays are 100% continuous.
+ */
+export function monitorToViewportTransform(monitor: MonitorDescriptor): WorldViewportTransform {
+  const safeScale =
+    typeof monitor.scale === 'number' && Number.isFinite(monitor.scale) && monitor.scale > 0.1
+      ? monitor.scale
+      : 1;
+  return {
+    offsetX: monitor.physRect.x,
+    offsetY: monitor.physRect.y,
+    zoom: 1 / safeScale,
+  };
+}
+
+export function physicalToMonitorCss(pt: Point2D, monitor: MonitorDescriptor): Point2D {
+  return worldToViewport(pt, monitorToViewportTransform(monitor));
+}
+
+export function monitorCssToPhysical(pt: Point2D, monitor: MonitorDescriptor): Point2D {
+  return viewportToWorld(pt, monitorToViewportTransform(monitor));
+}
+
+export function physicalQuadToMonitorCss(
+  quad: [Point2D, Point2D, Point2D, Point2D],
+  monitor: MonitorDescriptor,
+): [Point2D, Point2D, Point2D, Point2D] {
+  return worldQuadToViewport(quad, monitorToViewportTransform(monitor));
+}
+
+export function monitorCssQuadToPhysical(
+  quad: [Point2D, Point2D, Point2D, Point2D],
+  monitor: MonitorDescriptor,
+): [Point2D, Point2D, Point2D, Point2D] {
+  const v = monitorToViewportTransform(monitor);
+  return [
+    viewportToWorld(quad[0], v),
+    viewportToWorld(quad[1], v),
+    viewportToWorld(quad[2], v),
+    viewportToWorld(quad[3], v),
+  ];
+}
+
+export function quadCentroid(quad: [Point2D, Point2D, Point2D, Point2D]): Point2D {
+  return {
+    x: (quad[0].x + quad[1].x + quad[2].x + quad[3].x) * 0.25,
+    y: (quad[0].y + quad[1].y + quad[2].y + quad[3].y) * 0.25,
+  };
+}
+
+/**
+ * Find the monitor containing a physical desktop point, falling back to the nearest monitor
+ * (Euclidean distance to rect) if the point lies in a dead void between heterogeneous displays.
+ */
+export function findMonitorContainingPhysicalPoint(
+  pt: Point2D,
+  monitors: ReadonlyArray<MonitorDescriptor>,
+): MonitorDescriptor | null {
+  if (monitors.length === 0) return null;
+  for (const m of monitors) {
+    const r = m.physRect;
+    if (pt.x >= r.x && pt.x < r.x + r.w && pt.y >= r.y && pt.y < r.y + r.h) {
+      return m;
+    }
+  }
+  let best = monitors[0];
+  let bestDistSq = Infinity;
+  for (const m of monitors) {
+    const r = m.physRect;
+    const cx = Math.max(r.x, Math.min(r.x + r.w, pt.x));
+    const cy = Math.max(r.y, Math.min(r.y + r.h, pt.y));
+    const dx = pt.x - cx;
+    const dy = pt.y - cy;
+    const distSq = dx * dx + dy * dy;
+    if (distSq < bestDistSq) {
+      bestDistSq = distSq;
+      best = m;
+    }
+  }
+  return best;
+}
+
+/**
+ * Resolve the owning monitor of an element in Desktop Physical space by its quad center.
+ */
+export function findOwnerMonitorForPhysicalQuad(
+  physQuad: [Point2D, Point2D, Point2D, Point2D],
+  monitors: ReadonlyArray<MonitorDescriptor>,
+): MonitorDescriptor | null {
+  return findMonitorContainingPhysicalPoint(quadCentroid(physQuad), monitors);
+}
+
+/**
+ * Check whether a physical-space quad's AABB overlaps a monitor's physical bounds
+ * (expanded by optional physical margin for gizmo handles / floating toolbars).
+ */
+export function quadIntersectsMonitor(
+  physQuad: [Point2D, Point2D, Point2D, Point2D],
+  monitor: MonitorDescriptor,
+  marginPhys = 0,
+): boolean {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of physQuad) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const r = monitor.physRect;
+  return (
+    maxX >= r.x - marginPhys &&
+    minX <= r.x + r.w + marginPhys &&
+    maxY >= r.y - marginPhys &&
+    minY <= r.y + r.h + marginPhys
+  );
+}
+
+/**
+ * Windows Per-Monitor V2 scaling behavior: when an element's owning monitor switches from
+ * `prevScale` to `nextScale`, rescale its physical corners around `pivotPhys` by `nextScale / prevScale`
+ * so its visual physical size remains consistent across mixed-DPI displays.
+ */
+export function rescalePhysicalQuadForMonitorChange(
+  physQuad: [Point2D, Point2D, Point2D, Point2D],
+  prevScale: number,
+  nextScale: number,
+  pivotPhys?: Point2D,
+): [Point2D, Point2D, Point2D, Point2D] {
+  const s0 = prevScale > 0.1 ? prevScale : 1;
+  const s1 = nextScale > 0.1 ? nextScale : 1;
+  const ratio = s1 / s0;
+  if (Math.abs(ratio - 1) < 1e-4) {
+    return [
+      { ...physQuad[0] },
+      { ...physQuad[1] },
+      { ...physQuad[2] },
+      { ...physQuad[3] },
+    ];
+  }
+  const pivot = pivotPhys ?? quadCentroid(physQuad);
+  return [
+    { x: pivot.x + (physQuad[0].x - pivot.x) * ratio, y: pivot.y + (physQuad[0].y - pivot.y) * ratio },
+    { x: pivot.x + (physQuad[1].x - pivot.x) * ratio, y: pivot.y + (physQuad[1].y - pivot.y) * ratio },
+    { x: pivot.x + (physQuad[2].x - pivot.x) * ratio, y: pivot.y + (physQuad[2].y - pivot.y) * ratio },
+    { x: pivot.x + (physQuad[3].x - pivot.x) * ratio, y: pivot.y + (physQuad[3].y - pivot.y) * ratio },
+  ];
+}
+
+export function dipQuadToPhysical(
+  dipQuad: [Point2D, Point2D, Point2D, Point2D],
+  anchorMonitor: MonitorDescriptor,
+): [Point2D, Point2D, Point2D, Point2D] {
+  return monitorCssQuadToPhysical(dipQuad, anchorMonitor);
+}
+
+export function physicalQuadToDip(
+  physQuad: [Point2D, Point2D, Point2D, Point2D],
+  anchorMonitor: MonitorDescriptor,
+): [Point2D, Point2D, Point2D, Point2D] {
+  return physicalQuadToMonitorCss(physQuad, anchorMonitor);
+}
+
 export function panViewportBy(
   v: WorldViewportTransform,
   dxViewport: number,
