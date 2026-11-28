@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { setAndroidKeyboardFocusable, type RuntimePlatform } from '../core/platform';
 import type { WorkspaceMode } from '../core/world';
-import type { SelectableTarget } from '../core/canvasItems';
+import { canDeleteSingleTarget, type SelectableTarget } from '../core/canvasItems';
 import { loadPersistedState, patchPersistedState, type ButtonDisplayMode } from '../core/storage';
 import { safeAreaInsets } from '../core/safeArea';
 import { currentLocale, formatMessage, messages } from '../core/i18n';
@@ -41,6 +41,7 @@ const emit = defineEmits<{
   (e: 'update:layersVisible', v: boolean): void;
   (e: 'update:alwaysOnTop', v: boolean): void;
   (e: 'unavailable-click', key: UnavailableReasonKey): void;
+  (e: 'add-grid'): void;
   (e: 'add-image'): void;
   (e: 'add-screen'): void;
   (e: 'select-element', id: string, additive: boolean): void;
@@ -60,7 +61,6 @@ const emit = defineEmits<{
 const barEl = ref<HTMLElement | null>(null);
 const savedBar = loadPersistedState().bar;
 const compact = ref(savedBar?.compact ?? false);
-const addMenuOpen = ref(false);
 const editingId = ref<string | null>(null);
 const editingValue = ref('');
 let renameInputEl: HTMLInputElement | null = null;
@@ -123,21 +123,17 @@ const displayElements = computed(() =>
   [...props.elements].sort((a, b) => b.zIndex - a.zIndex),
 );
 
-const activePanel = computed<'add' | 'layers' | null>(() => {
-  if (compact.value || !props.fullCanvasEnabled) return null;
-  if (addMenuOpen.value) return 'add';
-  if (props.layersVisible) return 'layers';
-  return null;
-});
+const layersPanelOpen = computed(
+  () => !compact.value && props.fullCanvasEnabled && props.layersVisible,
+);
 
-watch(activePanel, (panel) => {
-  if (panel !== 'layers') cancelRename();
+watch(layersPanelOpen, (open) => {
+  if (!open) cancelRename();
 });
 
 watch(
   () => props.fullCanvasEnabled,
-  (enabled) => {
-    if (!enabled) addMenuOpen.value = false;
+  () => {
     requestAnimationFrame(reportBounds);
   },
 );
@@ -219,48 +215,31 @@ function handleOverlayModeClick() {
     emit('unavailable-click', 'overlayWeb');
     return;
   }
-  addMenuOpen.value = false;
   emit('update:backdropMode', 'overlay');
 }
 
-function handleToggleAddMenu() {
-  const next = !addMenuOpen.value;
-  addMenuOpen.value = next;
-  if (next && props.layersVisible) {
-    emit('update:layersVisible', false);
-  }
+function handleToggleLayers() {
+  emit('update:layersVisible', !props.layersVisible);
   requestAnimationFrame(reportBounds);
 }
 
-function handleToggleLayers() {
-  const next = !props.layersVisible;
-  if (next) addMenuOpen.value = false;
-  emit('update:layersVisible', next);
+function handleAddGridClick() {
+  emit('add-grid');
   requestAnimationFrame(reportBounds);
 }
 
 function handleAddImageClick() {
-  addMenuOpen.value = false;
   emit('add-image');
   requestAnimationFrame(reportBounds);
 }
 
 function handleAddScreenClick() {
-  addMenuOpen.value = false;
   requestAnimationFrame(reportBounds);
   if (!props.canScreenCapture) {
     emit('unavailable-click', 'screenUnsupported');
     return;
   }
   emit('add-screen');
-}
-
-function onGlobalPointerDown(e: PointerEvent) {
-  if (!addMenuOpen.value) return;
-  if (barEl.value && !barEl.value.contains(e.target as Node)) {
-    addMenuOpen.value = false;
-    requestAnimationFrame(reportBounds);
-  }
 }
 
 // Universal drag from toolbar header/buttons (ignores scrollable layers table body so clicks/scrolls feel native)
@@ -338,7 +317,6 @@ function onBarClickCapture(e: MouseEvent) {
 
 function toggleCompact() {
   compact.value = !compact.value;
-  addMenuOpen.value = false;
   persistBarState();
   requestAnimationFrame(reportBounds);
 }
@@ -364,7 +342,6 @@ onMounted(() => {
   requestAnimationFrame(clampBarToViewport);
   barResizeObserver = new ResizeObserver(reportBounds);
   if (barEl.value) barResizeObserver.observe(barEl.value);
-  window.addEventListener('pointerdown', onGlobalPointerDown, true);
   window.addEventListener('pointermove', onWindowBarPointerMove);
   window.addEventListener('pointerup', onWindowBarPointerUp);
   window.addEventListener('pointercancel', onWindowBarPointerUp);
@@ -375,7 +352,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   finishBarDrag(false);
   barResizeObserver?.disconnect();
-  window.removeEventListener('pointerdown', onGlobalPointerDown, true);
   window.removeEventListener('pointermove', onWindowBarPointerMove);
   window.removeEventListener('pointerup', onWindowBarPointerUp);
   window.removeEventListener('pointercancel', onWindowBarPointerUp);
@@ -419,19 +395,7 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <!-- Toggle buttons (切换式): Add, Layers (hidden when fullCanvasEnabled=false) -->
-          <MdActionBtn
-            v-if="fullCanvasEnabled"
-            class="ac-gap-left"
-            icon="add"
-            :label="messages.bar.add"
-            :title="messages.bar.addTitle"
-            :mode="buttonDisplayMode"
-            variant="toggle"
-            :active="addMenuOpen"
-            @click="handleToggleAddMenu"
-          />
-
+          <!-- Layers toggle (includes inline Add actions; hidden in simple Overlay mode) -->
           <MdActionBtn
             v-if="fullCanvasEnabled"
             class="ac-gap-left"
@@ -440,7 +404,7 @@ onBeforeUnmount(() => {
             :title="messages.bar.layersTitle"
             :mode="buttonDisplayMode"
             variant="toggle"
-            :active="layersVisible && !addMenuOpen"
+            :active="layersVisible"
             @click="handleToggleLayers"
           />
 
@@ -500,31 +464,43 @@ onBeforeUnmount(() => {
       />
     </div>
 
-    <!-- Pure-DOM MD3 inline expandable strip ("Add" picker OR aligned "Layers" table) -->
-    <div class="ac-popover-wrap" :class="{ open: activePanel !== null }">
+    <!-- Pure-DOM MD3 inline expandable Layers drawer (with merged Add strip at top) -->
+    <div class="ac-popover-wrap" :class="{ open: layersPanelOpen }">
       <div class="ac-popover-inner">
-        <div v-if="activePanel === 'add'" class="ac-popover-row">
-          <MdActionBtn
-            icon="image"
-            :label="messages.bar.addImageOption"
-            :mode="buttonDisplayMode"
-            variant="trigger"
-            tone="tonal"
-            @click="handleAddImageClick"
-          />
-          <MdActionBtn
-            v-if="canScreenCapture || showUnavailableOptions"
-            icon="cast"
-            :label="messages.bar.addScreenOption"
-            :mode="buttonDisplayMode"
-            variant="trigger"
-            tone="tonal"
-            :unavailable="!canScreenCapture"
-            @click="handleAddScreenClick"
-          />
-        </div>
+        <template v-if="layersPanelOpen">
+          <div class="ac-layers-add-row">
+            <MdActionBtn
+              icon="grid_on"
+              :label="messages.bar.addGridOption"
+              :mode="buttonDisplayMode"
+              variant="trigger"
+              tone="tonal"
+              size="sm"
+              @click="handleAddGridClick"
+            />
+            <MdActionBtn
+              icon="image"
+              :label="messages.bar.addImageOption"
+              :mode="buttonDisplayMode"
+              variant="trigger"
+              tone="tonal"
+              size="sm"
+              @click="handleAddImageClick"
+            />
+            <MdActionBtn
+              v-if="canScreenCapture || showUnavailableOptions"
+              icon="cast"
+              :label="messages.bar.addScreenOption"
+              :mode="buttonDisplayMode"
+              variant="trigger"
+              tone="tonal"
+              size="sm"
+              :unavailable="!canScreenCapture"
+              @click="handleAddScreenClick"
+            />
+          </div>
 
-        <div v-else-if="activePanel === 'layers'" class="ac-layers-scroll" @wheel.stop>
+          <div class="ac-layers-scroll" @wheel.stop>
           <div v-if="displayElements.length === 0" class="ac-layers-empty">
             {{ messages.layers.empty }}
           </div>
@@ -590,8 +566,11 @@ onBeforeUnmount(() => {
                 <td class="col-act" @click.stop>
                   <button
                     class="ac-icon-btn xs"
-                    :class="{ danger: el.locked && el.passThrough, active: el.locked && el.passThrough }"
-                    :disabled="!el.locked"
+                    :class="{
+                      danger: el.locked && el.visible && el.passThrough,
+                      active: el.locked && el.visible && el.passThrough,
+                    }"
+                    :disabled="!el.locked || !el.visible"
                     :title="messages.layers.passThrough"
                     :aria-label="messages.layers.passThrough"
                     @click="emit('toggle-passthrough', el.id)"
@@ -636,8 +615,8 @@ onBeforeUnmount(() => {
                 <td class="col-act" @click.stop>
                   <button
                     class="ac-icon-btn xs"
-                    :class="{ danger: !targetHasGrid(el) }"
-                    :disabled="targetHasGrid(el)"
+                    :class="{ danger: canDeleteSingleTarget(el) }"
+                    :disabled="!canDeleteSingleTarget(el)"
                     :title="messages.layers.remove"
                     :aria-label="messages.layers.remove"
                     @click="emit('remove-element', el.id)"
@@ -648,7 +627,8 @@ onBeforeUnmount(() => {
               </tr>
             </tbody>
           </table>
-        </div>
+          </div>
+        </template>
       </div>
     </div>
   </nav>
@@ -808,13 +788,13 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
-.ac-popover-row {
+.ac-layers-add-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   width: 100%;
-  padding-top: 5px;
+  padding: 6px 0;
   border-top: 1px solid var(--md-sys-color-outline-variant);
 }
 
@@ -825,8 +805,8 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   overflow-x: auto;
   overscroll-behavior: contain;
-  padding-top: 6px;
-  border-top: 1px solid var(--md-sys-color-outline-variant);
+  padding-top: 5px;
+  border-top: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 70%, transparent);
   cursor: default;
   touch-action: pan-y;
 }

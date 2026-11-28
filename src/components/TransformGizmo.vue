@@ -10,9 +10,11 @@ import {
 } from '../core/homography';
 import {
   applyRectCropDrag,
+  canDeleteSingleTarget,
   cloneQuad,
   createDefaultCrop,
   getCroppedSubRect,
+  inspectTargetSet,
   isItemCropped,
   type CropDraft,
   type MediaCrop,
@@ -69,10 +71,12 @@ interface SafeBounds {
 
 const props = defineProps<{
   selectedTargets: SelectableTarget[];
-  hoveredLockedTarget: SelectableTarget | null;
+  hoveredTarget: SelectableTarget | null;
+  linkedHighlightQuad?: [Point2D, Point2D, Point2D, Point2D] | null;
   viewportTransform: WorldViewportTransform;
   worldBoundedToViewport: boolean;
   showLayerOrderActions: boolean;
+  allowDelete: boolean;
   buttonDisplayMode: ButtonDisplayMode;
   cropDraft: CropDraft | null;
   gridBounds?: GridBoundsNormalized;
@@ -90,13 +94,14 @@ const emit = defineEmits<{
   (e: 'cancel-crop'): void;
   (e: 'group-selected'): void;
   (e: 'ungroup-target', id: string): void;
+  (e: 'toggle-visible', ids: string[]): void;
   (e: 'toggle-passthrough', id: string): void;
-  (e: 'toggle-dock', id: string): void;
-  (e: 'bring-front', id: string): void;
-  (e: 'send-back', id: string): void;
-  (e: 'remove-element', id: string): void;
+  (e: 'toggle-dock', ids: string[]): void;
+  (e: 'bring-front', ids: string[]): void;
+  (e: 'send-back', ids: string[]): void;
+  (e: 'remove-element', ids: string[]): void;
   (e: 'unlock-element', id: string): void;
-  (e: 'lock-element', id: string): void;
+  (e: 'lock-element', ids: string[]): void;
   (e: 'toolbar-bounds-change', rect: { x: number; y: number; w: number; h: number }): void;
   (e: 'hover-toolbar-bounds-change', rect: { x: number; y: number; w: number; h: number }): void;
 }>();
@@ -114,6 +119,13 @@ let shiftPressed = false;
 let altPressed = false;
 
 const isMultiSelect = computed(() => props.selectedTargets.length >= 2);
+const selectedTargetIds = computed(() => props.selectedTargets.map((t) => t.id));
+const selectedSetCaps = computed(() => inspectTargetSet(props.selectedTargets, props.allowDelete));
+const linkedHighlightPointsSvg = computed(() => {
+  if (!props.linkedHighlightQuad) return '';
+  const vp = worldQuadToViewport(props.linkedHighlightQuad, props.viewportTransform);
+  return vp.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+});
 const singleTarget = computed<SelectableTarget | null>(() =>
   props.selectedTargets.length === 1 ? props.selectedTargets[0] : null,
 );
@@ -314,15 +326,16 @@ const floatingToolbarStyle = computed(() => {
   return computeFloatingToolbarPos(c, toolbarEl.value, isMultiSelect.value ? 120 : 320);
 });
 
-const distinctHoveredLocked = computed<SelectableTarget | null>(() => {
-  const h = props.hoveredLockedTarget;
-  if (!h || !h.locked || !h.visible) return null;
+const distinctHoveredTarget = computed<SelectableTarget | null>(() => {
+  const h = props.hoveredTarget;
+  if (!h) return null;
+  if (h.visible && !h.locked) return null;
   if (singleTarget.value && singleTarget.value.id === h.id && floatingToolbarStyle.value) return null;
   return h;
 });
 
 const hoverToolbarStyle = computed(() => {
-  const h = distinctHoveredLocked.value;
+  const h = distinctHoveredTarget.value;
   if (!h) return null;
   const vp = worldQuadToViewport(h.corners, props.viewportTransform);
   return computeFloatingToolbarPos(vp, hoverToolbarEl.value, 180);
@@ -336,7 +349,7 @@ function reportToolbarBounds() {
     emit('toolbar-bounds-change', { x: r.left, y: r.top, w: r.width, h: r.height });
   }
 
-  if (!distinctHoveredLocked.value || !hoverToolbarEl.value) {
+  if (!distinctHoveredTarget.value || !hoverToolbarEl.value) {
     emit('hover-toolbar-bounds-change', { x: 0, y: 0, w: 0, h: 0 });
   } else {
     const r = hoverToolbarEl.value.getBoundingClientRect();
@@ -347,7 +360,7 @@ function reportToolbarBounds() {
 watch(
   [
     () => props.selectedTargets,
-    () => props.hoveredLockedTarget,
+    () => props.hoveredTarget,
     () => props.viewportTransform,
     () => props.cropDraft,
     () => props.buttonDisplayMode,
@@ -1135,18 +1148,23 @@ function handleToggleLockFor(t: SelectableTarget | null) {
     emit('unlock-element', t.id);
   } else {
     if (isCropping.value) emit('cancel-crop');
-    emit('lock-element', t.id);
+    emit('lock-element', [t.id]);
   }
 }
 
 function handleTogglePassThroughFor(t: SelectableTarget | null) {
-  if (!t || !t.locked) return;
+  if (!t || !t.locked || !t.visible) return;
   emit('toggle-passthrough', t.id);
+}
+
+function handleToggleVisibleFor(t: SelectableTarget | null) {
+  if (!t) return;
+  emit('toggle-visible', [t.id]);
 }
 
 function handleToggleDockFor(t: SelectableTarget | null) {
   if (!targetHasGrid(t) || !t) return;
-  emit('toggle-dock', t.id);
+  emit('toggle-dock', [t.id]);
 }
 
 function handleToggleLock() {
@@ -1223,7 +1241,15 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div v-if="(singleTarget && viewportCorners) || isMultiSelect || distinctHoveredLocked" class="ac-gizmo-layer">
+  <div
+    v-if="(singleTarget && viewportCorners) || isMultiSelect || distinctHoveredTarget || linkedHighlightPointsSvg"
+    class="ac-gizmo-layer"
+  >
+    <!-- Passive linked-focus highlight when a Penpa+ dock window is focused (only when >= 2 grids exist) -->
+    <svg v-if="linkedHighlightPointsSvg" class="ac-gizmo-svg ac-linked-highlight-svg" aria-hidden="true">
+      <polygon :points="linkedHighlightPointsSvg" class="ac-linked-highlight-poly" />
+    </svg>
+
     <!-- Multi-selection outlines (Ctrl/Cmd + click multiple targets) -->
     <svg v-if="isMultiSelect" class="ac-gizmo-svg">
       <polygon
@@ -1359,9 +1385,10 @@ onBeforeUnmount(() => {
       @pointerdown.stop
     >
       <div class="ac-toolbar-main">
-        <!-- State 0: Multi-Selection -> Group button -->
-        <template v-if="isMultiSelect">
+        <!-- State 0 & State 3 (Unified): Multi-Selection OR Unlocked Group share identical target-set logic -->
+        <template v-if="isMultiSelect || (singleTarget && isGroupTarget && !isLocked)">
           <MdActionBtn
+            v-if="isMultiSelect"
             icon="stack_group"
             :label="messages.stage.group"
             :title="messages.stage.groupTitle"
@@ -1371,20 +1398,112 @@ onBeforeUnmount(() => {
             size="sm"
             @click="emit('group-selected')"
           />
+          <MdActionBtn
+            v-else-if="singleTarget"
+            icon="stack"
+            :label="messages.stage.ungroup"
+            :title="messages.stage.ungroupTitle"
+            :mode="buttonDisplayMode"
+            variant="trigger"
+            tone="tonal"
+            size="sm"
+            @click="emit('ungroup-target', singleTarget.id)"
+          />
+
+          <template v-if="showLayerOrderActions">
+            <MdActionBtn
+              v-if="selectedSetCaps.canBringFront"
+              icon="vertical_align_top"
+              :label="messages.stage.bringFront"
+              :mode="buttonDisplayMode"
+              variant="trigger"
+              size="sm"
+              @click="emit('bring-front', selectedTargetIds)"
+            />
+            <MdActionBtn
+              v-if="selectedSetCaps.canSendBack"
+              icon="vertical_align_bottom"
+              :label="messages.stage.sendBack"
+              :mode="buttonDisplayMode"
+              variant="trigger"
+              size="sm"
+              @click="emit('send-back', selectedTargetIds)"
+            />
+          </template>
+
+          <MdActionBtn
+            icon="visibility"
+            :label="messages.layers.hide"
+            :title="messages.layers.hide"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            :active="false"
+            size="sm"
+            @click="emit('toggle-visible', selectedTargetIds)"
+          />
+
+          <MdActionBtn
+            v-if="selectedSetCaps.hasGrid"
+            icon="build"
+            :label="messages.bar.tools"
+            :title="messages.bar.toolsTitle"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            :active="selectedSetCaps.anyDockVisible"
+            size="sm"
+            @click="emit('toggle-dock', selectedTargetIds)"
+          />
+
+          <MdActionBtn
+            v-if="selectedSetCaps.canLock"
+            icon="lock_open"
+            :label="messages.stage.lock"
+            :title="messages.stage.lock"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            size="sm"
+            @click="emit('lock-element', selectedTargetIds)"
+          />
+
+          <MdActionBtn
+            v-if="selectedSetCaps.canDelete"
+            icon="delete"
+            :label="messages.stage.remove"
+            :mode="buttonDisplayMode"
+            variant="trigger"
+            tone="danger"
+            size="sm"
+            @click="emit('remove-element', selectedTargetIds)"
+          />
         </template>
 
-        <!-- State 1: Locked (Element or Group) -> PassThrough (+ Tools if has grid) + Unlock on far right -->
+        <!-- State 1: Locked (Element or Group) -> PassThrough + Show/Hide (+ Tools if has grid) + Unlock -->
         <template v-else-if="singleTarget && isLocked">
           <MdActionBtn
             icon="do_not_touch"
-            :label="singleTarget.passThrough ? messages.bar.passthroughOn : messages.bar.passthroughOff"
+            :label="
+              singleTarget.visible && singleTarget.passThrough
+                ? messages.bar.passthroughOn
+                : messages.bar.passthroughOff
+            "
             :title="messages.bar.passthroughTitle"
             :mode="buttonDisplayMode"
             variant="toggle"
-            :tone="singleTarget.passThrough ? 'danger' : 'default'"
-            :active="singleTarget.passThrough"
+            :tone="singleTarget.visible && singleTarget.passThrough ? 'danger' : 'default'"
+            :active="singleTarget.visible && singleTarget.passThrough"
+            :disabled="!singleTarget.visible"
             size="sm"
             @click="handleTogglePassThrough"
+          />
+          <MdActionBtn
+            :icon="singleTarget.visible ? 'visibility' : 'visibility_off'"
+            :label="singleTarget.visible ? messages.layers.hide : messages.layers.show"
+            :title="singleTarget.visible ? messages.layers.hide : messages.layers.show"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            :active="!singleTarget.visible"
+            size="sm"
+            @click="handleToggleVisibleFor(singleTarget)"
           />
           <MdActionBtn
             v-if="targetHasGrid(singleTarget)"
@@ -1431,72 +1550,6 @@ onBeforeUnmount(() => {
           <button class="ac-btn action primary" @click="emit('commit-crop')">
             {{ messages.stage.cropDone }}
           </button>
-        </template>
-
-        <!-- State 3: Unlocked Group -> rect move/resize via handles; crop & free transform disabled -->
-        <template v-else-if="singleTarget && isGroupTarget">
-          <MdActionBtn
-            icon="stack"
-            :label="messages.stage.ungroup"
-            :title="messages.stage.ungroupTitle"
-            :mode="buttonDisplayMode"
-            variant="trigger"
-            tone="tonal"
-            size="sm"
-            @click="emit('ungroup-target', singleTarget.id)"
-          />
-
-          <template v-if="showLayerOrderActions">
-            <MdActionBtn
-              icon="vertical_align_top"
-              :label="messages.stage.bringFront"
-              :mode="buttonDisplayMode"
-              variant="trigger"
-              size="sm"
-              @click="emit('bring-front', singleTarget.id)"
-            />
-            <MdActionBtn
-              icon="vertical_align_bottom"
-              :label="messages.stage.sendBack"
-              :mode="buttonDisplayMode"
-              variant="trigger"
-              size="sm"
-              @click="emit('send-back', singleTarget.id)"
-            />
-          </template>
-
-          <MdActionBtn
-            v-if="targetHasGrid(singleTarget)"
-            icon="build"
-            :label="messages.bar.tools"
-            :title="messages.bar.toolsTitle"
-            :mode="buttonDisplayMode"
-            variant="toggle"
-            :active="targetDockVisible(singleTarget)"
-            size="sm"
-            @click="handleToggleDock"
-          />
-
-          <MdActionBtn
-            icon="lock_open"
-            :label="messages.stage.lock"
-            :title="messages.stage.lock"
-            :mode="buttonDisplayMode"
-            variant="toggle"
-            size="sm"
-            @click="handleToggleLock"
-          />
-
-          <MdActionBtn
-            v-if="!targetHasGrid(singleTarget)"
-            icon="delete"
-            :label="messages.stage.remove"
-            :mode="buttonDisplayMode"
-            variant="trigger"
-            tone="danger"
-            size="sm"
-            @click="emit('remove-element', singleTarget.id)"
-          />
         </template>
 
         <!-- State 4: Unlocked Single Element -> Rect|Free, Reset, Crop, Front, Back, Tools, Lock, Delete -->
@@ -1547,7 +1600,7 @@ onBeforeUnmount(() => {
               :mode="buttonDisplayMode"
               variant="trigger"
               size="sm"
-              @click="emit('bring-front', singleElement.id)"
+              @click="emit('bring-front', [singleElement.id])"
             />
             <MdActionBtn
               icon="vertical_align_bottom"
@@ -1555,9 +1608,20 @@ onBeforeUnmount(() => {
               :mode="buttonDisplayMode"
               variant="trigger"
               size="sm"
-              @click="emit('send-back', singleElement.id)"
+              @click="emit('send-back', [singleElement.id])"
             />
           </template>
+
+          <MdActionBtn
+            icon="visibility"
+            :label="messages.layers.hide"
+            :title="messages.layers.hide"
+            :mode="buttonDisplayMode"
+            variant="toggle"
+            :active="false"
+            size="sm"
+            @click="handleToggleVisibleFor(singleElement)"
+          />
 
           <MdActionBtn
             v-if="singleElement.kind === 'grid'"
@@ -1582,60 +1646,76 @@ onBeforeUnmount(() => {
           />
 
           <MdActionBtn
-            v-if="singleElement.kind !== 'grid'"
+            v-if="canDeleteSingleTarget(singleElement, allowDelete)"
             icon="delete"
             :label="messages.stage.remove"
             :mode="buttonDisplayMode"
             variant="trigger"
             tone="danger"
             size="sm"
-            @click="emit('remove-element', singleElement.id)"
+            @click="emit('remove-element', [singleElement.id])"
           />
         </template>
       </div>
     </div>
 
-    <!-- Hover-revealed Floating Toolbar for Locked Elements & Locked Groups -->
+    <!-- Hover-revealed Floating Toolbar for Locked Targets & Toolbar-Hidden Targets -->
     <div
-      v-if="distinctHoveredLocked && hoverToolbarStyle"
+      v-if="distinctHoveredTarget && hoverToolbarStyle"
       ref="hoverToolbarEl"
       class="ac-element-toolbar ac-hover-locked-toolbar locked-toolbar"
-      :data-element-id="distinctHoveredLocked.id"
+      :data-element-id="distinctHoveredTarget.id"
       :style="hoverToolbarStyle"
       @pointerdown.stop
     >
       <div class="ac-toolbar-main">
         <MdActionBtn
+          v-if="distinctHoveredTarget.locked"
           icon="do_not_touch"
-          :label="distinctHoveredLocked.passThrough ? messages.bar.passthroughOn : messages.bar.passthroughOff"
+          :label="
+            distinctHoveredTarget.visible && distinctHoveredTarget.passThrough
+              ? messages.bar.passthroughOn
+              : messages.bar.passthroughOff
+          "
           :title="messages.bar.passthroughTitle"
           :mode="buttonDisplayMode"
           variant="toggle"
-          :tone="distinctHoveredLocked.passThrough ? 'danger' : 'default'"
-          :active="distinctHoveredLocked.passThrough"
+          :tone="distinctHoveredTarget.visible && distinctHoveredTarget.passThrough ? 'danger' : 'default'"
+          :active="distinctHoveredTarget.visible && distinctHoveredTarget.passThrough"
+          :disabled="!distinctHoveredTarget.visible"
           size="sm"
-          @click="handleTogglePassThroughFor(distinctHoveredLocked)"
+          @click="handleTogglePassThroughFor(distinctHoveredTarget)"
         />
         <MdActionBtn
-          v-if="targetHasGrid(distinctHoveredLocked)"
+          :icon="distinctHoveredTarget.visible ? 'visibility' : 'visibility_off'"
+          :label="distinctHoveredTarget.visible ? messages.layers.hide : messages.layers.show"
+          :title="distinctHoveredTarget.visible ? messages.layers.hide : messages.layers.show"
+          :mode="buttonDisplayMode"
+          variant="toggle"
+          :active="!distinctHoveredTarget.visible"
+          size="sm"
+          @click="handleToggleVisibleFor(distinctHoveredTarget)"
+        />
+        <MdActionBtn
+          v-if="targetHasGrid(distinctHoveredTarget)"
           icon="build"
           :label="messages.bar.tools"
           :title="messages.bar.toolsTitle"
           :mode="buttonDisplayMode"
           variant="toggle"
-          :active="targetDockVisible(distinctHoveredLocked)"
+          :active="targetDockVisible(distinctHoveredTarget)"
           size="sm"
-          @click="handleToggleDockFor(distinctHoveredLocked)"
+          @click="handleToggleDockFor(distinctHoveredTarget)"
         />
         <MdActionBtn
-          icon="lock"
-          :label="messages.stage.unlock"
-          :title="messages.stage.unlock"
+          :icon="distinctHoveredTarget.locked ? 'lock' : 'lock_open'"
+          :label="distinctHoveredTarget.locked ? messages.stage.unlock : messages.stage.lock"
+          :title="distinctHoveredTarget.locked ? messages.stage.unlock : messages.stage.lock"
           :mode="buttonDisplayMode"
           variant="toggle"
-          :active="true"
+          :active="distinctHoveredTarget.locked"
           size="sm"
-          @click="handleToggleLockFor(distinctHoveredLocked)"
+          @click="handleToggleLockFor(distinctHoveredTarget)"
         />
       </div>
     </div>
@@ -1681,6 +1761,14 @@ onBeforeUnmount(() => {
   stroke-width: 1.75;
   stroke-dasharray: 5 4;
   opacity: 0.82;
+}
+
+.ac-linked-highlight-poly {
+  fill: none;
+  stroke: var(--md-sys-color-primary);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+  pointer-events: none;
 }
 
 .ac-outer-poly {

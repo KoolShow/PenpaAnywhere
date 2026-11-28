@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { getPenpaBridge, type PenpaIframeBridge } from '../core/penpaBridge';
 import type { BlendRenderMode } from '../core/webglOverlay';
 import type { WorkspaceMode } from '../core/world';
 import type { UnavailableReasonKey } from './ControlBar.vue';
-import { loadPersistedState, patchPersistedState } from '../core/storage';
+import type { PersistedDockState } from '../core/storage';
+import { setAndroidKeyboardFocusable } from '../core/platform';
 import { safeAreaInsets } from '../core/safeArea';
 import { messages } from '../core/i18n';
 import { beginGlobalDrag, endGlobalDrag, tryCapturePointer, tryReleasePointer } from '../core/dragGuard';
@@ -12,8 +13,15 @@ import MdIcon from './MdIcon.vue';
 import MdSlider from './MdSlider.vue';
 
 const props = defineProps<{
+  gridId: string;
   visible: boolean;
   title?: string;
+  label?: string;
+  dockZIndex: number;
+  dockIndex: number;
+  initialDockState?: PersistedDockState;
+  isFocusedDock: boolean;
+  linkedHighlight?: boolean;
   backdropMode: WorkspaceMode;
   blendMode: BlendRenderMode;
   boardOpacity: number;
@@ -22,11 +30,13 @@ const props = defineProps<{
   globalScale: number;
   penpaScale: number;
   blurOpacity: number;
-  iframeInteractTick: number;
 }>();
 
 const emit = defineEmits<{
   (e: 'bridge-ready', bridge: PenpaIframeBridge): void;
+  (e: 'activate'): void;
+  (e: 'rename', label: string): void;
+  (e: 'dock-state-change', state: PersistedDockState): void;
   (e: 'update:visible', value: boolean): void;
   (e: 'update:blendMode', value: BlendRenderMode): void;
   (e: 'update:boardOpacity', value: number): void;
@@ -37,6 +47,37 @@ const emit = defineEmits<{
 
 const dockEl = ref<HTMLElement | null>(null);
 const iframeEl = ref<HTMLIFrameElement | null>(null);
+const titleInputEl = ref<HTMLInputElement | null>(null);
+const editingTitle = ref(false);
+const titleDraft = ref('');
+
+function startTitleRename() {
+  if (editingTitle.value) return;
+  closeRenderBarMenus();
+  editingTitle.value = true;
+  titleDraft.value = props.label || props.title || '';
+  emit('activate');
+  void nextTick(() => {
+    if (titleInputEl.value) {
+      titleInputEl.value.focus();
+      titleInputEl.value.select();
+    }
+  });
+}
+
+function commitTitleRename() {
+  if (!editingTitle.value) return;
+  const trimmed = titleDraft.value.trim();
+  editingTitle.value = false;
+  setAndroidKeyboardFocusable(false);
+  emit('rename', trimmed);
+}
+
+function cancelTitleRename() {
+  if (!editingTitle.value) return;
+  editingTitle.value = false;
+  setAndroidKeyboardFocusable(false);
+}
 
 const blendMenuOpen = ref(false);
 const headerHovered = ref(false);
@@ -45,7 +86,6 @@ const renderBarHoverHold = ref(false);
 const renderBarInteracting = ref(false);
 const touchRenderBarPinned = ref(false);
 const dockHovered = ref(false);
-const dockFocused = ref(false);
 let hoverCloseTimer = 0;
 
 function cancelHoverClose() {
@@ -78,28 +118,12 @@ function onDockPointerLeave(e: PointerEvent) {
 }
 
 function onDockPointerDown() {
-  dockFocused.value = true;
+  emit('activate');
 }
 
 function onDockFocusIn() {
-  dockFocused.value = true;
+  emit('activate');
 }
-
-function onGlobalPointerDownForDockFocus(e: PointerEvent) {
-  if (!dockFocused.value) return;
-  const target = e.target instanceof Node ? e.target : null;
-  if (target && dockEl.value?.contains(target)) return;
-  dockFocused.value = false;
-}
-
-watch(
-  () => props.iframeInteractTick,
-  (tick) => {
-    if (tick > 0 && props.visible) {
-      dockFocused.value = true;
-    }
-  },
-);
 
 function onHeaderPointerEnter(e: PointerEvent) {
   if (e.pointerType === 'touch') return;
@@ -185,7 +209,7 @@ function formatPercent(v: number): string {
   return `${Math.round(v * 100)}%`;
 }
 
-const savedDock = loadPersistedState().dock;
+const savedDock = props.initialDockState;
 const hasSavedDock = !!savedDock;
 
 const collapsed = ref(savedDock?.collapsed ?? false);
@@ -196,6 +220,7 @@ const renderBarOpen = computed(
   () =>
     !collapsed.value &&
     !isInteracting.value &&
+    !editingTitle.value &&
     (headerHovered.value ||
       renderBarHovered.value ||
       renderBarHoverHold.value ||
@@ -207,7 +232,9 @@ const renderBarOpen = computed(
 const effectiveDockOpacity = computed(() => {
   if (
     dockHovered.value ||
-    dockFocused.value ||
+    props.isFocusedDock ||
+    props.linkedHighlight ||
+    editingTitle.value ||
     isInteracting.value ||
     blendMenuOpen.value ||
     renderBarInteracting.value ||
@@ -221,16 +248,17 @@ const effectiveDockOpacity = computed(() => {
 const collapsedW = computed(() => Math.round(168 * (props.globalScale || 1)));
 const collapsedH = computed(() => Math.round(36 * (props.globalScale || 1)));
 
+const cascadeOffset = (props.dockIndex % 6) * 28;
 // Default floating tool window size fits Penpa+ native 600px #buttons with zero layout distortion
 const pos = ref({
   x:
     typeof savedDock?.xRatio === 'number'
       ? Math.round(savedDock.xRatio * (window.innerWidth || 1280))
-      : 20,
+      : 20 + cascadeOffset,
   y:
     typeof savedDock?.yRatio === 'number'
       ? Math.round(savedDock.yRatio * (window.innerHeight || 800))
-      : 64,
+      : 64 + cascadeOffset,
 });
 const size = ref({
   w: typeof savedDock?.w === 'number' && savedDock.w >= 260 ? savedDock.w : 660,
@@ -240,16 +268,14 @@ const size = ref({
 function persistDockState() {
   const vw = Math.max(1, window.innerWidth);
   const vh = Math.max(1, window.innerHeight);
-  patchPersistedState({
-    dock: {
-      xRatio: pos.value.x / vw,
-      yRatio: pos.value.y / vh,
-      w: size.value.w,
-      h: size.value.h,
-      scale: props.penpaScale,
-      opacity: props.blurOpacity,
-      collapsed: collapsed.value,
-    },
+  emit('dock-state-change', {
+    xRatio: pos.value.x / vw,
+    yRatio: pos.value.y / vh,
+    w: size.value.w,
+    h: size.value.h,
+    scale: props.penpaScale,
+    opacity: props.blurOpacity,
+    collapsed: collapsed.value,
   });
 }
 
@@ -298,40 +324,47 @@ function clampPosition(isInitial = false) {
 let dragMode: 'move' | 'resize' | null = null;
 let dragPointerId: number | null = null;
 let dragCapturedEl: Element | null = null;
+let dragSourceEl: HTMLElement | null = null;
 let dragPointerType = 'mouse';
 let dragMoved = false;
+let dragGlobalHeld = false;
 let dragStart = { x: 0, y: 0, origX: 0, origY: 0, origW: 0, origH: 0 };
 
 function finishDockDrag(persist: boolean) {
   if (!dragMode) return;
   const wasTouchTapOnHeader = dragMode === 'move' && dragPointerType === 'touch' && !dragMoved;
+  const wasMoved = dragMoved || dragMode === 'resize';
   if (dragPointerId !== null) {
     tryReleasePointer(dragCapturedEl, dragPointerId);
   }
   dragMode = null;
   dragPointerId = null;
   dragCapturedEl = null;
+  dragSourceEl = null;
   dragMoved = false;
   isInteracting.value = false;
-  endGlobalDrag();
+  if (dragGlobalHeld) {
+    dragGlobalHeld = false;
+    endGlobalDrag();
+  }
   if (wasTouchTapOnHeader && !collapsed.value) {
     touchRenderBarPinned.value = !touchRenderBarPinned.value;
     if (!touchRenderBarPinned.value) blendMenuOpen.value = false;
-  } else if (persist) {
+  } else if (persist && wasMoved) {
     persistDockState();
   }
 }
 
 function startMove(e: PointerEvent) {
+  if (editingTitle.value) return;
   if ((e.target as HTMLElement).closest('button, input, .ac-md-slider')) return;
   if (e.button !== 0 && e.pointerType === 'mouse') return;
-  e.preventDefault();
   if (dragMode) finishDockDrag(false);
   dragMode = 'move';
   dragPointerId = e.pointerId;
   dragPointerType = e.pointerType || 'mouse';
+  dragSourceEl = e.currentTarget as HTMLElement | null;
   dragMoved = false;
-  isInteracting.value = true;
   dragStart = {
     x: e.clientX,
     y: e.clientY,
@@ -340,8 +373,6 @@ function startMove(e: PointerEvent) {
     origW: size.value.w,
     origH: size.value.h,
   };
-  dragCapturedEl = tryCapturePointer(e.currentTarget as HTMLElement, e.pointerId);
-  beginGlobalDrag();
 }
 
 function startResize(e: PointerEvent) {
@@ -361,20 +392,28 @@ function startResize(e: PointerEvent) {
     origH: size.value.h,
   };
   dragCapturedEl = tryCapturePointer(e.currentTarget as HTMLElement, e.pointerId);
+  dragGlobalHeld = true;
   beginGlobalDrag();
 }
 
 function onDragMove(e: PointerEvent) {
   if (!dragMode || (dragPointerId !== null && e.pointerId !== dragPointerId)) return;
-  e.preventDefault();
   const safe = safeAreaInsets.value;
   const minX = safe.left + 4;
   const minY = safe.top + 4;
   const dx = e.clientX - dragStart.x;
   const dy = e.clientY - dragStart.y;
-  if (!dragMoved && Math.hypot(dx, dy) >= 5) {
+  if (dragMode === 'move' && !dragMoved) {
+    if (Math.hypot(dx, dy) < 4) return;
     dragMoved = true;
+    isInteracting.value = true;
+    dragCapturedEl = tryCapturePointer(dragSourceEl, e.pointerId);
+    if (!dragGlobalHeld) {
+      dragGlobalHeld = true;
+      beginGlobalDrag();
+    }
   }
+  e.preventDefault();
   if (dragMode === 'move') {
     const curW = collapsed.value ? collapsedW.value : size.value.w;
     const maxX = Math.max(minX, window.innerWidth - safe.right - Math.min(curW, 100));
@@ -400,10 +439,9 @@ function onWindowDockBlur() {
   closeRenderBarMenus();
   window.setTimeout(() => {
     if (!document.hasFocus()) {
-      dockFocused.value = false;
       dockHovered.value = false;
     } else if (document.activeElement === iframeEl.value) {
-      dockFocused.value = true;
+      emit('activate');
     }
   }, 0);
 }
@@ -444,7 +482,6 @@ function onWindowResize() {
 
 onMounted(() => {
   clampPosition(true);
-  window.addEventListener('pointerdown', onGlobalPointerDownForDockFocus, true);
   window.addEventListener('pointermove', onDragMove);
   window.addEventListener('pointerup', onDragEnd);
   window.addEventListener('pointercancel', onDragEnd);
@@ -466,7 +503,6 @@ watch(
   () => props.visible,
   (vis) => {
     if (!vis) {
-      dockFocused.value = false;
       dockHovered.value = false;
       closeRenderBarMenus();
     }
@@ -477,7 +513,7 @@ watch(
 onBeforeUnmount(() => {
   finishDockDrag(false);
   cancelHoverClose();
-  window.removeEventListener('pointerdown', onGlobalPointerDownForDockFocus, true);
+  emit('bounds-change', { x: -100, y: -100, w: 0, h: 0 });
   window.removeEventListener('pointermove', onDragMove);
   window.removeEventListener('pointerup', onDragEnd);
   window.removeEventListener('pointercancel', onDragEnd);
@@ -494,13 +530,15 @@ onBeforeUnmount(() => {
   <section
     ref="dockEl"
     class="ac-dock"
-    :class="{ collapsed, hidden: !visible, animating: !isInteracting }"
+    :class="{ collapsed, hidden: !visible, animating: !isInteracting, focused: isFocusedDock, 'linked-highlight': linkedHighlight }"
+    :data-grid-id="gridId"
     :style="{
       left: `${pos.x}px`,
       top: `${pos.y}px`,
       width: collapsed ? `${collapsedW}px` : `${size.w}px`,
       height: collapsed ? `${collapsedH}px` : `${size.h}px`,
       opacity: effectiveDockOpacity,
+      zIndex: dockZIndex,
     }"
     @pointerenter="onDockPointerEnter"
     @pointerleave="onDockPointerLeave"
@@ -513,9 +551,24 @@ onBeforeUnmount(() => {
       @pointerenter="onHeaderPointerEnter"
       @pointerleave="onHeaderPointerLeave"
     >
-      <div class="ac-dock-title">
+      <div class="ac-dock-title" @dblclick.stop="startTitleRename">
         <span class="ac-dot" :class="{ ready: readyState }" />
-        <span>{{ title || 'Penpa+' }}</span>
+        <input
+          v-if="editingTitle"
+          ref="titleInputEl"
+          v-model="titleDraft"
+          type="text"
+          class="ac-dock-title-input"
+          @click.stop
+          @pointerdown.stop
+          @dblclick.stop
+          @keydown.stop
+          @keydown.enter.prevent="commitTitleRename"
+          @keydown.esc.prevent="cancelTitleRename"
+          @focus="setAndroidKeyboardFocusable(true)"
+          @blur="commitTitleRename"
+        />
+        <span v-else class="ac-dock-title-text">{{ title || 'Penpa+' }}</span>
       </div>
       <div class="ac-dock-btns">
         <button
@@ -610,6 +663,7 @@ onBeforeUnmount(() => {
       <iframe
         ref="iframeEl"
         src="./penpa-edit/index.html"
+        :data-grid-id="gridId"
         class="ac-penpa-iframe"
         :style="iframeStyle"
         @load="onIframeLoad"
@@ -636,6 +690,15 @@ onBeforeUnmount(() => {
   border: 1px solid var(--md-sys-color-outline-variant);
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.52);
   pointer-events: auto;
+}
+
+.ac-dock.focused {
+  border-color: color-mix(in srgb, var(--md-sys-color-primary) 58%, var(--md-sys-color-outline-variant));
+}
+
+.ac-dock.linked-highlight {
+  outline: 2px dashed var(--md-sys-color-primary);
+  outline-offset: 2px;
 }
 
 .ac-dock.animating {
@@ -674,7 +737,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  flex-shrink: 1;
+  flex: 1 1 auto;
   font-size: 12px;
   font-weight: 600;
   line-height: 1;
@@ -682,6 +745,30 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.ac-dock-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ac-dock-title-input {
+  flex: 1 1 auto;
+  min-width: 64px;
+  max-width: 240px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 6px;
+  border: 1px solid var(--md-sys-color-primary);
+  background: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface);
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .ac-dot {
