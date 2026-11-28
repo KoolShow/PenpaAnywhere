@@ -14,6 +14,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "PenpaAnywhere",
         "width": 1280,
         "height": 800,
@@ -24,7 +25,8 @@
         "transparent": true,
         "alwaysOnTop": true,
         "shadow": false,
-        "skipTaskbar": false
+        "skipTaskbar": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"
       }
     ],
     "security": {

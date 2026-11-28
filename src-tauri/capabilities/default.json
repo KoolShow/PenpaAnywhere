@@ -1,14 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for PenpaAnywhere transparent overlay window",
-  "windows": ["main"],
+  "description": "Default capability for PenpaAnywhere main, overlay viewport, and native floating surface windows",
+  "windows": ["main", "overlay-*", "dock-*", "surface-*"],
   "permissions": [
     "core:default",
     "core:window:default",
     "core:window:allow-set-ignore-cursor-events",
     "core:window:allow-set-always-on-top",
     "core:window:allow-close",
-    "core:event:default"
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:event:default",
+    "core:webview:default"
   ]
 }
