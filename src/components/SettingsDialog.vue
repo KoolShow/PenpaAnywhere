@@ -44,6 +44,7 @@ const props = defineProps<{
   penpaScale: number;
   penpaBlurOpacity: number;
   overlayFullCanvas: boolean;
+  multiMonitorEnabled: boolean;
   showUnavailableOptions: boolean;
   highlightKey?: 'overlayFullCanvas' | null;
   highlightTick?: number;
@@ -59,6 +60,7 @@ const emit = defineEmits<{
   (e: 'update:penpaScale', v: number): void;
   (e: 'update:penpaBlurOpacity', v: number): void;
   (e: 'update:overlayFullCanvas', v: boolean): void;
+  (e: 'update:multiMonitorEnabled', v: boolean): void;
   (e: 'update:showUnavailableOptions', v: boolean): void;
   (e: 'unavailable-click', key: UnavailableReasonKey): void;
   (e: 'toggle-android-screenshot-composite', enabled: boolean): void;
@@ -70,9 +72,11 @@ function formatPercent(v: number): string {
 }
 
 const canOverlayMode = computed(() => supportsOverlaySwitch(props.platform));
+const canMultiMonitor = computed(() => props.platform === 'tauri');
 const showDynamicColorRow = computed(() => dynamicColorSupported.value || props.showUnavailableOptions);
 const showHueRow = computed(() => !dynamicColorEnabled.value || !dynamicColorSupported.value);
 const showOverlayFullCanvasRow = computed(() => canOverlayMode.value || props.showUnavailableOptions);
+const showMultiMonitorRow = computed(() => canMultiMonitor.value || props.showUnavailableOptions);
 const showAndroidShotSection = computed(
   () => props.platform === 'android-overlay' || props.showUnavailableOptions,
 );
@@ -103,6 +107,14 @@ function handleOverlayFullCanvasToggle() {
     return;
   }
   emit('update:overlayFullCanvas', !props.overlayFullCanvas);
+}
+
+function handleMultiMonitorToggle() {
+  if (!canMultiMonitor.value) {
+    emit('unavailable-click', 'multiMonitorUnavailable');
+    return;
+  }
+  emit('update:multiMonitorEnabled', !props.multiMonitorEnabled);
 }
 
 function handleAndroidShotUnavailable() {
@@ -470,6 +482,38 @@ onBeforeUnmount(() => {
                     <span class="ac-md3-switch-thumb">
                       <MdIcon
                         v-if="canOverlayMode && overlayFullCanvas"
+                        name="check"
+                        :size="14"
+                        class="ac-md3-switch-check"
+                      />
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="ac-collapse" :class="{ open: showMultiMonitorRow }" :inert="!showMultiMonitorRow">
+              <div class="ac-collapse-inner ac-collapse-pad-bottom">
+                <div class="ac-setting-row">
+                  <div>
+                    <div class="ac-setting-label">{{ messages.settings.multiMonitorLabel }}</div>
+                    <div class="ac-setting-desc">{{ messages.settings.multiMonitorDesc }}</div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    class="ac-md3-switch"
+                    :aria-checked="canMultiMonitor && multiMonitorEnabled"
+                    :aria-label="messages.settings.multiMonitorLabel"
+                    :class="{
+                      checked: canMultiMonitor && multiMonitorEnabled,
+                      unavailable: !canMultiMonitor,
+                    }"
+                    @click="handleMultiMonitorToggle"
+                  >
+                    <span class="ac-md3-switch-thumb">
+                      <MdIcon
+                        v-if="canMultiMonitor && multiMonitorEnabled"
                         name="check"
                         :size="14"
                         class="ac-md3-switch-check"

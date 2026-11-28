@@ -17,18 +17,62 @@ import {
 import type { BlendRenderMode } from './core/webglOverlay';
 import type { GridBoundsNormalized, PenpaIframeBridge } from './core/penpaBridge';
 import { DEFAULT_PENPA_MD3_CSS } from './core/defaultPenpaCss';
-import { getCurrentMd3Tokens } from './core/theme';
+import {
+  customHue,
+  dynamicColorEnabled,
+  getCurrentMd3Tokens,
+  setCustomHue,
+  setDynamicColorEnabled,
+  setThemeMode,
+  themeMode,
+} from './core/theme';
 import { safeAreaInsets } from './core/safeArea';
 import { beginGlobalDrag, endGlobalDrag, tryCapturePointer, tryReleasePointer } from './core/dragGuard';
-import { currentLocale, formatMessage, getPenpaLangCode, messages } from './core/i18n';
+import { currentLocale, formatMessage, getPenpaLangCode, messages, setLocale } from './core/i18n';
+import {
+  bringNativeSurfaceToFront,
+  broadcastWorldState,
+  destroyNativeSurfaceWindow,
+  ensureNativeSurfaceWindow,
+  getAllGridFrameMetas,
+  getGridFrameRgba,
+  isAnyAppWindowFocused,
+  openLinkedWindow,
+  relayPenpaInput,
+  setNativeSurfaceTitle,
+  setNativeSurfaceVisible,
+  setOsMultiMonitorEnabled,
+  type GridFrameMeta,
+  type SharedBarPositionState,
+  type SharedMultiMonitorHost,
+  type SharedThemeLocaleState,
+} from './core/multiMonitor';
+import type {
+  PenpaPointerOpts,
+  PenpaPointerType,
+  RemoteGridFrame,
+  SerializedWorldElement,
+  WorldCommand,
+  WorldGeometryDelta,
+  WorldStateSnapshot,
+} from './core/worldSync';
 import {
   IDENTITY_VIEWPORT_TRANSFORM,
   ROOT_WORLD_ID,
+  dipQuadToPhysical,
+  findMonitorContainingPhysicalPoint,
+  findOwnerMonitorForPhysicalQuad,
+  monitorToViewportTransform,
   panViewportBy,
+  physicalQuadToDip,
+  quadCentroid,
+  quadIntersectsMonitor,
+  rescalePhysicalQuadForMonitorChange,
   sanitizeViewportTransform,
   viewportToWorld,
   worldQuadToViewport,
   zoomViewportAt,
+  type MonitorDescriptor,
   type WorkspaceMode,
   type WorldViewportTransform,
 } from './core/world';
@@ -353,6 +397,239 @@ watch(
 );
 
 const overlayFullCanvas = ref(savedState.overlayFullCanvas ?? false);
+const multiMonitorEnabled = ref(platform === 'tauri' ? (savedState.multiMonitorEnabled ?? false) : false);
+const osMonitors = ref<MonitorDescriptor[]>([]);
+const multiMonitorActive = computed(() => platform === 'tauri' && multiMonitorEnabled.value);
+const mainMonitor = computed<MonitorDescriptor | null>(() => {
+  const list = osMonitors.value;
+  if (list.length === 0) return null;
+  return list.find((m) => m.isLaunch) ?? list.find((m) => m.isPrimary) ?? list[0] ?? null;
+});
+const multiMonitorOverlayActive = computed(
+  () => multiMonitorActive.value && backdropMode.value === 'overlay' && !!mainMonitor.value,
+);
+// Tracks whether element corners are currently expressed in Desktop Physical Pixels (multi-monitor Overlay)
+// vs canonical DIP coordinates (Single-monitor Overlay & Canvas mode).
+const elementsInPhysicalCoords = ref(false);
+let physicalCoordAnchorMonitor: MonitorDescriptor | null = null;
+const remoteGridFrames = ref<Map<string, RemoteGridFrame>>(new Map());
+const managedNativeDockIds = new Set<string>();
+const openedViewportWindows = new Map<string, Window | null>();
+const openedDockWindows = new Map<string, Window | null>();
+const sharedBridgeSubscribers = new Set<() => void>();
+const sharedScreenStreamSubscribers = new Set<() => void>();
+const activeCursorMonitorId = ref<string | null>(null);
+const modalMonitorId = ref<string | null>(null);
+const sharedBarPosition = ref<SharedBarPositionState | null>(savedState.bar ? { ...savedState.bar } : null);
+const barPositionsByMonitor = ref<Record<string, SharedBarPositionState>>(
+  savedState.barByMonitor ? { ...savedState.barByMonitor } : {},
+);
+
+function getBarPositionForMonitor(monitorId?: string): SharedBarPositionState | null {
+  if (monitorId && monitorId !== mainMonitor.value?.id) {
+    const perMon = barPositionsByMonitor.value[monitorId];
+    if (perMon) return perMon;
+  }
+  return sharedBarPosition.value;
+}
+
+function saveBarPositionForMonitor(st: SharedBarPositionState, monitorId?: string) {
+  const clean: SharedBarPositionState = {
+    xRatio: st.xRatio,
+    yRatio: st.yRatio,
+    compact: !!st.compact,
+  };
+  if (monitorId && monitorId !== mainMonitor.value?.id) {
+    barPositionsByMonitor.value = {
+      ...barPositionsByMonitor.value,
+      [monitorId]: clean,
+    };
+    patchPersistedState({ barByMonitor: { ...barPositionsByMonitor.value } });
+  } else {
+    sharedBarPosition.value = clean;
+    patchPersistedState({ bar: clean });
+  }
+}
+const activeDraggingElementIds = ref<Set<string>>(new Set());
+let worldStateRev = 0;
+let stateBroadcastPending = false;
+let reconcileDockQueue: Promise<void> = Promise.resolve();
+
+function notifySharedBridgeSubscribers() {
+  for (const fn of sharedBridgeSubscribers) {
+    try {
+      fn();
+    } catch {
+      // ignore detached child window listener
+    }
+  }
+}
+
+function notifySharedScreenStreamSubscribers() {
+  for (const fn of sharedScreenStreamSubscribers) {
+    try {
+      fn();
+    } catch {
+      // ignore detached child window listener
+    }
+  }
+}
+
+watch(screenStreams, () => {
+  notifySharedScreenStreamSubscribers();
+});
+
+const isModalOnMainViewport = computed<boolean>(() => {
+  if (!multiMonitorOverlayActive.value || !mainMonitor.value || osMonitors.value.length < 2) {
+    return true;
+  }
+  const targetId = modalMonitorId.value;
+  if (!targetId) return true;
+  return targetId === mainMonitor.value.id;
+});
+
+const activeControlBarMonitorId = computed<string | null>(() => {
+  if (!multiMonitorOverlayActive.value || osMonitors.value.length < 2) {
+    return mainMonitor.value?.id ?? null;
+  }
+  if (settingsOpen.value || !!unavailableReasonKey.value) {
+    return modalMonitorId.value ?? mainMonitor.value?.id ?? null;
+  }
+  if (screenPickerOpen.value || !!imagePreview.value) {
+    return mainMonitor.value?.id ?? null;
+  }
+  if (
+    activeCursorMonitorId.value &&
+    osMonitors.value.some((m) => m.id === activeCursorMonitorId.value)
+  ) {
+    return activeCursorMonitorId.value;
+  }
+  return mainMonitor.value?.id ?? null;
+});
+
+const showControlBarOnMainViewport = computed<boolean>(() => {
+  if (!multiMonitorOverlayActive.value || !mainMonitor.value || osMonitors.value.length < 2) {
+    return true;
+  }
+  return activeControlBarMonitorId.value === mainMonitor.value.id;
+});
+
+// Active monitor viewport transform for spawning newly added elements right where the user's cursor is!
+const activeSpawnViewport = computed<{
+  vp: WorldViewportTransform;
+  vw: number;
+  vh: number;
+}>(() => {
+  if (multiMonitorOverlayActive.value) {
+    const mon =
+      osMonitors.value.find((m) => m.id === activeControlBarMonitorId.value) ?? mainMonitor.value;
+    if (mon) {
+      const scale = mon.scale > 0.1 ? mon.scale : 1;
+      return {
+        vp: monitorToViewportTransform(mon),
+        vw: Math.max(320, Math.round(mon.physRect.w / scale)),
+        vh: Math.max(240, Math.round(mon.physRect.h / scale)),
+      };
+    }
+  }
+  return {
+    vp: effectiveViewportTransform.value,
+    vw: window.innerWidth || 1280,
+    vh: window.innerHeight || 800,
+  };
+});
+
+function reconcileLinkedSecondaryViewports() {
+  if (!multiMonitorOverlayActive.value || !mainMonitor.value) {
+    openedViewportWindows.clear();
+    return;
+  }
+  const mainId = mainMonitor.value.id;
+  const secondaryMons = osMonitors.value.filter((m) => m.id !== mainId);
+  const validIds = new Set(secondaryMons.map((m) => m.id));
+  for (const oldId of Array.from(openedViewportWindows.keys())) {
+    if (!validIds.has(oldId)) {
+      openedViewportWindows.delete(oldId);
+    }
+  }
+  for (const mon of secondaryMons) {
+    const existing = openedViewportWindows.get(mon.id);
+    if (existing && !existing.closed) continue;
+    const labelName = `overlay-${mon.id.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+    const child = openLinkedWindow(
+      `role=viewport&monitorId=${encodeURIComponent(mon.id)}`,
+      labelName,
+    );
+    openedViewportWindows.set(mon.id, child);
+  }
+}
+
+function convertAllElementCoordsToPhysical(anchor: MonitorDescriptor) {
+  if (elementsInPhysicalCoords.value) return;
+  elements.value = elements.value.map((el) => ({
+    ...el,
+    corners: dipQuadToPhysical(el.corners, anchor),
+  }) as WorldElement);
+  elementsInPhysicalCoords.value = true;
+  physicalCoordAnchorMonitor = { ...anchor };
+}
+
+function convertAllElementCoordsToDip(anchor: MonitorDescriptor | null) {
+  if (!elementsInPhysicalCoords.value) return;
+  const mon = anchor ?? physicalCoordAnchorMonitor;
+  if (mon) {
+    elements.value = elements.value.map((el) => ({
+      ...el,
+      corners: physicalQuadToDip(el.corners, mon),
+    }) as WorldElement);
+  }
+  elementsInPhysicalCoords.value = false;
+  physicalCoordAnchorMonitor = null;
+}
+
+watch(
+  [multiMonitorOverlayActive, mainMonitor],
+  ([active, mon]) => {
+    if (active && mon) {
+      convertAllElementCoordsToPhysical(mon);
+    } else if (!active && elementsInPhysicalCoords.value) {
+      convertAllElementCoordsToDip(mon);
+    }
+  },
+  { immediate: true },
+);
+
+watch(multiMonitorEnabled, async (enabled) => {
+  if (platform !== 'tauri') return;
+  if (!enabled) {
+    openedViewportWindows.clear();
+    openedDockWindows.clear();
+    // Flush drafts on all native dock windows before tearing them down and restoring inline docks
+    for (const gid of Array.from(managedNativeDockIds)) {
+      await relayPenpaInput(`dock-${gid}`, { type: 'save-draft' });
+      await destroyNativeSurfaceWindow(`dock-${gid}`);
+      managedNativeDockIds.delete(gid);
+    }
+  } else {
+    // Flush drafts on inline Penpa+ bridges before promoting them to persistent native dock windows
+    for (const b of gridBridges.value.values()) {
+      b.saveDraftNow?.();
+    }
+  }
+  const list = await setOsMultiMonitorEnabled(enabled);
+  if (list.length > 0) osMonitors.value = list;
+  reconcileLinkedSecondaryViewports();
+  await reconcileNativeDockSurfaces();
+  scheduleWorldStateBroadcast();
+});
+
+watch(
+  [multiMonitorOverlayActive, osMonitors, mainMonitor],
+  () => {
+    reconcileLinkedSecondaryViewports();
+  },
+  { deep: true },
+);
 const fullCanvasEnabled = computed(
   () => backdropMode.value === 'canvas' || overlayFullCanvas.value,
 );
@@ -383,8 +660,20 @@ const visibleElementsStable = computed<WorldElement[]>(() => {
   return active && active.visible ? [active] : [];
 });
 
+const visibleElementsOnMainViewport = computed<WorldElement[]>(() => {
+  if (!multiMonitorOverlayActive.value || !mainMonitor.value) {
+    return visibleElementsStable.value;
+  }
+  const mon = mainMonitor.value;
+  const margin = Math.round(160 * (mon.scale || 1));
+  const dragging = activeDraggingElementIds.value;
+  return visibleElementsStable.value.filter(
+    (el) => dragging.has(el.id) || quadIntersectsMonitor(el.corners, mon, margin),
+  );
+});
+
 const sortedVisibleElements = computed<WorldElement[]>(() =>
-  [...visibleElementsStable.value].sort((a, b) => a.zIndex - b.zIndex),
+  [...visibleElementsOnMainViewport.value].sort((a, b) => a.zIndex - b.zIndex),
 );
 
 function getGroupForElement(elementId: string): ElementGroup | null {
@@ -465,13 +754,20 @@ const activeLayerTargets = computed<SelectableTarget[]>(() => {
   return simpleOverlayGrid.value ? [simpleOverlayGrid.value] : [];
 });
 
-// World -> Viewport transform (Overlay locked to identity; Canvas allows pan & zoom)
+// World -> Viewport transform:
+// - Canvas mode: user pan/zoom transform
+// - Multi-monitor Overlay mode: exact physical-pixel -> mainMonitor CSS transform
+// - Single-monitor Overlay mode: identity (1:1 DIP)
 const canvasViewport = ref<WorldViewportTransform>(
   sanitizeViewportTransform(savedState.canvasViewport),
 );
-const effectiveViewportTransform = computed<WorldViewportTransform>(() =>
-  backdropMode.value === 'canvas' ? canvasViewport.value : IDENTITY_VIEWPORT_TRANSFORM,
-);
+const effectiveViewportTransform = computed<WorldViewportTransform>(() => {
+  if (backdropMode.value === 'canvas') return canvasViewport.value;
+  if (multiMonitorOverlayActive.value && mainMonitor.value) {
+    return monitorToViewportTransform(mainMonitor.value);
+  }
+  return IDENTITY_VIEWPORT_TRANSFORM;
+});
 
 const selectedTargetIds = ref<string[]>(
   primaryGrid.value && primaryGrid.value.visible && !primaryGrid.value.locked
@@ -561,6 +857,48 @@ const selectedTargets = computed<SelectableTarget[]>(() => {
   return list;
 });
 
+const selectedTargetsOnMainViewport = computed<SelectableTarget[]>(() => {
+  if (!multiMonitorOverlayActive.value || !mainMonitor.value) {
+    return selectedTargets.value;
+  }
+  const mon = mainMonitor.value;
+  const margin = Math.round(180 * (mon.scale || 1));
+  return selectedTargets.value.filter((t) => quadIntersectsMonitor(t.corners, mon, margin));
+});
+
+// Show the floating selection toolbar ONLY on the single monitor owning the selection's center!
+const showSelectionToolbarOnMainViewport = computed<boolean>(() => {
+  if (!multiMonitorOverlayActive.value || !mainMonitor.value || osMonitors.value.length < 2) {
+    return true;
+  }
+  if (selectedTargets.value.length === 0) return false;
+  let combinedQuad: [Point2D, Point2D, Point2D, Point2D];
+  if (selectedTargets.value.length === 1) {
+    combinedQuad = selectedTargets.value[0].corners;
+  } else {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const t of selectedTargets.value) {
+      for (const p of t.corners) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+      }
+    }
+    combinedQuad = rectToQuad({
+      x: minX,
+      y: minY,
+      w: Math.max(1, maxX - minX),
+      h: Math.max(1, maxY - minY),
+    });
+  }
+  const owner = findOwnerMonitorForPhysicalQuad(combinedQuad, osMonitors.value);
+  return owner?.id === mainMonitor.value.id;
+});
+
 // Mutual focus highlight between Penpa+ dock windows and canvas grids
 // (only activates when >= 2 candidate windows/grids are currently visible so single-grid stays calm).
 const visibleDockCount = computed(
@@ -597,11 +935,13 @@ const linkedHighlightGridQuad = computed<[Point2D, Point2D, Point2D, Point2D] | 
 const highlightSettingKey = ref<'overlayFullCanvas' | null>(null);
 const highlightSettingTick = ref(0);
 
-function openSettings(highlight: 'overlayFullCanvas' | null = null) {
+function openSettings(highlight: 'overlayFullCanvas' | null = null, targetMonitorId?: string | null) {
   highlightSettingKey.value = highlight;
   if (highlight) {
     highlightSettingTick.value++;
   }
+  modalMonitorId.value =
+    targetMonitorId ?? activeControlBarMonitorId.value ?? mainMonitor.value?.id ?? null;
   settingsOpen.value = true;
 }
 
@@ -702,9 +1042,22 @@ function setGridBridge(gridId: string, b: PenpaIframeBridge) {
   next.set(gridId, b);
   gridBridges.value = next;
   syncPenpaThemeAndCssForBridge(b);
+  notifySharedBridgeSubscribers();
 }
 
 function setGridBounds(gridId: string, bounds: GridBoundsNormalized) {
+  const prev = gridBoundsMap.value.get(gridId);
+  if (
+    prev &&
+    Math.abs(prev.u0 - bounds.u0) <= 1e-4 &&
+    Math.abs(prev.v0 - bounds.v0) <= 1e-4 &&
+    Math.abs(prev.u1 - bounds.u1) <= 1e-4 &&
+    Math.abs(prev.v1 - bounds.v1) <= 1e-4 &&
+    Math.abs(prev.canvasCssW - bounds.canvasCssW) <= 0.5 &&
+    Math.abs(prev.canvasCssH - bounds.canvasCssH) <= 0.5
+  ) {
+    return;
+  }
   const next = new Map(gridBoundsMap.value);
   next.set(gridId, bounds);
   gridBoundsMap.value = next;
@@ -743,8 +1096,18 @@ const activeBridge = computed<PenpaIframeBridge | null>(() => {
   );
 });
 
+function bringGridDockToFront(gridId: string) {
+  const g = gridElements.value.find((item) => item.id === gridId);
+  if (!g) return;
+  raiseDock(gridId, false);
+  if (multiMonitorActive.value && isDockEffectivelyVisible(g)) {
+    void bringNativeSurfaceToFront(`dock-${gridId}`);
+  }
+}
+
 function onGridDrawInteract(gridId: string) {
   lastActiveGridId.value = gridId;
+  bringGridDockToFront(gridId);
 }
 
 // --- Unified Operations Shared by ALL Elements (Grid, Image, Screen) ---
@@ -778,6 +1141,20 @@ function selectElement(id: string | null, additive = false) {
   const clickedGrid = gridElements.value.find((g) => g.id === id);
   if (clickedGrid) {
     lastActiveGridId.value = clickedGrid.id;
+    bringGridDockToFront(clickedGrid.id);
+  } else {
+    const clickedTargetForDock = activeLayerTargets.value.find((t) => t.id === targetId);
+    if (clickedTargetForDock?.kind === 'group') {
+      const groupGrids = clickedTargetForDock.members.filter(
+        (m): m is GridElement => m.kind === 'grid',
+      );
+      if (groupGrids.length > 0) {
+        const preferred =
+          groupGrids.find((g) => g.id === lastActiveGridId.value) ?? groupGrids[0];
+        lastActiveGridId.value = preferred.id;
+        bringGridDockToFront(preferred.id);
+      }
+    }
   }
   if (!additive) {
     if (cropDraft.value && cropDraft.value.elementId !== targetId) {
@@ -1146,22 +1523,51 @@ function renameTarget(id: string, nextLabel: string) {
     return;
   }
   updateElement(id, { label: nextLabel });
+  if (multiMonitorActive.value && gridElements.value.some((g) => g.id === id)) {
+    const trimmed = nextLabel.trim();
+    void setNativeSurfaceTitle(`dock-${id}`, trimmed ? `Penpa+ — ${trimmed}` : 'Penpa+');
+  }
 }
 
 // Session-baseline translation snapshot: translates descendant leaf elements directly with zero drift!
-let activeMoveSnapshot: Map<string, [Point2D, Point2D, Point2D, Point2D]> | null = null;
+// Groups share ONE unified DPI unit determined by the Group's combined center so all members
+// rescale rigidly together around the group center when crossing mixed-DPI displays.
+let activeMoveUnits: Map<string, { baseCenter: Point2D; ownerScale: number }> | null = null;
+let activeMoveSnapshot: Map<
+  string,
+  { corners: [Point2D, Point2D, Point2D, Point2D]; unitId: string }
+> | null = null;
+let activeMoveGlobalOriginPhys: Point2D | null = null;
+let activeMoveLeafId: string | null = null;
 
 function handleMoveStart(leafId: string) {
-  const elMap = new Map<string, [Point2D, Point2D, Point2D, Point2D]>();
+  const unitMap = new Map<string, { baseCenter: Point2D; ownerScale: number }>();
+  const elMap = new Map<
+    string,
+    { corners: [Point2D, Point2D, Point2D, Point2D]; unitId: string }
+  >();
+
+  const registerUnit = (unitId: string, corners: [Point2D, Point2D, Point2D, Point2D]) => {
+    const baseCenter = quadCentroid(corners);
+    const ownerScale =
+      elementsInPhysicalCoords.value && osMonitors.value.length > 0
+        ? (findMonitorContainingPhysicalPoint(baseCenter, osMonitors.value)?.scale ?? 1)
+        : 1;
+    unitMap.set(unitId, { baseCenter, ownerScale });
+  };
 
   const captureTarget = (t: SelectableTarget) => {
     if (t.locked) return;
     if (t.kind === 'group') {
+      registerUnit(t.id, t.corners);
       for (const m of t.members) {
-        if (!m.locked) elMap.set(m.id, cloneQuad(m.corners));
+        if (!m.locked) {
+          elMap.set(m.id, { corners: cloneQuad(m.corners), unitId: t.id });
+        }
       }
     } else {
-      elMap.set(t.id, cloneQuad(t.corners));
+      registerUnit(t.id, t.corners);
+      elMap.set(t.id, { corners: cloneQuad(t.corners), unitId: t.id });
     }
   };
 
@@ -1175,31 +1581,94 @@ function handleMoveStart(leafId: string) {
     if (target) captureTarget(target);
   }
 
+  activeMoveUnits = unitMap;
   activeMoveSnapshot = elMap;
+  activeMoveGlobalOriginPhys = null;
+  activeMoveLeafId = leafId;
+  activeDraggingElementIds.value = new Set(elMap.keys());
 }
 
-function handleTranslateBy(leafId: string, dxWorld: number, dyWorld: number) {
-  if (!activeMoveSnapshot) handleMoveStart(leafId);
-  if (!activeMoveSnapshot || activeMoveSnapshot.size === 0) return;
+function handleTranslateBy(
+  leafId: string,
+  dxWorld: number,
+  dyWorld: number,
+  source: 'dom' | 'global-cursor' = 'dom',
+) {
+  if (!activeMoveSnapshot || !activeMoveUnits) handleMoveStart(leafId);
+  if (!activeMoveSnapshot || !activeMoveUnits || activeMoveSnapshot.size === 0) return;
+  if (
+    source === 'dom' &&
+    multiMonitorOverlayActive.value &&
+    platform === 'tauri' &&
+    activeMoveGlobalOriginPhys !== null
+  ) {
+    // Physical global cursor stream is active — ignore local DOM delta to avoid mixed-DPI jitter
+    return;
+  }
 
   const snap = activeMoveSnapshot;
+  const units = activeMoveUnits;
+  const monitors = elementsInPhysicalCoords.value ? osMonitors.value : [];
+  const unitScaleByUnitId = new Map<string, { nextScale: number; pivot: Point2D; baseScale: number }>();
+  if (monitors.length >= 2) {
+    for (const [uid, u] of units.entries()) {
+      const translatedCenter: Point2D = {
+        x: u.baseCenter.x + dxWorld,
+        y: u.baseCenter.y + dyWorld,
+      };
+      const nextOwner = findMonitorContainingPhysicalPoint(translatedCenter, monitors);
+      if (nextOwner && Math.abs(nextOwner.scale - u.ownerScale) > 1e-3) {
+        unitScaleByUnitId.set(uid, {
+          nextScale: nextOwner.scale,
+          pivot: translatedCenter,
+          baseScale: u.ownerScale,
+        });
+      }
+    }
+  }
+
+  const deltaCorners: Record<string, [Point2D, Point2D, Point2D, Point2D]> = {};
   elements.value = elements.value.map((el) => {
-    const b = snap.get(el.id);
-    if (!b) return el;
+    const entry = snap.get(el.id);
+    if (!entry) return el;
+    const b = entry.corners;
+    let nextCorners: [Point2D, Point2D, Point2D, Point2D] = [
+      { x: b[0].x + dxWorld, y: b[0].y + dyWorld },
+      { x: b[1].x + dxWorld, y: b[1].y + dyWorld },
+      { x: b[2].x + dxWorld, y: b[2].y + dyWorld },
+      { x: b[3].x + dxWorld, y: b[3].y + dyWorld },
+    ];
+    const scaleInfo = unitScaleByUnitId.get(entry.unitId);
+    if (scaleInfo) {
+      nextCorners = rescalePhysicalQuadForMonitorChange(
+        nextCorners,
+        scaleInfo.baseScale,
+        scaleInfo.nextScale,
+        scaleInfo.pivot,
+      );
+    }
+    deltaCorners[el.id] = nextCorners;
     return {
       ...el,
-      corners: [
-        { x: b[0].x + dxWorld, y: b[0].y + dyWorld },
-        { x: b[1].x + dxWorld, y: b[1].y + dyWorld },
-        { x: b[2].x + dxWorld, y: b[2].y + dyWorld },
-        { x: b[3].x + dxWorld, y: b[3].y + dyWorld },
-      ],
+      corners: nextCorners,
     } as WorldElement;
   });
+  if (multiMonitorActive.value && Object.keys(deltaCorners).length > 0) {
+    emitGeometryDelta(deltaCorners);
+  }
 }
 
 function handleMoveEnd() {
+  activeMoveUnits = null;
   activeMoveSnapshot = null;
+  activeMoveGlobalOriginPhys = null;
+  activeMoveLeafId = null;
+  if (activeDraggingElementIds.value.size > 0) {
+    activeDraggingElementIds.value = new Set();
+  }
+  if (multiMonitorActive.value) {
+    scheduleWorldStateBroadcast();
+  }
 }
 
 function updateElementCorners(id: string, corners: [Point2D, Point2D, Point2D, Point2D]) {
@@ -1404,6 +1873,17 @@ function toggleGridDock(id: string) {
 
 function disposeGridResources(gridId: string) {
   gridBridges.value.get(gridId)?.suppressDraftSave?.();
+  if (managedNativeDockIds.has(gridId)) {
+    managedNativeDockIds.delete(gridId);
+    void relayPenpaInput(`dock-${gridId}`, { type: 'suppress-draft' }).then(() =>
+      destroyNativeSurfaceWindow(`dock-${gridId}`),
+    );
+  }
+  if (remoteGridFrames.value.has(gridId)) {
+    const next = new Map(remoteGridFrames.value);
+    next.delete(gridId);
+    remoteGridFrames.value = next;
+  }
   overlayRefs.delete(gridId);
   if (gridBridges.value.has(gridId)) {
     const next = new Map(gridBridges.value);
@@ -1513,7 +1993,7 @@ function addPenpaGrid(opts?: { cloneFromId?: string; initialPenpaParam?: string 
     }
   }
 
-  const vp = effectiveViewportTransform.value;
+  const { vp } = activeSpawnViewport.value;
   const shiftWorld = 36 / Math.max(0.1, vp.zoom || 1);
   const corners: [Point2D, Point2D, Point2D, Point2D] = sourceGrid
     ? [
@@ -1614,18 +2094,26 @@ watch(
       penpaScale,
       penpaBlurOpacity,
       overlayFullCanvas,
+      multiMonitorEnabled,
       showUnavailableOptions,
       customCssEnabled,
       customCss,
     ],
     () => {
       const grids = gridElements.value;
+      const persistAnchor = elementsInPhysicalCoords.value
+        ? (mainMonitor.value ?? physicalCoordAnchorMonitor)
+        : null;
+      const toCanonicalDip = (
+        c: [Point2D, Point2D, Point2D, Point2D],
+      ): [Point2D, Point2D, Point2D, Point2D] =>
+        persistAnchor ? physicalQuadToDip(c, persistAnchor) : cloneQuad(c);
       const g = grids[0];
       const serializedGrids: PersistedGridElement[] = grids.map((item) => ({
         id: item.id,
         worldId: item.worldId || ROOT_WORLD_ID,
         label: item.label,
-        corners: cloneQuad(item.corners),
+        corners: toCanonicalDip(item.corners),
         quadMode: item.quadMode,
         crop: { ...item.crop },
         blendMode: item.blendMode,
@@ -1658,8 +2146,9 @@ watch(
         penpaScale: penpaScale.value,
         penpaBlurOpacity: penpaBlurOpacity.value,
         overlayFullCanvas: overlayFullCanvas.value,
+        multiMonitorEnabled: multiMonitorEnabled.value,
         showUnavailableOptions: showUnavailableOptions.value,
-        worldCorners: g ? cloneQuad(g.corners) : makeDefaultCorners(),
+        worldCorners: g ? toCanonicalDip(g.corners) : makeDefaultCorners(),
         canvasViewport: { ...canvasViewport.value },
         customCssEnabled: customCssEnabled.value,
         customCss: customCss.value,
@@ -1667,7 +2156,10 @@ watch(
       if (itemsHydrated) {
         patch.canvasItems = elements.value
           .filter((e): e is ImageElement => e.kind === 'image')
-          .map(toCanvasImageMeta);
+          .map((img) => ({
+            ...toCanvasImageMeta(img),
+            corners: toCanonicalDip(img.corners),
+          }));
         patch.elementGroups = groups.value.map((grp) => ({
           id: grp.id,
           label: grp.label,
@@ -1692,6 +2184,20 @@ function syncAllPenpaThemeAndCss() {
   for (const b of gridBridges.value.values()) {
     syncPenpaThemeAndCssForBridge(b);
   }
+  if (multiMonitorActive.value) {
+    const tokens = getCurrentMd3Tokens();
+    const cssText = customCssEnabled.value ? customCss.value : '';
+    const lang = getPenpaLangCode(currentLocale.value);
+    void broadcastWorldState('app-theme-sync', tokens);
+    for (const gid of managedNativeDockIds) {
+      void relayPenpaInput(`dock-${gid}`, {
+        type: 'sync-theme',
+        tokens,
+        customCss: cssText,
+        lang,
+      });
+    }
+  }
 }
 
 watch([customCssEnabled, customCss], () => {
@@ -1703,6 +2209,9 @@ watch(currentLocale, (loc) => {
   for (const b of gridBridges.value.values()) {
     b.setLanguage?.(code);
   }
+  if (multiMonitorActive.value) {
+    syncAllPenpaThemeAndCss();
+  }
 });
 
 function flushAllStateNow() {
@@ -1710,7 +2219,546 @@ function flushAllStateNow() {
   for (const b of gridBridges.value.values()) {
     b.saveDraftNow?.();
   }
+  if (multiMonitorActive.value) {
+    for (const gid of managedNativeDockIds) {
+      void relayPenpaInput(`dock-${gid}`, { type: 'save-draft' });
+    }
+  }
 }
+
+function buildWorldStateSnapshot(): WorldStateSnapshot {
+  const serializedElements: SerializedWorldElement[] = elements.value.map((el) => {
+    if (el.kind === 'grid') {
+      return {
+        id: el.id,
+        kind: 'grid',
+        worldId: el.worldId,
+        label: el.label,
+        corners: cloneQuad(el.corners),
+        quadMode: el.quadMode,
+        crop: { ...el.crop },
+        zIndex: el.zIndex,
+        visible: el.visible,
+        locked: el.locked,
+        passThrough: el.passThrough,
+        blendMode: el.blendMode,
+        opacity: el.opacity,
+        enhanceOpacity: el.enhanceOpacity,
+        dockVisible: isDockEffectivelyVisible(el),
+      };
+    }
+    if (el.kind === 'image') {
+      return {
+        id: el.id,
+        kind: 'image',
+        worldId: el.worldId,
+        label: el.label,
+        corners: cloneQuad(el.corners),
+        quadMode: el.quadMode,
+        crop: { ...el.crop },
+        zIndex: el.zIndex,
+        visible: el.visible,
+        locked: el.locked,
+        passThrough: el.passThrough,
+        naturalW: el.naturalW,
+        naturalH: el.naturalH,
+      };
+    }
+    return {
+      id: el.id,
+      kind: 'screen',
+      worldId: el.worldId,
+      label: el.label,
+      corners: cloneQuad(el.corners),
+      quadMode: el.quadMode,
+      crop: { ...el.crop },
+      zIndex: el.zIndex,
+      visible: el.visible,
+      locked: el.locked,
+      passThrough: el.passThrough,
+      streamId: el.streamId,
+      naturalW: el.naturalW,
+      naturalH: el.naturalH,
+      sourceWindowLabel: 'main',
+    };
+  });
+  const boundsRecord: Record<string, GridBoundsNormalized> = {};
+  for (const [gid, b] of gridBoundsMap.value.entries()) {
+    boundsRecord[gid] = b;
+  }
+  return {
+    rev: ++worldStateRev,
+    coordMode: elementsInPhysicalCoords.value ? 'physical' : 'dip',
+    monitors: osMonitors.value,
+    mainMonitorId: mainMonitor.value?.id ?? null,
+    activeControlBarMonitorId: activeControlBarMonitorId.value,
+    modalMonitorId: modalMonitorId.value,
+    settingsOpen: settingsOpen.value,
+    highlightSettingKey: highlightSettingKey.value,
+    highlightSettingTick: highlightSettingTick.value,
+    customCssEnabled: customCssEnabled.value,
+    customCss: customCss.value,
+    unavailableReasonKey: unavailableReasonKey.value,
+    backdropMode: backdropMode.value,
+    fullCanvasEnabled: fullCanvasEnabled.value,
+    multiMonitorEnabled: multiMonitorEnabled.value,
+    layersVisible: layersVisible.value,
+    alwaysOnTop: alwaysOnTop.value,
+    canScreenCapture,
+    canSwitchOverlay,
+    elements: serializedElements,
+    groups: groups.value.map((g) => ({ ...g, memberIds: [...g.memberIds] })),
+    selectedTargetIds: [...selectedTargetIds.value],
+    activeDraggingElementIds: Array.from(activeDraggingElementIds.value),
+    hoveredLockedId: hoveredLockedId.value,
+    toolbarHiddenTargetIds: Array.from(toolbarHiddenTargetIds.value),
+    cropDraft: cropDraft.value ? { ...cropDraft.value } : null,
+    focusedDockId: focusedDockId.value,
+    buttonDisplayMode: buttonDisplayMode.value,
+    globalScale: globalScale.value,
+    penpaScale: penpaScale.value,
+    penpaBlurOpacity: penpaBlurOpacity.value,
+    showUnavailableOptions: showUnavailableOptions.value,
+    gridBoundsById: boundsRecord,
+  };
+}
+
+function scheduleWorldStateBroadcast(targetLabel?: string) {
+  if (!multiMonitorActive.value) return;
+  if (targetLabel) {
+    void broadcastWorldState('world-state', buildWorldStateSnapshot(), targetLabel);
+    return;
+  }
+  if (stateBroadcastPending) return;
+  stateBroadcastPending = true;
+  queueMicrotask(() => {
+    stateBroadcastPending = false;
+    if (!multiMonitorActive.value) return;
+    void broadcastWorldState('world-state', buildWorldStateSnapshot());
+  });
+}
+
+function emitGeometryDelta(cornersById: Record<string, [Point2D, Point2D, Point2D, Point2D]>) {
+  if (!multiMonitorActive.value) return;
+  const delta: WorldGeometryDelta = {
+    rev: ++worldStateRev,
+    cornersById,
+  };
+  void broadcastWorldState('world-geometry-delta', delta);
+}
+
+const mainFetchInFlightIds = new Set<string>();
+const mainPendingFetchMetaById = new Map<string, GridFrameMeta>();
+
+async function fetchRemoteGridFrame(meta: GridFrameMeta) {
+  // Zero-copy same-renderer bridge already supplies live GPU canvas directly!
+  if (gridBridges.value.has(meta.gridId)) return;
+  if (!visibleElementsOnMainViewport.value.some((e) => e.id === meta.gridId)) return;
+  const existing = remoteGridFrames.value.get(meta.gridId);
+  if (existing && existing.seq >= meta.seq) return;
+  if (mainFetchInFlightIds.has(meta.gridId)) {
+    mainPendingFetchMetaById.set(meta.gridId, meta);
+    return;
+  }
+  mainFetchInFlightIds.add(meta.gridId);
+  try {
+    const rgba = await getGridFrameRgba(meta.gridId);
+    if (!rgba || rgba.byteLength < meta.width * meta.height * 4) return;
+    const next = new Map(remoteGridFrames.value);
+    next.set(meta.gridId, {
+      rgba,
+      width: meta.width,
+      height: meta.height,
+      seq: meta.seq,
+    });
+    remoteGridFrames.value = next;
+  } finally {
+    mainFetchInFlightIds.delete(meta.gridId);
+    const nextMeta = mainPendingFetchMetaById.get(meta.gridId);
+    if (nextMeta) {
+      mainPendingFetchMetaById.delete(meta.gridId);
+      void fetchRemoteGridFrame(nextMeta);
+    }
+  }
+}
+
+function reconcileNativeDockSurfaces(): Promise<void> {
+  reconcileDockQueue = reconcileDockQueue
+    .catch(() => {})
+    .then(() => reconcileNativeDockSurfacesInner());
+  return reconcileDockQueue;
+}
+
+async function reconcileNativeDockSurfacesInner() {
+  if (!multiMonitorActive.value) return;
+  const grids = gridElements.value;
+  const activeIds = new Set(grids.map((g) => g.id));
+
+  for (const staleId of Array.from(managedNativeDockIds)) {
+    if (!activeIds.has(staleId)) {
+      managedNativeDockIds.delete(staleId);
+      openedDockWindows.delete(staleId);
+      await destroyNativeSurfaceWindow(`dock-${staleId}`);
+    }
+  }
+
+  const mon = mainMonitor.value;
+  const baseX = mon ? mon.physRect.x : 0;
+  const baseY = mon ? mon.physRect.y : 0;
+  const scale = mon ? mon.scale : 1;
+
+  for (let i = 0; i < grids.length; i++) {
+    const g = grids[i];
+    const vis = isDockEffectivelyVisible(g);
+    const surfaceId = `dock-${g.id}`;
+    if (managedNativeDockIds.has(g.id)) {
+      await setNativeSurfaceVisible(surfaceId, vis);
+      continue;
+    }
+    const saved = gridDockStates.value[g.id];
+    const cascade = (i % 6) * 28;
+    const logicalW = (saved && saved.w >= 260 ? saved.w : 660) + 8;
+    const logicalH = (saved && saved.h >= 180 ? saved.h : 420) + 8;
+    const physX = Math.round(
+      baseX +
+        (typeof saved?.xRatio === 'number'
+          ? saved.xRatio * (mon ? mon.physRect.w : (window.innerWidth || 1280) * scale)
+          : (20 + cascade) * scale),
+    );
+    const physY = Math.round(
+      baseY +
+        (typeof saved?.yRatio === 'number'
+          ? saved.yRatio * (mon ? mon.physRect.h : (window.innerHeight || 800) * scale)
+          : (64 + cascade) * scale),
+    );
+    managedNativeDockIds.add(g.id);
+    const dockTitle = g.label?.trim() ? `Penpa+ — ${g.label.trim()}` : 'Penpa+';
+    const query =
+      `role=dock&gridId=${encodeURIComponent(g.id)}` +
+      `&surfaceId=${encodeURIComponent(surfaceId)}` +
+      `&title=${encodeURIComponent(dockTitle)}` +
+      `&physX=${physX}&physY=${physY}` +
+      `&logicalW=${Math.round(logicalW)}&logicalH=${Math.round(logicalH)}` +
+      `&visible=${vis ? 1 : 0}`;
+    // Preferred path: same-renderer `window.open()` intercepted by Tauri `on_new_window`
+    // -> true GPU-to-GPU zero-copy `gl.texImage2D(srcCanvas)` across all monitors!
+    const linked = openLinkedWindow(query, surfaceId);
+    if (linked) {
+      openedDockWindows.set(g.id, linked);
+    } else {
+      const created = await ensureNativeSurfaceWindow({
+        surfaceId,
+        urlQuery: query,
+        physX,
+        physY,
+        logicalW,
+        logicalH,
+        visible: vis,
+      });
+      if (!created) {
+        managedNativeDockIds.delete(g.id);
+      }
+    }
+  }
+}
+
+function handleRemoteGridPointer(
+  gridId: string,
+  eventType: PenpaPointerType,
+  u: number,
+  v: number,
+  opts?: PenpaPointerOpts,
+) {
+  const localBridge = gridBridges.value.get(gridId);
+  if (localBridge?.isReady()) {
+    localBridge.dispatchPointer(eventType, u, v, opts);
+    return;
+  }
+  if (multiMonitorActive.value) {
+    void relayPenpaInput(`dock-${gridId}`, {
+      type: 'pointer',
+      eventType,
+      u,
+      v,
+      opts,
+    });
+  }
+}
+
+function handleWorldCommand(cmd: WorldCommand) {
+  switch (cmd.type) {
+    case 'request-snapshot':
+      scheduleWorldStateBroadcast(cmd.fromLabel);
+      break;
+    case 'select':
+      selectElement(cmd.id, !!cmd.additive);
+      break;
+    case 'focus-multi-member':
+      focusMultiMember(cmd.id);
+      break;
+    case 'move-start':
+      handleMoveStart(cmd.leafId);
+      break;
+    case 'translate-by':
+      handleTranslateBy(cmd.leafId, cmd.dxWorld, cmd.dyWorld);
+      break;
+    case 'move-end':
+      handleMoveEnd();
+      break;
+    case 'resize-start':
+      handleResizeStart(cmd.id);
+      break;
+    case 'resize-end':
+      handleResizeEnd();
+      break;
+    case 'update-target':
+      updateTarget(cmd.id, cmd.patch);
+      break;
+    case 'update-quad-mode':
+      updateElementQuadMode(cmd.id, cmd.mode);
+      break;
+    case 'reset-size':
+      resetElementSize(cmd.id);
+      break;
+    case 'start-crop':
+      startCropMode(cmd.id);
+      break;
+    case 'update-crop-draft':
+      updateCropDraft(cmd.draft);
+      break;
+    case 'commit-crop':
+      commitCropDraft();
+      break;
+    case 'cancel-crop':
+      cancelCropDraft();
+      break;
+    case 'group-selected':
+      groupSelectedTargets();
+      break;
+    case 'ungroup-target':
+      ungroupTarget(cmd.id);
+      break;
+    case 'toggle-visible':
+      toggleTargetsVisible(cmd.ids, cmd.source);
+      break;
+    case 'toggle-passthrough':
+      toggleElementPassThrough(cmd.id);
+      break;
+    case 'toggle-dock':
+      toggleTargetsDock(cmd.ids);
+      break;
+    case 'bring-front':
+      bringTargetsFront(cmd.ids);
+      break;
+    case 'send-back':
+      sendTargetsBack(cmd.ids);
+      break;
+    case 'remove-targets':
+      removeTargets(cmd.ids);
+      break;
+    case 'lock-targets':
+      lockTargets(cmd.ids);
+      break;
+    case 'unlock-target':
+      handleUnlockElement(cmd.id);
+      break;
+    case 'draw-interact':
+      onGridDrawInteract(cmd.gridId);
+      break;
+    case 'penpa-pointer':
+      handleRemoteGridPointer(cmd.gridId, cmd.eventType, cmd.u, cmd.v, cmd.opts);
+      break;
+    case 'penpa-key': {
+      const targetGridId = cmd.gridId ?? lastActiveGridId.value ?? gridElements.value[0]?.id;
+      if (!targetGridId) break;
+      const localBridge = gridBridges.value.get(targetGridId);
+      if (localBridge?.isReady()) {
+        localBridge.dispatchKey(cmd.eventType, cmd);
+      } else if (multiMonitorActive.value) {
+        void relayPenpaInput(`dock-${targetGridId}`, {
+          type: 'key',
+          eventType: cmd.eventType,
+          key: cmd.key,
+          code: cmd.code,
+          keyCode: cmd.keyCode,
+          ctrlKey: cmd.ctrlKey,
+          shiftKey: cmd.shiftKey,
+          altKey: cmd.altKey,
+          metaKey: cmd.metaKey,
+          repeat: cmd.repeat,
+        });
+      }
+      break;
+    }
+    case 'dock-ready': {
+      const tokens = getCurrentMd3Tokens();
+      const cssText = customCssEnabled.value ? customCss.value : '';
+      const lang = getPenpaLangCode(currentLocale.value);
+      void relayPenpaInput(`dock-${cmd.gridId}`, {
+        type: 'sync-theme',
+        tokens,
+        customCss: cssText,
+        lang,
+      });
+      scheduleWorldStateBroadcast(`dock-${cmd.gridId}`);
+      break;
+    }
+    case 'dock-activate':
+      raiseDock(cmd.gridId, true);
+      if (selectedTargetIds.value.length > 0 || cropDraft.value) {
+        selectElement(null);
+      }
+      break;
+    case 'dock-rename':
+      renameTarget(cmd.gridId, cmd.label);
+      break;
+    case 'dock-visible':
+      updateElement(cmd.gridId, { dockVisible: cmd.visible });
+      break;
+    case 'dock-render-patch':
+      updateElement(cmd.gridId, cmd.patch);
+      break;
+    case 'dock-state-change':
+      handleDockStateChange(cmd.gridId, cmd.state);
+      break;
+    case 'dock-clone':
+      if (!fullCanvasEnabled.value) {
+        openSettings('overlayFullCanvas');
+      } else {
+        addPenpaGrid({ cloneFromId: cmd.gridId, initialPenpaParam: cmd.penpaParam });
+      }
+      break;
+    case 'dock-grid-bounds':
+      setGridBounds(cmd.gridId, cmd.bounds);
+      break;
+    case 'dock-unavailable':
+      handleUnavailableClick(cmd.key);
+      break;
+    case 'dock-preview-image':
+      imagePreview.value = {
+        dataUrl: cmd.dataUrl,
+        filename: cmd.filename || 'penpa-image.png',
+        mimeType: cmd.mimeType || 'image/png',
+      };
+      break;
+    case 'dock-download':
+      void handleHostDownload(cmd.filename, cmd.mimeType, cmd.base64Data);
+      break;
+    case 'update-natural-size':
+      handleMediaNaturalSizeChange(cmd.id, cmd.w, cmd.h);
+      break;
+    case 'add-grid':
+      addPenpaGrid();
+      break;
+    case 'add-image':
+      triggerImagePicker();
+      break;
+    case 'add-screen':
+      void addScreenProjection();
+      break;
+    case 'set-layers-visible':
+      layersVisible.value = cmd.visible;
+      break;
+    case 'set-always-on-top':
+      alwaysOnTop.value = cmd.pinned;
+      break;
+    case 'set-backdrop-mode':
+      handleBackdropModeUpdate(cmd.mode);
+      break;
+    case 'move-layer-order':
+      moveElementLayerOrder(cmd.id, cmd.dir);
+      break;
+    case 'rename-target':
+      renameTarget(cmd.id, cmd.label);
+      break;
+    case 'open-settings':
+      openSettings(cmd.highlight ?? null, cmd.monitorId ?? null);
+      if (!cmd.monitorId || cmd.monitorId === mainMonitor.value?.id) {
+        void import('@tauri-apps/api/window')
+          .then(({ getCurrentWindow }) => getCurrentWindow().setFocus())
+          .catch(() => {});
+      }
+      break;
+    case 'close-settings':
+      settingsOpen.value = false;
+      break;
+    case 'update-settings': {
+      const p = cmd.patch;
+      if (typeof p.customCssEnabled === 'boolean') customCssEnabled.value = p.customCssEnabled;
+      if (typeof p.customCss === 'string') customCss.value = p.customCss;
+      if (p.buttonDisplayMode) buttonDisplayMode.value = p.buttonDisplayMode;
+      if (typeof p.globalScale === 'number') globalScale.value = p.globalScale;
+      if (typeof p.penpaScale === 'number') penpaScale.value = p.penpaScale;
+      if (typeof p.penpaBlurOpacity === 'number') penpaBlurOpacity.value = p.penpaBlurOpacity;
+      if (typeof p.overlayFullCanvas === 'boolean') overlayFullCanvas.value = p.overlayFullCanvas;
+      if (typeof p.multiMonitorEnabled === 'boolean') {
+        multiMonitorEnabled.value = p.multiMonitorEnabled;
+      }
+      if (typeof p.showUnavailableOptions === 'boolean') {
+        showUnavailableOptions.value = p.showUnavailableOptions;
+      }
+      break;
+    }
+    case 'close-unavailable':
+      unavailableReasonKey.value = null;
+      break;
+    case 'bar-state-change':
+      saveBarPositionForMonitor(cmd.state, cmd.monitorId);
+      break;
+    case 'close-overlay':
+      void handleCloseOverlay();
+      break;
+  }
+}
+
+const nativeDockReconcileKey = computed(() => {
+  if (!multiMonitorActive.value) return '';
+  return gridElements.value
+    .map((g) => `${g.id}:${isDockEffectivelyVisible(g) ? 1 : 0}`)
+    .join('|');
+});
+
+watch(nativeDockReconcileKey, () => {
+  if (!multiMonitorActive.value) return;
+  void reconcileNativeDockSurfaces();
+});
+
+watch(
+  [
+    elements,
+    groups,
+    selectedTargetIds,
+    activeDraggingElementIds,
+    hoveredLockedId,
+    toolbarHiddenTargetIds,
+    cropDraft,
+    focusedDockId,
+    backdropMode,
+    overlayFullCanvas,
+    layersVisible,
+    alwaysOnTop,
+    activeControlBarMonitorId,
+    modalMonitorId,
+    settingsOpen,
+    highlightSettingKey,
+    highlightSettingTick,
+    customCssEnabled,
+    customCss,
+    unavailableReasonKey,
+    buttonDisplayMode,
+    globalScale,
+    penpaScale,
+    penpaBlurOpacity,
+    showUnavailableOptions,
+    osMonitors,
+    gridBoundsMap,
+  ],
+  () => {
+    if (!multiMonitorActive.value) return;
+    scheduleWorldStateBroadcast();
+  },
+  { deep: true },
+);
 
 async function handleCloseOverlay() {
   flushAllStateNow();
@@ -1738,10 +2786,15 @@ const unavailableDialogInfo = computed<{ title: string; body: string } | null>((
       return { title: u.dynamicColorUnavailableTitle, body: u.dynamicColorUnavailableBody };
     case 'penpaCloneUnsupported':
       return { title: u.penpaCloneUnsupportedTitle, body: u.penpaCloneUnsupportedBody };
+    case 'multiMonitorUnavailable':
+      return { title: u.multiMonitorUnavailableTitle, body: u.multiMonitorUnavailableBody };
   }
 });
 
 function handleUnavailableClick(key: UnavailableReasonKey) {
+  if (!settingsOpen.value) {
+    modalMonitorId.value = activeControlBarMonitorId.value ?? mainMonitor.value?.id ?? null;
+  }
   unavailableReasonKey.value = key;
 }
 
@@ -1779,11 +2832,11 @@ watch(backdropMode, async (mode) => {
 // ALL UI floating windows (ControlBar, PenpaDockWindow(s), LayersWindow, ElementToolbar) never pass through!
 async function syncOverlayHitRegions() {
   const modalBlocking =
-    settingsOpen.value ||
+    (settingsOpen.value && isModalOnMainViewport.value) ||
     screenPickerOpen.value ||
     screenshotPromptOpen.value ||
     !!imagePreview.value ||
-    !!unavailableReasonKey.value;
+    (!!unavailableReasonKey.value && isModalOnMainViewport.value);
   const visibleDockRects: Array<{ x: number; y: number; w: number; h: number }> = [];
   for (const grid of gridElements.value) {
     const dr = dockRects.value.get(grid.id);
@@ -1843,7 +2896,7 @@ async function syncOverlayHitRegions() {
       await invoke('update_hit_regions', {
         enabled: backdropMode.value === 'overlay' && !modalBlocking,
         forceClickThrough: false,
-        barRect: barRect.value,
+        barRect: showControlBarOnMainViewport.value ? barRect.value : { x: 0, y: 0, w: 0, h: 0 },
         dockRect: primaryDock,
         uiRects: extraUiRects,
         quads: interactiveQuads,
@@ -1928,6 +2981,7 @@ watch(
     imagePreview,
     unavailableReasonKey,
     layersVisible,
+    showControlBarOnMainViewport,
     selectedTargetIds,
     cropDraft,
     hoveredLockedId,
@@ -2133,12 +3187,13 @@ async function addImageBlob(blob: Blob, label = '') {
   const src = URL.createObjectURL(blob);
   const { w: naturalW, h: naturalH } = await measureImageDimensions(src);
   const safe = safeAreaInsets.value;
+  const { vp: spawnVp, vw: spawnW, vh: spawnH } = activeSpawnViewport.value;
   const rect = computeInitialItemWorldRect(
     naturalW,
     naturalH,
-    effectiveViewportTransform.value,
-    window.innerWidth || 1280,
-    window.innerHeight || 800,
+    spawnVp,
+    spawnW,
+    spawnH,
     safe.top,
     safe.right,
     safe.bottom,
@@ -2701,18 +3756,34 @@ function onWindowKey(type: 'keydown' | 'keyup', e: KeyboardEvent) {
   }
 
   const b = activeBridge.value;
-  if (!b || !b.isReady()) return;
-
-  b.dispatchKey(type, {
-    key: e.key,
-    code: e.code,
-    keyCode: e.keyCode,
-    ctrlKey: e.ctrlKey,
-    shiftKey: e.shiftKey,
-    altKey: e.altKey,
-    metaKey: e.metaKey,
-    repeat: e.repeat,
-  });
+  if (b && b.isReady()) {
+    b.dispatchKey(type, {
+      key: e.key,
+      code: e.code,
+      keyCode: e.keyCode,
+      ctrlKey: e.ctrlKey,
+      shiftKey: e.shiftKey,
+      altKey: e.altKey,
+      metaKey: e.metaKey,
+      repeat: e.repeat,
+    });
+  } else if (multiMonitorActive.value) {
+    const targetGridId = lastActiveGridId.value || gridElements.value[0]?.id;
+    if (targetGridId) {
+      void relayPenpaInput(`dock-${targetGridId}`, {
+        type: 'key',
+        eventType: type,
+        key: e.key,
+        code: e.code,
+        keyCode: e.keyCode,
+        ctrlKey: e.ctrlKey,
+        shiftKey: e.shiftKey,
+        altKey: e.altKey,
+        metaKey: e.metaKey,
+        repeat: e.repeat,
+      });
+    }
+  }
 }
 
 function onKeyDown(e: KeyboardEvent) {
@@ -2735,13 +3806,13 @@ function handleWindowFocusLost() {
 function onWindowBlur() {
   spacePanning.value = false;
   endMiddlePan();
-  // Defer 1 tick so clicking inside our own Penpa+ Dock iframe (where document.hasFocus() stays true)
-  // does NOT falsely cancel selection, while leaving the app window immediately deselects.
-  window.setTimeout(() => {
-    if (!document.hasFocus()) {
-      handleWindowFocusLost();
-    }
-  }, 0);
+  // Defer so clicking inside our own Penpa+ Dock iframe OR another PenpaAnywhere native window
+  // (overlay-* / dock-*) does NOT falsely cancel selection, while leaving the app immediately deselects.
+  window.setTimeout(async () => {
+    if (document.hasFocus()) return;
+    if (multiMonitorActive.value && (await isAnyAppWindowFocused())) return;
+    handleWindowFocusLost();
+  }, multiMonitorActive.value ? 60 : 0);
 }
 function onVisibilityChange() {
   if (document.visibilityState === 'hidden') {
@@ -2751,7 +3822,12 @@ function onVisibilityChange() {
 }
 
 let unlistenOverlayCursor: (() => void) | null = null;
+let unlistenGlobalDragCursor: (() => void) | null = null;
+let unlistenCursorMonitor: (() => void) | null = null;
 let unlistenWindowFocus: (() => void) | null = null;
+let unlistenMonitorsChanged: (() => void) | null = null;
+let unlistenWorldCommand: (() => void) | null = null;
+let unlistenGridFrameReady: (() => void) | null = null;
 let isDebugBuild = getInitialIsDebugBuild();
 window.__PENPAANYWHERE_IS_DEBUG__ = isDebugBuild;
 
@@ -2919,24 +3995,159 @@ onMounted(async () => {
     addPenpaGrid({ cloneFromId: sourceGridId, initialPenpaParam: penpaParam });
   };
 
+  if (platform === 'tauri') {
+    window.__PENPA_SHARED_HOST__ = {
+      registerDockBridge(gridId: string, bridge: PenpaIframeBridge) {
+        setGridBridge(gridId, bridge);
+      },
+      unregisterDockBridge(gridId: string) {
+        if (gridBridges.value.has(gridId)) {
+          const next = new Map(gridBridges.value);
+          next.delete(gridId);
+          gridBridges.value = next;
+          notifySharedBridgeSubscribers();
+        }
+      },
+      getDockBridge(gridId: string) {
+        return gridBridges.value.get(gridId) ?? null;
+      },
+      getAllDockBridges() {
+        return gridBridges.value;
+      },
+      subscribeDockBridges(fn: () => void) {
+        sharedBridgeSubscribers.add(fn);
+        return () => {
+          sharedBridgeSubscribers.delete(fn);
+        };
+      },
+      getAllScreenStreams() {
+        return screenStreams.value;
+      },
+      subscribeScreenStreams(fn: () => void) {
+        sharedScreenStreamSubscribers.add(fn);
+        return () => {
+          sharedScreenStreamSubscribers.delete(fn);
+        };
+      },
+      getBarPosition(monitorId?: string) {
+        return getBarPositionForMonitor(monitorId);
+      },
+      setBarPosition(st: SharedBarPositionState, monitorId?: string) {
+        saveBarPositionForMonitor(st, monitorId);
+      },
+      getThemeAndLocale(): SharedThemeLocaleState {
+        return {
+          themeMode: themeMode.value,
+          dynamicColorEnabled: dynamicColorEnabled.value,
+          customHue: customHue.value,
+          locale: currentLocale.value,
+        };
+      },
+      syncThemeAndLocaleFromChild(st: Partial<SharedThemeLocaleState>) {
+        if (st.themeMode && st.themeMode !== themeMode.value) setThemeMode(st.themeMode);
+        if (
+          typeof st.dynamicColorEnabled === 'boolean' &&
+          st.dynamicColorEnabled !== dynamicColorEnabled.value
+        ) {
+          setDynamicColorEnabled(st.dynamicColorEnabled);
+        }
+        if (typeof st.customHue === 'number' && st.customHue !== customHue.value) {
+          setCustomHue(st.customHue);
+        }
+        if (st.locale && st.locale !== currentLocale.value) {
+          setLocale(st.locale);
+        }
+      },
+    } satisfies SharedMultiMonitorHost;
+  }
+
   isDebugBuild = await getIsDebugBuild();
   window.__PENPAANYWHERE_IS_DEBUG__ = isDebugBuild;
 
   if (platform === 'tauri') {
     try {
-      const { listen } = await import('@tauri-apps/api/event');
-      unlistenOverlayCursor = await listen<[number, number]>('overlay-cursor-pos', (ev) => {
+      const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+      const curWin = getCurrentWebviewWindow();
+      unlistenOverlayCursor = await curWin.listen<[number, number]>('overlay-cursor-pos', (ev) => {
         if (backdropMode.value === 'overlay' && Array.isArray(ev.payload)) {
           evaluateLockedHoverAt(ev.payload[0], ev.payload[1]);
+        }
+      });
+      unlistenGlobalDragCursor = await curWin.listen<[number, number]>(
+        'overlay-global-cursor',
+        (ev) => {
+          if (
+            !multiMonitorOverlayActive.value ||
+            !activeMoveSnapshot ||
+            !activeMoveLeafId ||
+            !Array.isArray(ev.payload)
+          ) {
+            return;
+          }
+          const [gx, gy] = ev.payload;
+          if (!activeMoveGlobalOriginPhys) {
+            activeMoveGlobalOriginPhys = { x: gx, y: gy };
+            return;
+          }
+          handleTranslateBy(
+            activeMoveLeafId,
+            gx - activeMoveGlobalOriginPhys.x,
+            gy - activeMoveGlobalOriginPhys.y,
+            'global-cursor',
+          );
+        },
+      );
+      unlistenCursorMonitor = await curWin.listen<string | null>(
+        'cursor-monitor-changed',
+        (ev) => {
+          if (typeof ev.payload === 'string' && ev.payload) {
+            activeCursorMonitorId.value = ev.payload;
+          }
+        },
+      );
+      unlistenMonitorsChanged = await curWin.listen<MonitorDescriptor[]>(
+        'monitors-changed',
+        (ev) => {
+          if (Array.isArray(ev.payload)) {
+            osMonitors.value = ev.payload;
+          }
+        },
+      );
+      unlistenWorldCommand = await curWin.listen<WorldCommand>('world-command', (ev) => {
+        if (ev.payload) handleWorldCommand(ev.payload);
+      });
+      unlistenGridFrameReady = await curWin.listen<GridFrameMeta>('grid-frame-ready', (ev) => {
+        if (ev.payload && multiMonitorActive.value) {
+          void fetchRemoteGridFrame(ev.payload);
         }
       });
     } catch {
       // ignore if listener unavailable
     }
+    if (multiMonitorEnabled.value) {
+      osMonitors.value = await setOsMultiMonitorEnabled(true);
+      reconcileLinkedSecondaryViewports();
+      const metas = await getAllGridFrameMetas();
+      for (const meta of metas) {
+        void fetchRemoteGridFrame(meta);
+      }
+      await reconcileNativeDockSurfaces();
+      scheduleWorldStateBroadcast();
+    }
     try {
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
       unlistenWindowFocus = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-        if (!focused) handleWindowFocusLost();
+        if (!focused) {
+          if (multiMonitorActive.value) {
+            window.setTimeout(async () => {
+              if (!(await isAnyAppWindowFocused())) {
+                handleWindowFocusLost();
+              }
+            }, 60);
+          } else {
+            handleWindowFocusLost();
+          }
+        }
       });
     } catch {
       // ignore if window focus listener unavailable
@@ -2955,8 +4166,23 @@ onBeforeUnmount(() => {
   cancelHoverHideTimer();
   unlistenOverlayCursor?.();
   unlistenOverlayCursor = null;
+  unlistenGlobalDragCursor?.();
+  unlistenGlobalDragCursor = null;
+  unlistenCursorMonitor?.();
+  unlistenCursorMonitor = null;
   unlistenWindowFocus?.();
   unlistenWindowFocus = null;
+  unlistenMonitorsChanged?.();
+  unlistenMonitorsChanged = null;
+  unlistenWorldCommand?.();
+  unlistenWorldCommand = null;
+  unlistenGridFrameReady?.();
+  unlistenGridFrameReady = null;
+  delete window.__PENPA_SHARED_HOST__;
+  sharedBridgeSubscribers.clear();
+  sharedScreenStreamSubscribers.clear();
+  openedViewportWindows.clear();
+  openedDockWindows.clear();
   delete window.__PENPAANYWHERE_TOGGLE_DEVTOOLS__;
   delete window.__PENPAANYWHERE_ON_IFRAME_INTERACT__;
   delete window.__PENPAANYWHERE_CLONE_GRID__;
@@ -3020,15 +4246,17 @@ onBeforeUnmount(() => {
     />
 
     <!-- Unified World Elements rendered as direct siblings in stable DOM order (true shared zIndex via CSS!) -->
-    <template v-for="el in visibleElementsStable" :key="el.id">
+    <template v-for="el in visibleElementsOnMainViewport" :key="el.id">
       <PerspectiveOverlay
         v-if="el.kind === 'grid'"
         :ref="(inst) => setOverlayRef(el.id, inst as InstanceType<typeof PerspectiveOverlay> | null)"
         :element="el"
         :bridge="gridBridges.get(el.id) ?? null"
+        :remote-frame="gridBridges.has(el.id) ? null : (multiMonitorActive ? (remoteGridFrames.get(el.id) ?? null) : null)"
+        :remote-bounds="multiMonitorActive ? (gridBoundsMap.get(el.id) ?? null) : null"
         :has-dom-backdrop="hasDomBackdrop"
         :viewport-transform="effectiveViewportTransform"
-        :world-bounded-to-viewport="backdropMode === 'overlay'"
+        :world-bounded-to-viewport="backdropMode === 'overlay' && !multiMonitorOverlayActive"
         :selected="isElementVisuallySelected(el.id)"
         :multi-selected="selectedTargetIds.length >= 2 && isElementVisuallySelected(el.id)"
         :grouped="fullCanvasEnabled && !!getGroupForElement(el.id)"
@@ -3037,6 +4265,7 @@ onBeforeUnmount(() => {
         @select="selectElement"
         @focus-multi-member="focusMultiMember"
         @draw-interact="onGridDrawInteract"
+        @remote-pointer="handleRemoteGridPointer"
         @move-start="handleMoveStart"
         @translate-by="handleTranslateBy"
         @move-end="handleMoveEnd"
@@ -3051,7 +4280,7 @@ onBeforeUnmount(() => {
         :element="el"
         :stream="el.kind === 'screen' ? (screenStreams.get(el.streamId) ?? null) : null"
         :viewport-transform="effectiveViewportTransform"
-        :world-bounded-to-viewport="backdropMode === 'overlay'"
+        :world-bounded-to-viewport="backdropMode === 'overlay' && !multiMonitorOverlayActive"
         :selected="isElementVisuallySelected(el.id)"
         :multi-selected="selectedTargetIds.length >= 2 && isElementVisuallySelected(el.id)"
         :grouped="fullCanvasEnabled && !!getGroupForElement(el.id)"
@@ -3071,12 +4300,13 @@ onBeforeUnmount(() => {
 
     <!-- Unified Transform / Crop / Lock / Group Gizmo + Floating Context Toolbar for ALL World Elements & Groups -->
     <TransformGizmo
-      :selected-targets="selectedTargets"
+      :selected-targets="selectedTargetsOnMainViewport"
+      :show-selection-toolbar="showSelectionToolbarOnMainViewport"
       :crop-draft="cropDraft"
       :hovered-target="hoveredToolbarTarget"
       :linked-highlight-quad="linkedHighlightGridQuad"
       :viewport-transform="effectiveViewportTransform"
-      :world-bounded-to-viewport="backdropMode === 'overlay'"
+      :world-bounded-to-viewport="backdropMode === 'overlay' && !multiMonitorOverlayActive"
       :show-layer-order-actions="fullCanvasEnabled"
       :allow-delete="fullCanvasEnabled"
       :button-display-mode="buttonDisplayMode"
@@ -3104,41 +4334,44 @@ onBeforeUnmount(() => {
       @hover-toolbar-bounds-change="(r) => (hoverToolbarRect = r)"
     />
 
-    <!-- Independent Penpa+ Tool Windows (one per GridElement; carries per-grid Blend, Alpha Boost & Opacity) -->
-    <PenpaDockWindow
-      v-for="(grid, gIdx) in gridElements"
-      :key="`dock-${grid.id}`"
-      :grid-id="grid.id"
-      :visible="isDockEffectivelyVisible(grid)"
-      :title="grid.label || messages.stage.gridDefaultLabel"
-      :label="grid.label"
-      :dock-z-index="getDockZIndex(grid.id)"
-      :dock-index="gIdx"
-      :initial-dock-state="gridDockStates[grid.id]"
-      :is-focused-dock="focusedDockId === grid.id"
-      :linked-highlight="visibleDockCount >= 2 && selectedGridIdSet.has(grid.id)"
-      :backdrop-mode="backdropMode"
-      :blend-mode="grid.blendMode"
-      :board-opacity="grid.opacity"
-      :enhance-opacity="grid.enhanceOpacity"
-      :show-unavailable-options="showUnavailableOptions"
-      :global-scale="globalScale"
-      :penpa-scale="penpaScale"
-      :blur-opacity="penpaBlurOpacity"
-      @activate="raiseDock(grid.id, true)"
-      @rename="(label) => renameTarget(grid.id, label)"
-      @dock-state-change="(st) => handleDockStateChange(grid.id, st)"
-      @update:visible="(v) => updateElement(grid.id, { dockVisible: v })"
-      @update:blend-mode="(v) => updateElement(grid.id, { blendMode: v })"
-      @update:board-opacity="(v) => updateElement(grid.id, { opacity: v })"
-      @update:enhance-opacity="(v) => updateElement(grid.id, { enhanceOpacity: v })"
-      @unavailable-click="handleUnavailableClick"
-      @bridge-ready="(b) => setGridBridge(grid.id, b)"
-      @bounds-change="(r) => setDockRect(grid.id, r)"
-    />
+    <!-- Independent Penpa+ Tool Windows (inline when single-window / Web / Android; native OS windows when Multi-Monitor ON) -->
+    <template v-if="!multiMonitorActive">
+      <PenpaDockWindow
+        v-for="(grid, gIdx) in gridElements"
+        :key="`dock-${grid.id}`"
+        :grid-id="grid.id"
+        :visible="isDockEffectivelyVisible(grid)"
+        :title="grid.label || messages.stage.gridDefaultLabel"
+        :label="grid.label"
+        :dock-z-index="getDockZIndex(grid.id)"
+        :dock-index="gIdx"
+        :initial-dock-state="gridDockStates[grid.id]"
+        :is-focused-dock="focusedDockId === grid.id"
+        :linked-highlight="visibleDockCount >= 2 && selectedGridIdSet.has(grid.id)"
+        :backdrop-mode="backdropMode"
+        :blend-mode="grid.blendMode"
+        :board-opacity="grid.opacity"
+        :enhance-opacity="grid.enhanceOpacity"
+        :show-unavailable-options="showUnavailableOptions"
+        :global-scale="globalScale"
+        :penpa-scale="penpaScale"
+        :blur-opacity="penpaBlurOpacity"
+        @activate="raiseDock(grid.id, true)"
+        @rename="(label) => renameTarget(grid.id, label)"
+        @dock-state-change="(st) => handleDockStateChange(grid.id, st)"
+        @update:visible="(v) => updateElement(grid.id, { dockVisible: v })"
+        @update:blend-mode="(v) => updateElement(grid.id, { blendMode: v })"
+        @update:board-opacity="(v) => updateElement(grid.id, { opacity: v })"
+        @update:enhance-opacity="(v) => updateElement(grid.id, { enhanceOpacity: v })"
+        @unavailable-click="handleUnavailableClick"
+        @bridge-ready="(b) => setGridBridge(grid.id, b)"
+        @bounds-change="(r) => setDockRect(grid.id, r)"
+      />
+    </template>
 
-    <!-- Global MD3 Control Bar (with inline expandable Layers drawer + merged Add strip) -->
+    <!-- Global MD3 Control Bar (follows active cursor monitor in multi-monitor Overlay mode) -->
     <ControlBar
+      v-if="showControlBarOnMainViewport"
       v-model:layers-visible="layersVisible"
       v-model:always-on-top="alwaysOnTop"
       :backdrop-mode="backdropMode"
@@ -3152,6 +4385,7 @@ onBeforeUnmount(() => {
       :button-display-mode="buttonDisplayMode"
       :global-scale="globalScale"
       :show-unavailable-options="showUnavailableOptions"
+      :initial-bar-override="sharedBarPosition"
       @update:backdrop-mode="handleBackdropModeUpdate"
       @unavailable-click="handleUnavailableClick"
       @add-grid="() => addPenpaGrid()"
@@ -3168,12 +4402,13 @@ onBeforeUnmount(() => {
       @rename-element="renameTarget"
       @open-settings="openSettings()"
       @close-overlay="handleCloseOverlay"
+      @bar-state-change="(st) => saveBarPositionForMonitor(st, mainMonitor?.id)"
       @bounds-change="(r) => (barRect = r)"
     />
 
-    <!-- Settings Modal -->
+    <!-- Settings Modal (rendered on whichever monitor triggered it) -->
     <SettingsDialog
-      v-model:open="settingsOpen"
+      :open="settingsOpen && isModalOnMainViewport"
       v-model:custom-css-enabled="customCssEnabled"
       v-model:custom-css="customCss"
       v-model:button-display-mode="buttonDisplayMode"
@@ -3181,11 +4416,13 @@ onBeforeUnmount(() => {
       v-model:penpa-scale="penpaScale"
       v-model:penpa-blur-opacity="penpaBlurOpacity"
       v-model:overlay-full-canvas="overlayFullCanvas"
+      v-model:multi-monitor-enabled="multiMonitorEnabled"
       v-model:show-unavailable-options="showUnavailableOptions"
       :platform="platform"
       :highlight-key="highlightSettingKey"
       :highlight-tick="highlightSettingTick"
       :android-screenshot-status="androidScreenshotStatus"
+      @update:open="(v) => (settingsOpen = v)"
       @unavailable-click="handleUnavailableClick"
       @toggle-android-screenshot-composite="handleToggleAndroidScreenshotComposite"
       @request-android-all-files="handleRequestAndroidAllFiles"
@@ -3193,7 +4430,7 @@ onBeforeUnmount(() => {
 
     <!-- Unavailable Option Explanation Dialog -->
     <div
-      v-if="unavailableDialogInfo"
+      v-if="unavailableDialogInfo && isModalOnMainViewport"
       class="ac-prompt-backdrop ac-unavailable-backdrop"
       @pointerdown.self="unavailableReasonKey = null"
     >

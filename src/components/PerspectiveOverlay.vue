@@ -10,6 +10,7 @@ import {
 } from '../core/homography';
 import { WebGLPerspectiveRenderer, type BlendRenderMode } from '../core/webglOverlay';
 import type { GridBoundsNormalized, PenpaIframeBridge } from '../core/penpaBridge';
+import type { PenpaPointerOpts, PenpaPointerType, RemoteGridFrame } from '../core/worldSync';
 import {
   isElementPassThrough,
   isItemCropped,
@@ -29,6 +30,8 @@ import { formatMessage, messages } from '../core/i18n';
 const props = defineProps<{
   element: GridElement;
   bridge: PenpaIframeBridge | null;
+  remoteFrame?: RemoteGridFrame | null;
+  remoteBounds?: GridBoundsNormalized | null;
   hasDomBackdrop: boolean;
   viewportTransform?: WorldViewportTransform;
   worldBoundedToViewport: boolean;
@@ -43,6 +46,14 @@ const emit = defineEmits<{
   (e: 'select', id: string, additive: boolean): void;
   (e: 'focus-multi-member', id: string): void;
   (e: 'draw-interact', id: string): void;
+  (
+    e: 'remote-pointer',
+    id: string,
+    eventType: PenpaPointerType,
+    u: number,
+    v: number,
+    opts?: PenpaPointerOpts,
+  ): void;
   (e: 'move-start', id: string): void;
   (e: 'translate-by', id: string, dxWorld: number, dyWorld: number): void;
   (e: 'move-end'): void;
@@ -183,12 +194,23 @@ watch(
     props.element,
     props.hasDomBackdrop,
     props.cropDraft,
+    props.remoteFrame?.seq,
     effectiveViewport.value,
   ],
   () => {
     needsRender = true;
   },
   { deep: true },
+);
+
+watch(
+  () => props.remoteBounds,
+  (rb) => {
+    if (!rb || props.bridge?.isReady()) return;
+    currentBounds.value = rb;
+    needsRender = true;
+  },
+  { deep: true, immediate: true },
 );
 
 function refreshBoundsFromBridge() {
@@ -269,6 +291,10 @@ function renderLoop() {
       const uploaded = renderer.uploadSourceIfNeeded(srcCanvas, ver);
       if (uploaded) needsRender = true;
     }
+  } else if (props.remoteFrame) {
+    const rf = props.remoteFrame;
+    const uploaded = renderer.uploadRawRgbaIfNeeded(rf.rgba, rf.width, rf.height, rf.seq);
+    if (uploaded) needsRender = true;
   }
 
   if (!needsRender) return;
@@ -378,9 +404,11 @@ function onSurfacePointerDown(e: PointerEvent) {
     return;
   }
 
-  // Locked grid: draw in Penpa+
+  // Locked grid: draw in Penpa+ (local iframe bridge OR remote native dock via host relay)
   emit('draw-interact', props.element.id);
-  if (!props.bridge || !props.bridge.isReady()) return;
+  const hasLocalBridge = !!props.bridge?.isReady();
+  const hasRemoteSource = !hasLocalBridge && !!props.remoteFrame;
+  if (!hasLocalBridge && !hasRemoteSource) return;
   const uv = clientToPenpaUv(e.clientX, e.clientY);
   if (!uv) return;
 
@@ -389,34 +417,49 @@ function onSurfacePointerDown(e: PointerEvent) {
   try {
     (e.currentTarget as HTMLElement | null)?.setPointerCapture?.(e.pointerId);
   } catch {}
-  props.bridge.dispatchPointer('down', uv.u, uv.v, {
+  const ptrOpts: PenpaPointerOpts = {
     button: e.button,
     buttons: e.buttons,
     ctrlKey: e.ctrlKey,
     shiftKey: e.shiftKey,
     altKey: e.altKey,
     metaKey: e.metaKey,
-  });
+  };
+  if (hasLocalBridge) {
+    props.bridge!.dispatchPointer('down', uv.u, uv.v, ptrOpts);
+  } else {
+    emit('remote-pointer', props.element.id, 'down', uv.u, uv.v, ptrOpts);
+  }
 }
 
 function onSurfacePointerMove(e: PointerEvent) {
   if (effectivePassThrough.value || !props.element.locked) return;
-  if (!props.bridge || !props.bridge.isReady()) return;
+  const hasLocalBridge = !!props.bridge?.isReady();
+  const hasRemoteSource = !hasLocalBridge && !!props.remoteFrame;
+  if (!hasLocalBridge && !hasRemoteSource) return;
 
   const uv = clientToPenpaUv(e.clientX, e.clientY);
   if (!uv) {
-    if (activePointerDraw.value) props.bridge.dispatchPointer('out', 0, 0);
+    if (activePointerDraw.value) {
+      if (hasLocalBridge) props.bridge!.dispatchPointer('out', 0, 0);
+      else emit('remote-pointer', props.element.id, 'out', 0, 0);
+    }
     return;
   }
   if (activePointerDraw.value) e.preventDefault();
-  props.bridge.dispatchPointer('move', uv.u, uv.v, {
+  const ptrOpts: PenpaPointerOpts = {
     button: e.button,
     buttons: e.buttons,
     ctrlKey: e.ctrlKey,
     shiftKey: e.shiftKey,
     altKey: e.altKey,
     metaKey: e.metaKey,
-  });
+  };
+  if (hasLocalBridge) {
+    props.bridge!.dispatchPointer('move', uv.u, uv.v, ptrOpts);
+  } else if (activePointerDraw.value) {
+    emit('remote-pointer', props.element.id, 'move', uv.u, uv.v, ptrOpts);
+  }
 }
 
 function onSurfacePointerUp(e: PointerEvent) {
@@ -425,20 +468,28 @@ function onSurfacePointerUp(e: PointerEvent) {
   try {
     (e.currentTarget as HTMLElement | null)?.releasePointerCapture?.(e.pointerId);
   } catch {}
-  if (!props.bridge || !props.bridge.isReady()) return;
+  const hasLocalBridge = !!props.bridge?.isReady();
+  const hasRemoteSource = !hasLocalBridge && !!props.remoteFrame;
+  if (!hasLocalBridge && !hasRemoteSource) return;
 
   const uv = clientToPenpaUv(e.clientX, e.clientY);
   if (uv) {
-    props.bridge.dispatchPointer('up', uv.u, uv.v, {
+    const ptrOpts: PenpaPointerOpts = {
       button: e.button,
       buttons: e.buttons,
       ctrlKey: e.ctrlKey,
       shiftKey: e.shiftKey,
       altKey: e.altKey,
       metaKey: e.metaKey,
-    });
+    };
+    if (hasLocalBridge) {
+      props.bridge!.dispatchPointer('up', uv.u, uv.v, ptrOpts);
+    } else {
+      emit('remote-pointer', props.element.id, 'up', uv.u, uv.v, ptrOpts);
+    }
   } else {
-    props.bridge.dispatchPointer('out', 0, 0);
+    if (hasLocalBridge) props.bridge!.dispatchPointer('out', 0, 0);
+    else emit('remote-pointer', props.element.id, 'out', 0, 0);
   }
 }
 
@@ -447,7 +498,11 @@ function onSurfaceContextMenu(e: MouseEvent) {
   const uv = clientToPenpaUv(e.clientX, e.clientY);
   if (!uv) return;
   e.preventDefault();
-  props.bridge?.dispatchPointer('contextmenu', uv.u, uv.v, { button: 2, buttons: 0 });
+  if (props.bridge?.isReady()) {
+    props.bridge.dispatchPointer('contextmenu', uv.u, uv.v, { button: 2, buttons: 0 });
+  } else if (props.remoteFrame) {
+    emit('remote-pointer', props.element.id, 'contextmenu', uv.u, uv.v, { button: 2, buttons: 0 });
+  }
 }
 
 function onSurfaceDoubleClick(e: MouseEvent) {

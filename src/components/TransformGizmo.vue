@@ -80,6 +80,7 @@ const props = defineProps<{
   buttonDisplayMode: ButtonDisplayMode;
   cropDraft: CropDraft | null;
   gridBounds?: GridBoundsNormalized;
+  showSelectionToolbar?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -342,7 +343,7 @@ const hoverToolbarStyle = computed(() => {
 });
 
 function reportToolbarBounds() {
-  if (props.selectedTargets.length === 0 || !toolbarEl.value) {
+  if (props.showSelectionToolbar === false || props.selectedTargets.length === 0 || !toolbarEl.value) {
     emit('toolbar-bounds-change', { x: 0, y: 0, w: 0, h: 0 });
   } else {
     const r = toolbarEl.value.getBoundingClientRect();
@@ -364,6 +365,7 @@ watch(
     () => props.viewportTransform,
     () => props.cropDraft,
     () => props.buttonDisplayMode,
+    () => props.showSelectionToolbar,
   ],
   () => {
     requestAnimationFrame(reportToolbarBounds);
@@ -1376,7 +1378,7 @@ onBeforeUnmount(() => {
 
     <!-- Unified MD3 Floating Context Toolbar (Multi-Select / Group / Element / Crop / Locked) -->
     <div
-      v-if="(isMultiSelect || singleTarget) && floatingToolbarStyle"
+      v-if="showSelectionToolbar !== false && (isMultiSelect || singleTarget) && floatingToolbarStyle"
       ref="toolbarEl"
       class="ac-element-toolbar"
       :class="{ 'locked-toolbar': !isMultiSelect && isLocked }"

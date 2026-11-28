@@ -18,7 +18,8 @@ export type UnavailableReasonKey =
   | 'clickThroughUnavailable'
   | 'androidShotUnavailable'
   | 'dynamicColorUnavailable'
-  | 'penpaCloneUnsupported';
+  | 'penpaCloneUnsupported'
+  | 'multiMonitorUnavailable';
 
 const props = defineProps<{
   platform: RuntimePlatform;
@@ -34,6 +35,8 @@ const props = defineProps<{
   buttonDisplayMode: ButtonDisplayMode;
   globalScale: number;
   showUnavailableOptions: boolean;
+  initialBarOverride?: { xRatio: number; yRatio: number; compact: boolean } | null;
+  delegatePersistence?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -55,11 +58,12 @@ const emit = defineEmits<{
   (e: 'rename-element', id: string, label: string): void;
   (e: 'open-settings'): void;
   (e: 'close-overlay'): void;
+  (e: 'bar-state-change', state: { xRatio: number; yRatio: number; compact: boolean }): void;
   (e: 'bounds-change', rect: { x: number; y: number; w: number; h: number }): void;
 }>();
 
 const barEl = ref<HTMLElement | null>(null);
-const savedBar = loadPersistedState().bar;
+const savedBar = props.initialBarOverride ?? loadPersistedState().bar;
 const compact = ref(savedBar?.compact ?? false);
 const editingId = ref<string | null>(null);
 const editingValue = ref('');
@@ -173,13 +177,15 @@ function targetDockVisible(el: SelectableTarget): boolean {
 function persistBarState() {
   const vw = Math.max(1, window.innerWidth);
   const vh = Math.max(1, window.innerHeight);
-  patchPersistedState({
-    bar: {
-      xRatio: pos.value.x / vw,
-      yRatio: pos.value.y / vh,
-      compact: compact.value,
-    },
-  });
+  const next = {
+    xRatio: pos.value.x / vw,
+    yRatio: pos.value.y / vh,
+    compact: compact.value,
+  };
+  emit('bar-state-change', next);
+  if (!props.delegatePersistence) {
+    patchPersistedState({ bar: next });
+  }
 }
 
 function getSafeDragLimits() {
@@ -351,6 +357,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   finishBarDrag(false);
+  emit('bounds-change', { x: 0, y: 0, w: 0, h: 0 });
   barResizeObserver?.disconnect();
   window.removeEventListener('pointermove', onWindowBarPointerMove);
   window.removeEventListener('pointerup', onWindowBarPointerUp);

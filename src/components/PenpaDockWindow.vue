@@ -15,6 +15,7 @@ import MdSlider from './MdSlider.vue';
 const props = defineProps<{
   gridId: string;
   visible: boolean;
+  nativeWindowMode?: boolean;
   title?: string;
   label?: string;
   dockZIndex: number;
@@ -37,6 +38,10 @@ const emit = defineEmits<{
   (e: 'activate'): void;
   (e: 'rename', label: string): void;
   (e: 'dock-state-change', state: PersistedDockState): void;
+  (e: 'native-drag-start', logicalW: number, logicalH: number): void;
+  (e: 'native-drag-end'): void;
+  (e: 'native-move-delta', dxScreenCss: number, dyScreenCss: number): void;
+  (e: 'native-resize-to', logicalW: number, logicalH: number): void;
   (e: 'update:visible', value: boolean): void;
   (e: 'update:blendMode', value: BlendRenderMode): void;
   (e: 'update:boardOpacity', value: number): void;
@@ -295,6 +300,11 @@ function emitBounds() {
 }
 
 function clampPosition(isInitial = false) {
+  // Native floating window mode is sized & positioned directly by the OS window manager
+  if (props.nativeWindowMode) {
+    emitBounds();
+    return;
+  }
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const safe = safeAreaInsets.value;
@@ -328,10 +338,11 @@ let dragSourceEl: HTMLElement | null = null;
 let dragPointerType = 'mouse';
 let dragMoved = false;
 let dragGlobalHeld = false;
-let dragStart = { x: 0, y: 0, origX: 0, origY: 0, origW: 0, origH: 0 };
+let dragStart = { x: 0, y: 0, screenX: 0, screenY: 0, origX: 0, origY: 0, origW: 0, origH: 0 };
 
 function finishDockDrag(persist: boolean) {
   if (!dragMode) return;
+  const wasNativeMove = !!props.nativeWindowMode && dragMode === 'move' && dragMoved;
   const wasTouchTapOnHeader = dragMode === 'move' && dragPointerType === 'touch' && !dragMoved;
   const wasMoved = dragMoved || dragMode === 'resize';
   if (dragPointerId !== null) {
@@ -347,10 +358,13 @@ function finishDockDrag(persist: boolean) {
     dragGlobalHeld = false;
     endGlobalDrag();
   }
+  if (wasNativeMove) {
+    emit('native-drag-end');
+  }
   if (wasTouchTapOnHeader && !collapsed.value) {
     touchRenderBarPinned.value = !touchRenderBarPinned.value;
     if (!touchRenderBarPinned.value) blendMenuOpen.value = false;
-  } else if (persist && wasMoved) {
+  } else if (persist && wasMoved && !props.nativeWindowMode) {
     persistDockState();
   }
 }
@@ -368,6 +382,8 @@ function startMove(e: PointerEvent) {
   dragStart = {
     x: e.clientX,
     y: e.clientY,
+    screenX: e.screenX,
+    screenY: e.screenY,
     origX: pos.value.x,
     origY: pos.value.y,
     origW: size.value.w,
@@ -386,6 +402,8 @@ function startResize(e: PointerEvent) {
   dragStart = {
     x: e.clientX,
     y: e.clientY,
+    screenX: e.screenX,
+    screenY: e.screenY,
     origX: pos.value.x,
     origY: pos.value.y,
     origW: size.value.w,
@@ -398,11 +416,8 @@ function startResize(e: PointerEvent) {
 
 function onDragMove(e: PointerEvent) {
   if (!dragMode || (dragPointerId !== null && e.pointerId !== dragPointerId)) return;
-  const safe = safeAreaInsets.value;
-  const minX = safe.left + 4;
-  const minY = safe.top + 4;
-  const dx = e.clientX - dragStart.x;
-  const dy = e.clientY - dragStart.y;
+  const dx = props.nativeWindowMode ? e.screenX - dragStart.screenX : e.clientX - dragStart.x;
+  const dy = props.nativeWindowMode ? e.screenY - dragStart.screenY : e.clientY - dragStart.y;
   if (dragMode === 'move' && !dragMoved) {
     if (Math.hypot(dx, dy) < 4) return;
     dragMoved = true;
@@ -412,8 +427,32 @@ function onDragMove(e: PointerEvent) {
       dragGlobalHeld = true;
       beginGlobalDrag();
     }
+    if (props.nativeWindowMode) {
+      emit(
+        'native-drag-start',
+        collapsed.value ? collapsedW.value : size.value.w,
+        collapsed.value ? collapsedH.value : size.value.h,
+      );
+      return;
+    }
   }
   e.preventDefault();
+  if (props.nativeWindowMode) {
+    if (dragMode === 'move') {
+      // Driven natively in Rust via physical cursor polling once native-drag-start fires
+      return;
+    } else {
+      const nextW = Math.max(260, Math.min(1200, Math.round(dragStart.origW + dx)));
+      const nextH = Math.max(160, Math.min(1000, Math.round(dragStart.origH + dy)));
+      size.value.w = nextW;
+      size.value.h = nextH;
+      emit('native-resize-to', nextW, nextH);
+    }
+    return;
+  }
+  const safe = safeAreaInsets.value;
+  const minX = safe.left + 4;
+  const minY = safe.top + 4;
   if (dragMode === 'move') {
     const curW = collapsed.value ? collapsedW.value : size.value.w;
     const maxX = Math.max(minX, window.innerWidth - safe.right - Math.min(curW, 100));
@@ -449,6 +488,13 @@ function onWindowDockBlur() {
 function toggleCollapsed() {
   collapsed.value = !collapsed.value;
   if (collapsed.value) closeRenderBarMenus();
+  if (props.nativeWindowMode) {
+    emit(
+      'native-resize-to',
+      collapsed.value ? collapsedW.value : size.value.w,
+      collapsed.value ? collapsedH.value : size.value.h,
+    );
+  }
   emitBounds();
   persistDockState();
 }
@@ -530,16 +576,33 @@ onBeforeUnmount(() => {
   <section
     ref="dockEl"
     class="ac-dock"
-    :class="{ collapsed, hidden: !visible, animating: !isInteracting, focused: isFocusedDock, 'linked-highlight': linkedHighlight }"
-    :data-grid-id="gridId"
-    :style="{
-      left: `${pos.x}px`,
-      top: `${pos.y}px`,
-      width: collapsed ? `${collapsedW}px` : `${size.w}px`,
-      height: collapsed ? `${collapsedH}px` : `${size.h}px`,
-      opacity: effectiveDockOpacity,
-      zIndex: dockZIndex,
+    :class="{
+      collapsed,
+      hidden: !visible && !nativeWindowMode,
+      'native-window': !!nativeWindowMode,
+      animating: !isInteracting && !nativeWindowMode,
+      focused: isFocusedDock,
+      'linked-highlight': linkedHighlight,
     }"
+    :data-grid-id="gridId"
+    :style="
+      nativeWindowMode
+        ? {
+            left: '4px',
+            top: '4px',
+            right: '4px',
+            bottom: '4px',
+            opacity: effectiveDockOpacity,
+          }
+        : {
+            left: `${pos.x}px`,
+            top: `${pos.y}px`,
+            width: collapsed ? `${collapsedW}px` : `${size.w}px`,
+            height: collapsed ? `${collapsedH}px` : `${size.h}px`,
+            opacity: effectiveDockOpacity,
+            zIndex: dockZIndex,
+          }
+    "
     @pointerenter="onDockPointerEnter"
     @pointerleave="onDockPointerLeave"
     @pointerdown="onDockPointerDown"
