@@ -1439,6 +1439,7 @@ fn spawn_macos_overlay_poller(window: WebviewWindow, state: Arc<Mutex<HitState>>
 pub fn run() {
     let shared_state = Arc::new(Mutex::new(HitState {
         is_overlay_mode: true,
+        always_on_top: true,
         window_theme_mode: "auto".to_string(),
         window_is_dark: true,
         auto_passthrough: true,
@@ -1472,7 +1473,7 @@ pub fn run() {
                 let _ = window.set_shadow(false);
                 let _ = window.set_maximizable(false);
                 let _ = window.set_resizable(false);
-                let _ = window.set_always_on_top(false);
+                let _ = window.set_always_on_top(true);
                 let _ = window.set_ignore_cursor_events(false);
                 fit_overlay_window_to_monitor(&window);
                 emit_safe_area_insets(&window, true);
